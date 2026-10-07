@@ -188,6 +188,11 @@ import {
   threadActionRequiresOperate,
 } from "./threadActionMenu.logic";
 import {
+  readThreadHandoffSupported,
+  readThreadHandoffTargets,
+  startThreadHandoff,
+} from "./threadHandoffMenu";
+import {
   animateSidebarLayoutChanges,
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
@@ -4224,6 +4229,12 @@ export default function Sidebar() {
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        // Only an environment that can move threads makes the menu wait for targets.
+        const handoffTargets =
+          readThreadHandoffSupported(thread.environmentId) &&
+          (thread.handoff == null || thread.handoff.state === "failed")
+            ? await readThreadHandoffTargets(thread.environmentId, thread.id)
+            : [];
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
@@ -4253,12 +4264,21 @@ export default function Sidebar() {
                 titleRegeneration: supportsTitleRegeneration,
               },
               snoozePresets,
+              handoffTargets,
             }),
             position,
           ),
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        if (clicked.value?.startsWith("continue-on:")) {
+          await startThreadHandoff(
+            thread.environmentId,
+            thread.id,
+            clicked.value.slice("continue-on:".length),
+          );
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
