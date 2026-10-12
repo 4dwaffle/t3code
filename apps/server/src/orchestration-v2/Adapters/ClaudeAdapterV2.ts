@@ -3534,6 +3534,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         );
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        // Claude reads a steer only once the running tool calls return. Until
+        // the result that closes the steered segment, root-thread commands
+        // move to the background, as with Ctrl+B in Claude Code: the steer is
+        // read now and nothing is stopped.
+        const steersAwaitingTools = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        const backgroundForSteer = (query: ClaudeAgentSdkQuerySession, toolUseId: string) =>
+          query
+            .backgroundTasks(toolUseId)
+            .pipe(
+              Effect.timeout("5 seconds"),
+              Effect.ignore({ log: "Warn" }),
+              Effect.forkIn(sessionScope),
+            );
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
@@ -6048,6 +6061,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly result?: SDKResultMessage;
         }) {
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
+          // A turn can end without a result, after an interrupt or a query exit.
+          yield* Ref.update(steersAwaitingTools, (current) => {
+            const next = new Set(current);
+            next.delete(input.context.providerTurnId);
+            return next;
+          });
           if (input.status !== "completed") {
             const liveQuery = yield* Ref.get(queryContext);
             for (const [taskId, subagent] of yield* Ref.get(sessionSubagentsByTaskId)) {
@@ -6832,6 +6851,25 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
 
           const message = input.message;
+          // A command too new to move when the steer arrived moves once its
+          // task registers, about three seconds in.
+          if (
+            message.type === "system" &&
+            message.subtype === "task_started" &&
+            message.is_backgrounded !== true &&
+            message.tool_use_id !== undefined
+          ) {
+            const context = yield* Ref.get(activeTurn);
+            const toolCall = context?.toolCalls.get(message.tool_use_id);
+            if (
+              context !== null &&
+              toolCall !== undefined &&
+              toolCall.toolName !== "Agent" &&
+              (yield* Ref.get(steersAwaitingTools)).has(context.providerTurnId)
+            ) {
+              yield* backgroundForSteer(input.query, message.tool_use_id);
+            }
+          }
           // Before any routing: a Monitor started during an idle wake turn
           // reports its task before the drain replays the tool call.
           yield* trackClaudeMonitorCalls(message);
@@ -7835,6 +7873,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const completedAt = yield* DateTime.now;
             const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
             const wasSteered = (yield* Ref.get(steeredTurns)).has(context.providerTurnId);
+            yield* Ref.update(steersAwaitingTools, (current) => {
+              const next = new Set(current);
+              next.delete(context.providerTurnId);
+              return next;
+            });
             if (!interrupted && wasSteered && isClaudeActiveSteeringAbortResult(message)) {
               context.steeredSegmentUsage.push(message.usage);
               return;
@@ -9049,24 +9092,44 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               skillNames: yield* userInvocableSkillNames(currentTurn.input.runtimePolicy.cwd),
             });
             yield* backgroundForegroundSubagents(existing);
-            // The turn can end while the moves are answered. A steer offered
-            // then would start a new turn the orchestrator never asked for, so
-            // the steer fails and the orchestrator starts the follow-up turn.
-            if (
-              (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
-              (yield* Ref.get(queryContext)) !== existing
-            ) {
-              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: CLAUDE_PROVIDER,
-                detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
-              });
+            // Under the lock that orders SDK messages, so no frame is handled
+            // between the check and the offer: the steer's abort result and any
+            // task_started come after the mark, and a steer Claude never
+            // received marks nothing.
+            const running = yield* sdkMessageLock.withPermits(1)(
+              Effect.gen(function* () {
+                // The turn can end while the moves are answered or while this
+                // waits for the lock. A steer offered then would start a new
+                // turn the orchestrator never asked for, so the steer fails and
+                // the orchestrator starts the follow-up turn.
+                if (
+                  (yield* Ref.get(activeTurn))?.providerTurnId !== turnInput.providerTurnId ||
+                  (yield* Ref.get(queryContext)) !== existing
+                ) {
+                  return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CLAUDE_PROVIDER,
+                    detail: `Claude provider turn ${turnInput.providerTurnId} ended before the steer was sent.`,
+                  });
+                }
+                yield* Ref.update(steeredTurns, (current) => {
+                  const next = new Set(current);
+                  next.add(turnInput.providerTurnId);
+                  return next;
+                });
+                yield* existing.query.offer(userMessage);
+                yield* Ref.update(steersAwaitingTools, (current) =>
+                  new Set(current).add(turnInput.providerTurnId),
+                );
+                // Only commands running now: ones Claude starts after reading
+                // the steer stay in the foreground. Subagents moved above.
+                return [...currentTurn.toolCalls.values()].filter(
+                  (toolCall) => toolCall.toolName !== "Agent",
+                );
+              }),
+            );
+            for (const toolCall of running) {
+              yield* backgroundForSteer(existing.query, toolCall.nativeItemId);
             }
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.add(turnInput.providerTurnId);
-              return next;
-            });
-            yield* existing.query.offer(userMessage);
           },
           (effect, turnInput) =>
             effect.pipe(
