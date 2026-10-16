@@ -601,6 +601,17 @@ function threadGitMenuDefinition(
         subtitle: "Turn diffs and worktree changes",
         onPress: model.openReview,
       },
+      ...(props.onContinueOn
+        ? [
+            {
+              id: "git-continue-on",
+              title: "Continue on…",
+              icon: "arrow.up.right",
+              subtitle: "Move this thread and its work to a linked environment",
+              onPress: props.onContinueOn,
+            },
+          ]
+        : []),
       {
         id: "git-more",
         title: "More",
