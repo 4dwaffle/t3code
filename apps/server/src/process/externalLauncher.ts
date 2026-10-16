@@ -14,6 +14,7 @@ import {
   ExternalLauncherEditorSpawnError,
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
+  ExternalLauncherUnsupportedTargetError,
   type EditorId,
   type FileManagerRevealKind,
   type LaunchEditorInput,
@@ -53,6 +54,7 @@ export {
   ExternalLauncherEditorSpawnError,
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
+  ExternalLauncherUnsupportedTargetError,
 } from "@t3tools/contracts";
 export type { LaunchEditorInput };
 interface EditorLaunch {
@@ -60,6 +62,8 @@ interface EditorLaunch {
   readonly target: string;
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+  /** Defaults to true. See WINDOWS_POWERSHELL_DETACHED. */
+  readonly detached?: boolean;
 }
 
 interface ProcessLaunch {
@@ -74,6 +78,14 @@ interface TargetPathAndPosition {
   readonly column: Option.Option<string>;
 }
 
+/**
+ * Windows command shims (`code.cmd`) forward arguments through `%*`, which
+ * cmd.exe parses a second time after the first escaping layer is gone: a
+ * line break ends the command there, and a double quote closes the quoting
+ * that keeps `&` or `|` literal. Neither can occur in a Windows path.
+ */
+// oxlint-disable-next-line no-control-regex
+const WINDOWS_SHIM_UNSAFE_ARG_PATTERN = /[\u0000-\u001f\u007f"]/;
 const TARGET_WITH_POSITION_PATTERN = /^(.*?):(\d+)(?::(\d+))?$/;
 const POWERSHELL_ARGUMENTS_PREFIX = [
   "-NoProfile",
@@ -82,6 +94,12 @@ const POWERSHELL_ARGUMENTS_PREFIX = [
   "Bypass",
   "-EncodedCommand",
 ] as const;
+
+// Windows PowerShell started with DETACHED_PROCESS exits 0 without running its
+// command, so native Windows launches through it stay attached. The child is
+// still unref'd with ignored stdio, so nothing waits on it. WSL interop
+// PowerShell starts from a Linux process and keeps the detached launch.
+const WINDOWS_POWERSHELL_DETACHED = false;
 
 const DETACHED_IGNORE_STDIO_OPTIONS = {
   detached: true,
@@ -209,7 +227,11 @@ function shouldUseWindowsHostFromWsl(
   );
 }
 
-function resolveWindowsBrowserLaunch(target: string, command: string): ProcessLaunch {
+function resolveWindowsBrowserLaunch(
+  target: string,
+  command: string,
+  detached: boolean,
+): ProcessLaunch {
   const encodedCommand = encodeUtf16LeBase64(
     `$ProgressPreference = 'SilentlyContinue'; Start ${escapePowerShellStringLiteral(target)}`,
   );
@@ -217,7 +239,7 @@ function resolveWindowsBrowserLaunch(target: string, command: string): ProcessLa
     command,
     args: [...POWERSHELL_ARGUMENTS_PREFIX, encodedCommand],
     options: {
-      detached: true,
+      detached,
       shell: false,
       stdin: "ignore",
       stdout: "ignore",
@@ -397,11 +419,15 @@ function buildBrowserLaunch(
   }
 
   if (platform === "win32") {
-    return resolveWindowsBrowserLaunch(target, resolvePowerShellPath(env));
+    return resolveWindowsBrowserLaunch(
+      target,
+      resolvePowerShellPath(env),
+      WINDOWS_POWERSHELL_DETACHED,
+    );
   }
 
   if (shouldUseWindowsHostFromWsl(platform, env)) {
-    return resolveWindowsBrowserLaunch(target, resolveWslPowerShellPath());
+    return resolveWindowsBrowserLaunch(target, resolveWslPowerShellPath(), true);
   }
 
   return {
@@ -578,14 +604,8 @@ const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
  * when the path has spaces and Explorer misparses it, silently opening a
  * fallback folder. A single `-ArgumentList` string in Windows PowerShell 5.1
  * reaches the child's command line verbatim, preserving the raw switch.
- *
- * Exported so the Windows smoke test can drive the identical source through a
- * real PowerShell against a recording stub instead of Explorer.
  */
-export function buildFileExplorerRevealPowerShellSource(
-  explorerCommand: string,
-  target: string,
-): string {
+function buildFileExplorerRevealPowerShellSource(explorerCommand: string, target: string): string {
   return `$ProgressPreference = 'SilentlyContinue'; Start-Process ${escapePowerShellStringLiteral(explorerCommand)} -ArgumentList ('/select,"' + ${escapePowerShellStringLiteral(target)} + '"')`;
 }
 
@@ -626,11 +646,14 @@ const resolveFileManagerRevealLaunch = Effect.fn("resolveFileManagerRevealLaunch
   }
 
   if (platform === "win32") {
-    return fileExplorerRevealLaunch(
-      target,
-      normalizeWindowsFileManagerPath(target),
-      resolvePowerShellPath(env),
-    );
+    return {
+      ...fileExplorerRevealLaunch(
+        target,
+        normalizeWindowsFileManagerPath(target),
+        resolvePowerShellPath(env),
+      ),
+      detached: WINDOWS_POWERSHELL_DETACHED,
+    };
   }
 
   if (
@@ -726,12 +749,15 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
   }
 
   const spawnCommand = yield* resolveSpawnCommand(launch.command, launch.args, { env });
+  if (spawnCommand.shell && launch.args.some((arg) => WINDOWS_SHIM_UNSAFE_ARG_PATTERN.test(arg))) {
+    return yield* new ExternalLauncherUnsupportedTargetError({ editor: launch.editor });
+  }
   yield* launchAndUnref(
     {
       command: spawnCommand.command,
       args: spawnCommand.args,
       options: {
-        detached: true,
+        detached: launch.detached ?? true,
         shell: spawnCommand.shell,
         stdin: "ignore",
         stdout: "ignore",

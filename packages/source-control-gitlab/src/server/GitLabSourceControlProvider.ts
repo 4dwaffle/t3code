@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -25,7 +26,7 @@ const decodeLinkSubject = Schema.decodeUnknownEffect(
 
 function toChangeRequest(summary: GitLabCli.GitLabMergeRequestSummary): ChangeRequest {
   return {
-    provider: "gitlab",
+    provider: SourceControlProviderKind.make("gitlab"),
     number: summary.number,
     title: summary.title,
     url: summary.url,
@@ -79,18 +80,23 @@ function parseGitLabAuth(input: SourceControlAuthProbeInput) {
   });
 }
 
+// What glab prints when it holds no login for the host, across its 1.x releases.
+const GITLAB_HOST_NOT_LOGGED_IN_PATTERN =
+  /\bnot (?:been )?authenticated with glab\b|\bno gitlab instances? ha(?:s|ve) been authenticated\b/iu;
+
 function refineUnknownGitLabRemote(input: SourceControlUnknownRemoteRefinementInput) {
   const host = input.context.provider.name.toLowerCase();
-  const authenticated = parseGitLabAuthStatusHosts(combinedAuthOutput(input.auth)).some(
+  const output = combinedAuthOutput(input.auth);
+  const authenticated = parseGitLabAuthStatusHosts(output).some(
     (entry) => entry.account !== null && entry.host === host,
   );
 
   if (!authenticated) {
-    return null;
+    return GITLAB_HOST_NOT_LOGGED_IN_PATTERN.test(output) ? null : undefined;
   }
 
   return {
-    kind: "gitlab",
+    kind: SourceControlProviderKind.make("gitlab"),
     name: "GitLab Self-Hosted",
     baseUrl: input.context.provider.baseUrl,
   } as const;
@@ -98,11 +104,17 @@ function refineUnknownGitLabRemote(input: SourceControlUnknownRemoteRefinementIn
 
 export const discovery = {
   type: "cli",
-  kind: "gitlab",
+  kind: SourceControlProviderKind.make("gitlab"),
   label: "GitLab",
   executable: "glab",
   versionArgs: ["--version"],
   authArgs: ["auth", "status"],
+  // glab matches its configured hosts by exact name, so ask with the remote's own spelling.
+  remoteRefinementArgs: ({ provider, remoteUrl }) => {
+    const at = remoteUrl.toLowerCase().indexOf(provider.name.toLowerCase());
+    const host = at < 0 ? provider.name : remoteUrl.slice(at, at + provider.name.length);
+    return ["auth", "status", "--hostname", host];
+  },
   parseAuth: parseGitLabAuth,
   refineUnknownRemote: refineUnknownGitLabRemote,
   installHint:
@@ -127,7 +139,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (cause) =>
             new SourceControlProviderError({
-              provider: "gitlab",
+              provider: SourceControlProviderKind.make("gitlab"),
               operation: "resolveLink",
               cwd: input.cwd,
               detail: "The linked subject could not be read.",
@@ -139,7 +151,7 @@ export const make = Effect.gen(function* () {
       Effect.mapError(
         (cause) =>
           new SourceControlProviderError({
-            provider: "gitlab",
+            provider: SourceControlProviderKind.make("gitlab"),
             operation: "resolveLink.decode",
             cwd: input.cwd,
             detail: "The linked subject could not be read.",
@@ -151,7 +163,7 @@ export const make = Effect.gen(function* () {
   });
 
   return SourceControlProvider.SourceControlProvider.of({
-    kind: "gitlab",
+    kind: SourceControlProviderKind.make("gitlab"),
     resolveLink: (input) => {
       // Automatic enrichment must not send ambient CLI credentials to a host from message text.
       if (input.url.host !== "gitlab.com") return undefined;
@@ -179,7 +191,7 @@ export const make = Effect.gen(function* () {
           Effect.mapError(
             (error) =>
               new SourceControlProviderError({
-                provider: "gitlab",
+                provider: SourceControlProviderKind.make("gitlab"),
                 operation: "listChangeRequests",
                 command: error.command,
                 cwd: input.cwd,
@@ -198,7 +210,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (error) =>
             new SourceControlProviderError({
-              provider: "gitlab",
+              provider: SourceControlProviderKind.make("gitlab"),
               operation: "getChangeRequest",
               command: error.command,
               cwd: input.cwd,
@@ -226,7 +238,7 @@ export const make = Effect.gen(function* () {
           Effect.mapError(
             (error) =>
               new SourceControlProviderError({
-                provider: "gitlab",
+                provider: SourceControlProviderKind.make("gitlab"),
                 operation: "createChangeRequest",
                 command: error.command,
                 cwd: input.cwd,
@@ -244,7 +256,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (error) =>
             new SourceControlProviderError({
-              provider: "gitlab",
+              provider: SourceControlProviderKind.make("gitlab"),
               operation: "getRepositoryCloneUrls",
               command: error.command,
               cwd: input.cwd,
@@ -261,7 +273,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (error) =>
             new SourceControlProviderError({
-              provider: "gitlab",
+              provider: SourceControlProviderKind.make("gitlab"),
               operation: "createRepository",
               command: error.command,
               cwd: input.cwd,
@@ -278,7 +290,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (error) =>
             new SourceControlProviderError({
-              provider: "gitlab",
+              provider: SourceControlProviderKind.make("gitlab"),
               operation: "getDefaultBranch",
               command: error.command,
               cwd: input.cwd,
@@ -292,7 +304,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (error) =>
             new SourceControlProviderError({
-              provider: "gitlab",
+              provider: SourceControlProviderKind.make("gitlab"),
               operation: "checkoutChangeRequest",
               command: error.command,
               cwd: input.cwd,

@@ -31,6 +31,9 @@ const EMPTY_THREAD_SHELL_ATOM = Atom.make<EnvironmentThreadShell | null>(null).p
 const EMPTY_SERVER_CONFIG_ATOM = Atom.make<ServerConfig | null>(null).pipe(
   Atom.withLabel("mobile-server-config:empty"),
 );
+const EMPTY_THREAD_ATOM = Atom.make<EnvironmentThread | null>(null).pipe(
+  Atom.withLabel("mobile-thread:empty"),
+);
 const EMPTY_THREAD_TITLES: ReadonlyMap<ThreadId, string> = new Map();
 const EMPTY_THREAD_TITLES_ATOM = Atom.make(EMPTY_THREAD_TITLES).pipe(
   Atom.withLabel("mobile-thread-titles:empty"),
@@ -98,6 +101,10 @@ export function useThreadShell(ref: ScopedThreadRef | null): EnvironmentThreadSh
   );
 }
 
+export function useChildThreadInputs(ref: ScopedThreadRef) {
+  return useAtomValue(environmentThreadShells.childThreadInputsAtom(ref));
+}
+
 /** `markdown` with each thread link labeled by the thread's current title in `environmentId`. */
 export function useLiveThreadLinkLabels(markdown: string, environmentId: EnvironmentId): string {
   const titles = useAtomValue(
@@ -129,6 +136,9 @@ export function useServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
 const selectReportedModelSelection = (thread: EnvironmentThread | null) =>
   thread === null ? null : deriveReportedModelSelection(thread.projection);
 
-export function useThreadReportedModelSelection(ref: ScopedThreadRef) {
-  return useAtomValue(environmentThreadDetails.threadAtom(ref), selectReportedModelSelection);
+export function useThreadReportedModelSelection(ref: ScopedThreadRef | null) {
+  return useAtomValue(
+    ref === null ? EMPTY_THREAD_ATOM : environmentThreadDetails.threadAtom(ref),
+    selectReportedModelSelection,
+  );
 }

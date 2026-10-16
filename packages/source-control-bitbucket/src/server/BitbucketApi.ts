@@ -7,10 +7,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import {
-  DEFAULT_SERVER_SETTINGS,
   NonNegativeInt,
   TrimmedNonEmptyString,
-  type BitbucketSettings,
   type SourceControlProviderAuth,
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryVisibility,
@@ -31,6 +29,9 @@ import {
 import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
+import { readSourceControlHostSettings } from "@t3tools/source-control-core/client/definition";
+
+import * as BitbucketClient from "../client/definition.ts";
 import { retryAtFromHeader } from "@t3tools/source-control-core/server/SourceControlRateLimit";
 
 const DEFAULT_API_BASE_URL = "https://api.bitbucket.org/2.0";
@@ -38,6 +39,8 @@ const DEFAULT_API_BASE_URL = "https://api.bitbucket.org/2.0";
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 /** Bitbucket redirects a diff once; this leaves room without following a chain forever. */
 const MAX_REDIRECTS = 3;
+/** A single API operation must bound both header delivery and body consumption. */
+const BITBUCKET_API_REQUEST_TIMEOUT = "30 seconds";
 
 const BitbucketApiEnvConfig = Config.all({
   baseUrl: Config.String("T3CODE_BITBUCKET_API_BASE_URL").pipe(
@@ -569,7 +572,7 @@ function credentialFrom(input: {
  * stay as a fallback. Within each source the access token wins.
  */
 function resolveCredential(
-  settings: BitbucketSettings,
+  settings: BitbucketClient.BitbucketSettings,
   env: Config.Success<typeof BitbucketApiEnvConfig>,
 ): BitbucketCredential | null {
   return (
@@ -664,12 +667,24 @@ export const make = Effect.gen(function* () {
 
   // Read on every request so credentials saved in settings apply without a restart.
   const currentCredential = host.settings.get.pipe(
-    Effect.map((settings) => resolveCredential(settings.bitbucket, config)),
+    Effect.map((settings) =>
+      resolveCredential(
+        readSourceControlHostSettings(
+          BitbucketClient.settings,
+          settings.sourceControlHosts[BitbucketClient.definition.kind],
+        ),
+        config,
+      ),
+    ),
     Effect.catch((error) =>
       // No cause: a settings decode error can quote a hand-edited token.
       Effect.logWarning("failed to read Bitbucket credentials from settings", {
         operation: error.operation,
-      }).pipe(Effect.as(resolveCredential(DEFAULT_SERVER_SETTINGS.bitbucket, config))),
+      }).pipe(
+        Effect.as(
+          resolveCredential(readSourceControlHostSettings(BitbucketClient.settings, {}), config),
+        ),
+      ),
     ),
   );
 
@@ -719,6 +734,10 @@ export const make = Effect.gen(function* () {
           }),
       ),
       Effect.flatMap((response) => decodeResponse(operation, schema, response)),
+      Effect.timeout(BITBUCKET_API_REQUEST_TIMEOUT),
+      Effect.catchTags({
+        TimeoutError: (cause) => Effect.fail(new BitbucketRequestError({ operation, cause })),
+      }),
     );
 
   const resolveRepository = Effect.fn("BitbucketApi.resolveRepository")(function* (input: {
@@ -955,6 +974,12 @@ export const make = Effect.gen(function* () {
           orElse: (failed) => responseError("request", failed),
         })(response),
       ),
+      // This also caps redirect hops: no request can finish headers then stall its body forever.
+      Effect.timeout(BITBUCKET_API_REQUEST_TIMEOUT),
+      Effect.catchTags({
+        TimeoutError: (cause) =>
+          Effect.fail(new BitbucketRequestError({ operation: "request", cause })),
+      }),
     );
 
   return BitbucketApi.of({

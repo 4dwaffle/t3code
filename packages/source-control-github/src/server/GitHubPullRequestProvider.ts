@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import { removeAgentCredits } from "@t3tools/source-control-core/server/mergeMessage";
 import * as Effect from "effect/Effect";
 import type {
@@ -19,23 +20,14 @@ import {
   type ProviderRepositoryRef,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
 import type { GitHubViewerAccess, GitHubWorkflowRunApproval } from "./gitHubPullRequestJson.ts";
+import { definition } from "../client/definition.ts";
 
 const CAPABILITIES: PullRequestCapabilities = {
   diff: true,
   comment: true,
-  actions: [
-    "merge",
-    "ready",
-    "draft",
-    "close",
-    "reopen",
-    "update-branch",
-    "enable-auto-merge",
-    "disable-auto-merge",
-    "revert",
-    "approve-workflows",
-  ],
+  actions: [...definition.changeRequestActions],
   mergeMethods: ["merge", "squash", "rebase"],
+  deleteBranch: true,
   updateMethods: ["merge", "rebase"],
   search: true,
   reactions: true,
@@ -74,6 +66,7 @@ export function gitHubViewerPermissions(access: GitHubViewerAccess): PullRequest
   return {
     ...(access.canWrite ? { stackRebase: true } : {}),
     actions: [
+      ...(access.canDeleteBranch === true ? (["delete-branch"] as const) : []),
       // Arming a merge and taking the arming back are the merge, deferred: whoever may not
       // merge here may not leave an instruction to merge later either.
       ...(access.canWrite
@@ -202,7 +195,7 @@ export const make = Effect.gen(function* () {
 
   const fail = (operation: string) => (error: GitHubPullRequestApi.GitHubPullRequestApiError) =>
     new PullRequestProviderError({
-      provider: "github",
+      provider: SourceControlProviderKind.make("github"),
       operation,
       ...gitHubProviderFailure(error),
       detail: error.message,
@@ -261,7 +254,7 @@ export const make = Effect.gen(function* () {
     );
 
   const provider: PullRequestProviderApi = {
-    kind: "github",
+    kind: SourceControlProviderKind.make("github"),
     capabilities: CAPABILITIES,
     mergeMessageRewrite: removeAgentCredits,
     getRoutingIdentity: (input) =>
@@ -389,11 +382,14 @@ export const make = Effect.gen(function* () {
         Effect.map((pullRequest): ProviderChangeRequestDetail => ({
           ...pullRequest,
           author: withAvatar(pullRequest.author, new Map<string, string>(), input.host),
-          reviewers: pullRequest.reviewRequestLogins.map((login) => ({
-            login,
-            name: null,
-            avatarUrl: null,
-          })),
+          reviewers: [
+            ...pullRequest.reviewRequestLogins.map((login) => ({
+              login,
+              name: null,
+              avatarUrl: null,
+            })),
+            ...pullRequest.reviewRequestTeams,
+          ],
           mergeCapabilities: pullRequest.viewerAccess.mergeCapabilities,
           viewerPermissions: gitHubViewerPermissions({
             ...pullRequest.viewerAccess,

@@ -3,9 +3,11 @@ import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay
 import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
 import * as Semaphore from "effect/Semaphore";
+import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
+import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
@@ -31,6 +33,7 @@ import * as ServerHttp from "./http.ts";
 import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
 import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
+import * as AgentScopeLive from "./process/agentScope.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import * as PullRequestHttp from "./pullRequest/http.ts";
@@ -38,6 +41,8 @@ import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderR
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as PullRequestFilesViewed from "./persistence/PullRequestFilesViewed.ts";
+import * as PullRequestReviewGuides from "./persistence/PullRequestReviewGuides.ts";
+import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ProviderEventIngestor from "./orchestration-v2/ProviderEventIngestor.ts";
@@ -55,6 +60,7 @@ import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
+import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -72,6 +78,7 @@ import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as ServerOwnership from "./serverOwnership.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -165,12 +172,10 @@ import * as ResourceCleanupService from "./orchestration-v2/ResourceCleanupServi
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
+import * as EventStoreV2 from "./orchestration-v2/EventStore.ts";
+import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
-import {
-  clearPersistedServerRuntimeState,
-  makePersistedServerRuntimeState,
-  persistServerRuntimeState,
-} from "./serverRuntimeState.ts";
+import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as NetService from "@t3tools/shared/Net";
@@ -373,6 +378,7 @@ const layerProjectCloneTracker = ProjectCloneTracker.layer.pipe(
 );
 
 const layerReview = ReviewService.layer.pipe(
+  Layer.provide(ProjectStore.layer),
   Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(layerVcsDriverRegistry),
 );
@@ -547,8 +553,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
-  Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
-    Layer.provide(ProjectionStoreV2.layer),
+  StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  DatabaseStorage.layer.pipe(
+    Layer.provide(ProjectionMaintenance.layer),
+    Layer.provide(
+      Layer.merge(EventStoreV2.layerFromOrchestrationEventStore, ProjectionStoreV2.layer),
+    ),
   ),
   layerThreadPullRequestWorker,
   Layer.effectDiscard(
@@ -571,11 +581,21 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     Layer.provide(layerPullRequestService),
     Layer.provide(ProjectionStoreV2.layer),
   ),
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* DelegatedTaskQuestionReactor.DelegatedTaskQuestionReactor;
+      yield* service.start();
+    }),
+  ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   // Subscribes to `account.rate-limits.updated` so usage bars track live
   // telemetry instead of waiting for the next status probe.
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
+  // Catches overrides left behind by a project deleted before this cleanup
+  // existed, or by a cleanup write that failed. See ProjectService.delete
+  // for the normal (on-delete) path.
+  Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),
@@ -717,8 +737,13 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
 ).pipe(
+  // Guides read through the same pull request service as every other surface.
+  Layer.provide(
+    PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
+  ),
   // Both transports consume the same service instance, so caches single-flight across clients
-  // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
+  // and mutations observed on WebSocket invalidate patches subsequently read over HTTP. Provided
+  // after the guide service so it reaches that too.
   Layer.provide(layerPullRequestService),
   // The stream route and the WebSocket RPCs share one browser.
   Layer.provide(ServerBrowser.layer.pipe(Layer.provide(DesktopBrowserChannel.layer))),
@@ -734,6 +759,8 @@ const layerMakeRoutes = Layer.mergeAll(
 const layerMakeServer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    // Before anything opens the database: one server per T3 home.
+    const ownership = yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath);
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const layerActivation = Layer.succeed(ServerActivation.ServerActivation, awaitActivation);
@@ -743,7 +770,7 @@ const layerMakeServer = Layer.unwrap(
     const routesReady = yield* Deferred.make<void>();
     const layerLauncher = ServiceLauncherClient.layer;
 
-    yield* fixPath();
+    yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
 
     const layerHttpListening = Layer.effectDiscard(
       Effect.gen(function* () {
@@ -753,38 +780,30 @@ const layerMakeServer = Layer.unwrap(
       }),
     );
     const layerRuntimeState = Layer.effectDiscard(
-      Effect.acquireRelease(
-        Effect.gen(function* () {
-          yield* Deferred.succeed(runtimeStateParked, undefined).pipe(Effect.orDie);
-          yield* awaitActivation;
-          const server = yield* HttpServer.HttpServer;
-          const address = server.address;
-          if (typeof address === "string" || !("port" in address)) {
-            return;
-          }
+      Effect.gen(function* () {
+        yield* Deferred.succeed(runtimeStateParked, undefined).pipe(Effect.orDie);
+        yield* awaitActivation;
+        const server = yield* HttpServer.HttpServer;
+        const address = server.address;
+        if (typeof address === "string" || !("port" in address)) {
+          return;
+        }
 
-          const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
-          const state = yield* makePersistedServerRuntimeState({
-            config,
-            port: address.port,
-            serviceManaged: launcher.managed,
-          });
-          yield* persistServerRuntimeState({
-            path: config.serverRuntimeStatePath,
-            state,
-          }).pipe(
+        const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
+        const state = yield* makePersistedServerRuntimeState({
+          config,
+          port: address.port,
+          serviceManaged: launcher.managed,
+        });
+        // Ownership release removes this record.
+        yield* ownership
+          .publish(state)
+          .pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Failed to persist server runtime state", { cause }),
             ),
           );
-        }),
-        () =>
-          clearPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to clear server runtime state", { cause }),
-            ),
-          ),
-      ),
+      }),
     );
     const layerTailscaleServe = config.tailscaleServeEnabled
       ? Layer.effectDiscard(
@@ -1102,10 +1121,12 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(FetchHttpClient.layer),
       // PR reads, Git operations, and WebSocket discovery share one process limiter.
       Layer.provide(VcsProcess.layer),
+      // Every agent and terminal spawn reads this, so it sits below everything.
+      Layer.provideMerge(AgentScopeLive.layer),
       Layer.provideMerge(layerPlatformServices),
     );
   }),
-);
+).pipe(Layer.provide(ProcessRunner.layer));
 
 // The CLI supplies configuration.
 export const runServer = Layer.launch(layerMakeServer);

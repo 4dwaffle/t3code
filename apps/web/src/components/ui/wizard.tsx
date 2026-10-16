@@ -4,6 +4,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { AnimatedHeight } from "../AnimatedHeight";
 import { DialogPopup, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./dialog";
+import { ScrollArea } from "./scroll-area";
 
 /** Compose a wizard from its header, panel, and footer; flow logic stays with the caller. */
 export function WizardPopup({
@@ -14,14 +15,10 @@ export function WizardPopup({
   readonly size?: "default" | "wide";
 }) {
   return (
-    <DialogPopup
-      {...props}
-      className={cn(
-        "overflow-x-hidden overflow-y-auto",
-        size === "wide" ? "max-w-3xl" : "max-w-xl",
-      )}
-    >
-      <div className="flex min-h-0 flex-col">{children}</div>
+    <DialogPopup {...props} className={size === "wide" ? "max-w-3xl" : "max-w-xl"}>
+      <ScrollArea className="*:data-[slot=scroll-area-scrollbar]:data-[orientation=vertical]:my-4">
+        <div className="flex min-h-0 flex-col">{children}</div>
+      </ScrollArea>
     </DialogPopup>
   );
 }
@@ -85,7 +82,7 @@ export function WizardSteps({
   const Step = onStepChange ? "button" : "div";
   return (
     <ol
-      className="grid auto-cols-fr grid-flow-col gap-1 rounded-xl bg-zinc-25 p-1 ring-1 ring-black/5 dark:bg-white/4 dark:ring-white/5"
+      className="grid auto-cols-fr grid-flow-col gap-1 rounded-xl bg-background p-1 ring-1 ring-black/5 dark:bg-white/4 dark:ring-white/5"
       role="list"
       aria-label="Setup progress"
     >
@@ -150,7 +147,7 @@ export function WizardPanel({
     <div
       data-slot="dialog-panel"
       className={cn(
-        "min-w-0 space-y-4 bg-zinc-25/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5",
+        "min-w-0 space-y-4 bg-background/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5",
         className,
       )}
     >

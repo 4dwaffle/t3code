@@ -94,6 +94,8 @@ export default defineConfig({
       "pnpm-lock.yaml",
       "*.tsbuildinfo",
       "**/routeTree.gen.ts",
+      "**/*.graphql.ts",
+      "packages/source-control-github/schema/**",
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
@@ -119,6 +121,8 @@ export default defineConfig({
       "pnpm-lock.yaml",
       "*.tsbuildinfo",
       "**/routeTree.gen.ts",
+      "**/*.graphql.ts",
+      "packages/source-control-github/schema/**",
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
@@ -249,6 +253,16 @@ export default defineConfig({
       {
         files: ["apps/mobile/src/**"],
         rules: { "t3code/no-mobile-uniwind-theme-escape-hatches": "error" },
+      },
+      {
+        // React commits state set in a raw ResizeObserver callback after the paint, so derived
+        // layout lands a frame late. observeResize flushes every observed resize in one render.
+        files: ["apps/web/src/**"],
+        excludeFiles: [
+          "apps/web/src/lib/observeResize.ts",
+          "**/*.{test,spec}.{ts,tsx,js,jsx,mts,cts,mjs,cjs}",
+        ],
+        rules: { "t3code/no-raw-resize-observer": "error" },
       },
       {
         // Every class in web code must be one Tailwind generates: a typo or a class nothing
@@ -383,7 +397,7 @@ export default defineConfig({
           "apps/mobile/src/lib/useMobileNavigationTheme.ts",
           "apps/mobile/src/native/T3ComposerEditor.ios.tsx",
           "apps/mobile/src/native/T3ComposerEditor.native.tsx",
-          "apps/mobile/src/native/SelectableMarkdownText.android.tsx",
+          "apps/mobile/src/native/SelectableMarkdownText.tsx",
         ],
         rules: {
           "t3code/no-mobile-uniwind-theme-escape-hatches": ["error", { allowUniwindTheme: true }],

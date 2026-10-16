@@ -20,6 +20,7 @@ import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopCliShim from "../app/DesktopCliShim.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopServerExposure from "./DesktopServerExposure.ts";
+import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "../wsl/DesktopWslServerTree.ts";
@@ -549,6 +550,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
     input: SharedBootstrapInput & {
       readonly resourceMonitorPath: Option.Option<string>;
       readonly cliPath: Option.Option<string>;
+      readonly shellEnvironmentPrepared: boolean;
     },
   ): Effect.fn.Return<
     DesktopBackendManager.DesktopBackendStartConfig,
@@ -567,6 +569,8 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       host: backendExposure.bindHost,
       desktopBootstrapToken: input.bootstrapToken,
       desktopBootstrapSecret: input.bootstrapSecret,
+      // Failed Windows probes leave server hydration enabled for another attempt.
+      shellEnvironmentPrepared: input.shellEnvironmentPrepared,
       tailscaleServeEnabled: backendExposure.tailscaleServeEnabled,
       tailscaleServePort: backendExposure.tailscaleServePort,
       desktopTelemetryFd: 4,
@@ -838,6 +842,7 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const wslEnvironment = yield* DesktopWslEnvironment.DesktopWslEnvironment;
@@ -920,7 +925,13 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
     );
-    return yield* resolvePrimaryStartConfig({ ...shared, resourceMonitorPath, cliPath }).pipe(
+    const shellEnvironmentPrepared = yield* shellEnvironment.installIntoProcess;
+    return yield* resolvePrimaryStartConfig({
+      ...shared,
+      resourceMonitorPath,
+      cliPath,
+      shellEnvironmentPrepared,
+    }).pipe(
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       Effect.provideService(DesktopServerExposure.DesktopServerExposure, serverExposure),
     );
