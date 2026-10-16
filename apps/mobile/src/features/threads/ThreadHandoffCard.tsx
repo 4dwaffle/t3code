@@ -70,7 +70,8 @@ export function ThreadHandoffCard({ thread }: { thread: EnvironmentThreadShell }
             onPress={() => void keepHere()}
           />
         </View>
-      ) : handoff.state === "departed" && presentationById.has(handoff.environmentId) ? (
+      ) : handoff.state === "departed" &&
+        presentationById.get(handoff.environmentId)?.connection.phase === "connected" ? (
         <View className="flex-row">
           <RequestActionButton
             label={`Open on ${handoff.label}`}

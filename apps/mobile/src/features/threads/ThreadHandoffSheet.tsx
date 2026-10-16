@@ -9,11 +9,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidSheetHeader } from "../../components/ui/AndroidScreenHeader";
 import { AppText as Text } from "../../components/ui/AppText";
+import { scopedThreadKey } from "../../lib/scopedEntities";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadHandoffEnvironment } from "../../state/threadHandoff";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -40,8 +42,14 @@ export function ThreadHandoffSheet({ route }: StaticScreenProps<HandoffTarget>) 
   });
   const [starting, setStarting] = useState<EnvironmentId | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A message waiting in the outbox exists only on this device. Once the thread
+  // starts moving, the server refuses it, so it would be lost.
+  const outboxWaiting = useQueuedThreadKeys().has(
+    scopedThreadKey(target.environmentId, target.threadId),
+  );
 
   const choose = async (environmentId: EnvironmentId) => {
+    if (outboxWaiting) return;
     void Haptics.selectionAsync();
     setStarting(environmentId);
     setError(null);
@@ -69,6 +77,11 @@ export function ThreadHandoffSheet({ route }: StaticScreenProps<HandoffTarget>) 
         Moves the conversation, unpushed commits, and uncommitted changes. This thread becomes
         read-only here.
       </Text>
+      {outboxWaiting ? (
+        <Text accessibilityRole="alert" className="pt-2 text-sm text-danger-foreground">
+          A message is still waiting to send from this device. Send or discard it first.
+        </Text>
+      ) : null}
       {options.error ? (
         <Text className="pt-4 text-sm text-danger-foreground">{options.error}</Text>
       ) : options.data === null ? (
@@ -82,8 +95,10 @@ export function ThreadHandoffSheet({ route }: StaticScreenProps<HandoffTarget>) 
           <Pressable
             key={option.environmentId}
             accessibilityRole="button"
-            accessibilityState={{ disabled: option.reason !== null || starting !== null }}
-            disabled={option.reason !== null || starting !== null}
+            accessibilityState={{
+              disabled: option.reason !== null || starting !== null || outboxWaiting,
+            }}
+            disabled={option.reason !== null || starting !== null || outboxWaiting}
             onPress={() => void choose(option.environmentId)}
             className="border-b border-border py-3.5 active:opacity-70 disabled:opacity-50"
           >
