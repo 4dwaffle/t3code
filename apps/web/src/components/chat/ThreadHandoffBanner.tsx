@@ -7,9 +7,9 @@ import {
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon, MonitorUpIcon, TriangleAlertIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
-import { useEnvironmentIds } from "~/state/environments";
+import { useConnectedEnvironmentIds } from "~/state/environments";
 import { threadHandoffEnvironment } from "~/state/threadHandoff";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -39,62 +39,58 @@ export function useThreadHandoffBannerItem(
   const cancel = useAtomCommand(threadHandoffEnvironment.cancel, { label: "cancel thread move" });
   const [cancelling, setCancelling] = useState(false);
   const handoff = shell?.handoff ?? null;
-  const environmentIds = useEnvironmentIds();
+  const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const canOpenThere =
-    handoff?.state === "departed" && environmentIds.includes(handoff.environmentId);
-  return useMemo(() => {
-    const notice = threadHandoffNotice(handoff);
-    if (shell == null || handoff === null || notice === null) return null;
-    const actions =
-      handoff.state === "pending" ? (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={cancelling}
-          onClick={() => {
-            setCancelling(true);
-            void cancel({ environmentId: shell.environmentId, input: { threadId: shell.id } }).then(
-              (result) => {
-                setCancelling(false);
-                if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                  toastManager.add(
-                    stackedThreadToast({
-                      type: "error",
-                      title: "Could not cancel the move",
-                      description: String(squashAtomCommandFailure(result)),
-                    }),
-                  );
-                }
-              },
-            );
-          }}
-        >
-          {cancelling ? "Cancelling…" : "Keep it here"}
-        </Button>
-      ) : handoff.state === "departed" && canOpenThere ? (
-        <Button
-          size="xs"
-          variant="ghost"
-          onClick={() =>
-            void navigate({
-              to: "/$environmentId/$threadId",
-              params: buildThreadRouteParams(
-                scopeThreadRef(handoff.environmentId, handoff.threadId),
-              ),
-            })
-          }
-        >
-          Open on {handoff.label}
-          <ArrowUpRightIcon />
-        </Button>
-      ) : undefined;
-    return {
-      id: `thread-handoff:${shell.id}:${handoff.handoffId}:${handoff.state}`,
-      variant: notice.tone,
-      icon: notice.tone === "error" ? <TriangleAlertIcon /> : <MonitorUpIcon />,
-      title: notice.title,
-      ...(notice.detail === null ? {} : { description: notice.detail }),
-      ...(actions === undefined ? {} : { actions }),
-    };
-  }, [canOpenThere, cancel, cancelling, handoff, navigate, shell]);
+    handoff?.state === "departed" && connectedEnvironmentIds.includes(handoff.environmentId);
+  const notice = threadHandoffNotice(handoff);
+  if (shell == null || handoff === null || notice === null) return null;
+  const actions =
+    handoff.state === "pending" ? (
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={cancelling}
+        onClick={() => {
+          setCancelling(true);
+          void cancel({ environmentId: shell.environmentId, input: { threadId: shell.id } }).then(
+            (result) => {
+              setCancelling(false);
+              if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: "Could not cancel the move",
+                    description: String(squashAtomCommandFailure(result)),
+                  }),
+                );
+              }
+            },
+          );
+        }}
+      >
+        {cancelling ? "Cancelling…" : "Keep it here"}
+      </Button>
+    ) : handoff.state === "departed" && canOpenThere ? (
+      <Button
+        size="xs"
+        variant="ghost"
+        onClick={() =>
+          void navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(scopeThreadRef(handoff.environmentId, handoff.threadId)),
+          })
+        }
+      >
+        Open on {handoff.label}
+        <ArrowUpRightIcon />
+      </Button>
+    ) : undefined;
+  return {
+    id: `thread-handoff:${shell.id}:${handoff.handoffId}:${handoff.state}`,
+    variant: notice.tone,
+    icon: notice.tone === "error" ? <TriangleAlertIcon /> : <MonitorUpIcon />,
+    title: notice.title,
+    ...(notice.detail === null ? {} : { description: notice.detail }),
+    ...(actions === undefined ? {} : { actions }),
+  };
 }
