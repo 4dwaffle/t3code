@@ -28,7 +28,6 @@ import Animated, {
   useAnimatedStyle,
   useDerivedValue,
   useSharedValue,
-  withDelay,
   withTiming,
 } from "react-native-reanimated";
 import { AsyncResult } from "effect/reactivity";
@@ -66,11 +65,6 @@ import {
   ANDROID_WORKSPACE_RAIL_WIDTH,
 } from "../workspace/AndroidWorkspaceNavigation";
 import { AndroidWorkspaceSidebar } from "../workspace/AndroidWorkspaceSidebar";
-import {
-  FADE_THROUGH_EASING,
-  FADE_THROUGH_ENTER_MS,
-  FADE_THROUGH_EXIT_MS,
-} from "../workspace/WorkspaceTabTransition";
 import { useAndroidWorkspaceSelection } from "../workspace/useAndroidWorkspaceSelection";
 import { HomeListOptionsProvider } from "../home/home-list-options";
 import { ThreadNavigationSidebar } from "../threads/ThreadNavigationSidebar";
@@ -524,6 +518,7 @@ function AdaptiveWorkspaceLayoutContent(
     : null;
   const [contentSizing, setContentSizing] = useState({
     viewportWidth,
+    workspacePage,
     target: contentTargetWidth,
     sidebarVisible: panes.primarySidebarVisible,
     width: contentTargetWidth,
@@ -535,11 +530,15 @@ function AdaptiveWorkspaceLayoutContent(
   if (
     Platform.OS === "android" &&
     (contentSizing.viewportWidth !== viewportWidth ||
+      contentSizing.workspacePage !== workspacePage ||
       contentSizing.target !== contentTargetWidth ||
       contentSizing.sidebarVisible !== panes.primarySidebarVisible ||
       contentSizing.listPaneTarget !== layout.listPaneWidth)
   ) {
-    const sameViewport = contentSizing.viewportWidth === viewportWidth;
+    // A workspace page swaps the sidebar in the same frame, so nothing animates to wait for.
+    const sameViewport =
+      contentSizing.viewportWidth === viewportWidth &&
+      contentSizing.workspacePage === workspacePage;
     const openingSidebar =
       sameViewport && !contentSizing.sidebarVisible && panes.primarySidebarVisible;
     // A book-posture hinge resizes the visible list pane instead of revealing it.
@@ -554,6 +553,7 @@ function AdaptiveWorkspaceLayoutContent(
       contentTargetWidth !== null;
     setContentSizing({
       viewportWidth,
+      workspacePage,
       target: contentTargetWidth,
       sidebarVisible: panes.primarySidebarVisible,
       // Clip the wide navigator while the sidebar opens or widens, then reflow once at the
@@ -597,10 +597,18 @@ function AdaptiveWorkspaceLayoutContent(
     panes.primarySidebarVisible ? (layout.listPaneWidth ?? 0) + (layout.listPaneGap ?? 0) : 0,
   );
   const renderedRailWidth = useSharedValue(navigationRailWidth);
-  const sidebarFade = useSharedValue(1);
-  const previousWorkspacePage = useRef(workspacePage);
+  const leavingWorkspacePage = useRef(false);
   useEffect(() => {
     if (nativeWorkspace) return;
+    renderedRailWidth.set(withTiming(navigationRailWidth, WORKSPACE_PANE_TIMING));
+    // A workspace page hides the sidebar through React instead, in the same commit that mounts
+    // the page. Animating it here would hide it a few frames before the page appears.
+    if (workspacePage) {
+      leavingWorkspacePage.current = true;
+      return;
+    }
+    const snap = leavingWorkspacePage.current;
+    leavingWorkspacePage.current = false;
     const targetWidth = panes.primarySidebarVisible
       ? (layout.listPaneWidth ?? 0) + (layout.listPaneGap ?? 0)
       : 0;
@@ -608,27 +616,12 @@ function AdaptiveWorkspaceLayoutContent(
       "worklet";
       if (finished && Platform.OS === "android") runOnJS(settleContentWidth)(contentRevision);
     };
-    const pageChanged = previousWorkspacePage.current !== workspacePage;
-    previousWorkspacePage.current = workspacePage;
-    if (!pageChanged) {
-      renderedSidebarWidth.value = withTiming(targetWidth, WORKSPACE_PANE_TIMING, settle);
-    } else if (workspacePage) {
-      // A workspace page covers the panes at once and fades in over them.
-      sidebarFade.value = 0;
-      renderedSidebarWidth.value = withTiming(targetWidth, { duration: 0 }, settle);
-    } else {
-      // Leaving a page is a fade through: the sidebar takes its place once the page has faded
-      // out, then fades in with the detail pane instead of sliding open.
-      renderedSidebarWidth.value = withDelay(
-        FADE_THROUGH_EXIT_MS,
-        withTiming(targetWidth, { duration: 0 }, settle),
-      );
-      sidebarFade.value = withDelay(
-        FADE_THROUGH_EXIT_MS,
-        withTiming(1, { duration: FADE_THROUGH_ENTER_MS, easing: FADE_THROUGH_EASING }),
-      );
-    }
-    renderedRailWidth.set(withTiming(navigationRailWidth, WORKSPACE_PANE_TIMING));
+    // The content beside it already took its final width when the page closed.
+    renderedSidebarWidth.value = withTiming(
+      targetWidth,
+      snap ? { duration: 0 } : WORKSPACE_PANE_TIMING,
+      settle,
+    );
   }, [
     nativeWorkspace,
     navigationRailWidth,
@@ -637,7 +630,6 @@ function AdaptiveWorkspaceLayoutContent(
     panes.primarySidebarVisible,
     renderedSidebarWidth,
     renderedRailWidth,
-    sidebarFade,
     settleContentWidth,
     contentRevision,
     workspacePage,
@@ -654,8 +646,7 @@ function AdaptiveWorkspaceLayoutContent(
   }));
   const sidebarAnimatedStyle = useAnimatedStyle(() => ({
     // Fading a UIKit glass ancestor can leave remounted header effects missing.
-    opacity:
-      Platform.OS === "ios" ? 1 : Math.min(1, renderedSidebarWidth.value / 80) * sidebarFade.value,
+    opacity: Platform.OS === "ios" ? 1 : Math.min(1, renderedSidebarWidth.value / 80),
     width: renderedSidebarWidth.value,
   }));
 
@@ -797,7 +788,7 @@ function AdaptiveWorkspaceLayoutContent(
                   panes.primarySidebarVisible ? "auto" : "no-hide-descendants"
                 }
                 pointerEvents={panes.primarySidebarVisible ? "auto" : "none"}
-                style={sidebarAnimatedStyle}
+                style={[workspacePage ? { display: "none" } : null, sidebarAnimatedStyle]}
               >
                 <Animated.View className="flex-1" style={listPaneAnimatedStyle}>
                   <RenderErrorBoundary

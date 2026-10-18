@@ -170,7 +170,9 @@ const GLASS_HEADER_OPTIONS: AppScreenOptions = {
   unstable_navigationItemStyle: NATIVE_LIQUID_GLASS_SUPPORTED ? "editor" : undefined,
 };
 
-const PULL_REQUEST_HEADER_OPTIONS: AppScreenOptions = {
+// Android draws these screens' app bars itself. Hiding the native one only from inside the
+// screen leaves it visible until the screen mounts.
+const ANDROID_APP_BAR_HEADER_OPTIONS: AppScreenOptions = {
   ...GLASS_HEADER_OPTIONS,
   headerShown: Platform.OS !== "android",
 };
@@ -710,15 +712,15 @@ const RootStackConfig = createWorkspaceStackNavigator({
         path: "pull-requests/:environmentId/:projectId/:repository/:number",
         parse: { number: Number },
       },
-      options: PULL_REQUEST_HEADER_OPTIONS,
+      options: ANDROID_APP_BAR_HEADER_OPTIONS,
     }),
     PullRequestGuideStop: createNativeStackScreen({
       screen: PullRequestGuideStopScreen,
-      options: PULL_REQUEST_HEADER_OPTIONS,
+      options: ANDROID_APP_BAR_HEADER_OPTIONS,
     }),
     PullRequestFile: createNativeStackScreen({
       screen: PullRequestFileRouteScreen,
-      options: PULL_REQUEST_HEADER_OPTIONS,
+      options: ANDROID_APP_BAR_HEADER_OPTIONS,
     }),
     PullRequestFiles: createNativeStackScreen({
       screen: PullRequestFilesRouteScreen,
@@ -732,7 +734,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
     PullRequestReviewers: createNativeStackScreen({
       screen: PullRequestReviewersScreen,
       options: {
-        ...PULL_REQUEST_HEADER_OPTIONS,
+        ...ANDROID_APP_BAR_HEADER_OPTIONS,
         ...FORM_SHEET_PRESENTATION_OPTIONS,
         sheetAllowedDetents: [0.75, 0.92],
         sheetGrabberVisible: true,
@@ -741,7 +743,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
     }),
     PullRequestDiscussion: createNativeStackScreen({
       screen: PullRequestDiscussionScreen,
-      options: PULL_REQUEST_HEADER_OPTIONS,
+      options: ANDROID_APP_BAR_HEADER_OPTIONS,
     }),
     PullRequestInlineComment: createNativeStackScreen({
       screen: PullRequestInlineCommentScreen,
@@ -766,7 +768,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
     Thread: createNativeStackScreen({
       screen: ThreadRouteScreen,
       linking: THREAD_LINKING_PREFIX,
-      options: GLASS_HEADER_OPTIONS,
+      options: ANDROID_APP_BAR_HEADER_OPTIONS,
     }),
     ThreadTerminal: createNativeStackScreen({
       screen: ThreadTerminalRouteScreen,
@@ -923,8 +925,8 @@ const RootStackConfig = createWorkspaceStackNavigator({
         ...NESTED_NAVIGATOR_OPTIONS,
         gestureEnabled: true,
         headerShown: false,
-        // Android opens Settings as a top-level tab, so it fades rather than pushing.
-        ...(Platform.OS === "android" ? { animation: "fade" as const } : null),
+        // Android opens Settings as a top-level tab, so it swaps like the other tabs.
+        ...(Platform.OS === "android" ? { animation: "none" as const } : null),
       },
     }),
     SettingsLegal: createNativeStackScreen({

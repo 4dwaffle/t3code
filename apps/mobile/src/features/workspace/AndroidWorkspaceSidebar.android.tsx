@@ -5,7 +5,7 @@ import { PullRequestFilterMenuProvider } from "../pull-requests/PullRequestFilte
 import { PullRequestsScreen } from "../pull-requests/PullRequestsScreen";
 import { PullRequestToolbar } from "../pull-requests/PullRequestToolbar.android";
 import { WorkspaceTabsContext, useWorkspaceTabs } from "./WorkspaceTabsContext";
-import { WorkspaceTabTransition } from "./WorkspaceTabTransition";
+import { WorkspaceTabPanes } from "./WorkspaceTabPanes";
 
 export function AndroidWorkspaceSidebar(props: {
   readonly children: ReactNode;
@@ -14,23 +14,29 @@ export function AndroidWorkspaceSidebar(props: {
 }) {
   const workspace = useWorkspaceTabs()!;
   const context = useMemo(() => ({ ...workspace, bottomClearance: 16 }), [workspace]);
-  const tab = workspace.state.selectedTab;
   return (
-    <WorkspaceTabTransition tab={tab}>
-      {tab === "threads" ? (
-        props.children
-      ) : (
-        <WorkspaceTabsContext value={context}>
-          <PullRequestFilterMenuProvider>
-            <View className="flex-1 bg-header">
-              <PullRequestToolbar onRequestVisibility={props.onRequestVisibility} />
-              <ScreenContent insetHorizontal>
-                <PullRequestsScreen sidebar selectedPullRequestKey={props.selectedPullRequestKey} />
-              </ScreenContent>
-            </View>
-          </PullRequestFilterMenuProvider>
-        </WorkspaceTabsContext>
-      )}
-    </WorkspaceTabTransition>
+    <WorkspaceTabPanes
+      tabs={["threads", "pullRequests"]}
+      selected={workspace.state.selectedTab}
+      renderTab={(tab) =>
+        tab === "threads" ? (
+          props.children
+        ) : (
+          <WorkspaceTabsContext value={context}>
+            <PullRequestFilterMenuProvider>
+              <View className="flex-1 bg-header">
+                <PullRequestToolbar onRequestVisibility={props.onRequestVisibility} />
+                <ScreenContent insetHorizontal>
+                  <PullRequestsScreen
+                    sidebar
+                    selectedPullRequestKey={props.selectedPullRequestKey}
+                  />
+                </ScreenContent>
+              </View>
+            </PullRequestFilterMenuProvider>
+          </WorkspaceTabsContext>
+        )
+      }
+    />
   );
 }
