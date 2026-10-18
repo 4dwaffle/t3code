@@ -25,6 +25,12 @@ const SORTS = {
   created: "Newest created",
   oldest: "Oldest updated",
 } as const;
+// On Android the row sits under ScreenContent's 28dp corner. A 12dp inset keeps the
+// 16dp chip radius concentric with it (28 - 12 = 16).
+const ROW_STYLE =
+  Platform.OS === "android"
+    ? { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8, gap: 8 }
+    : { paddingHorizontal: 16, paddingTop: 2, paddingBottom: 10, gap: 8 };
 const id = (field: string, value: string) => JSON.stringify([field, value]);
 function choices(field: string, options: Readonly<Record<string, string>>, selected: string) {
   return Object.entries(options).map(([value, title]) => ({
@@ -287,17 +293,12 @@ export function PullRequestListFilters(props: {
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
-      // Android draws the row inside the rounded list surface: clear its top corners and line
-      // the first pill up with the rows' content (sidebar rows: 8dp margin + 12dp padding).
+      // In the Android sidebar the first pill lines up with the rows' content instead
+      // (8dp row margin + 12dp padding).
       contentContainerStyle={
-        Platform.OS === "android"
-          ? {
-              paddingHorizontal: props.sidebar ? 20 : 14,
-              paddingTop: 12,
-              paddingBottom: 10,
-              gap: 8,
-            }
-          : { paddingHorizontal: 16, paddingTop: 2, paddingBottom: 10, gap: 8 }
+        props.sidebar && Platform.OS === "android"
+          ? { ...ROW_STYLE, paddingHorizontal: 20 }
+          : ROW_STYLE
       }
     >
       {Platform.OS === "android" ? null : (
