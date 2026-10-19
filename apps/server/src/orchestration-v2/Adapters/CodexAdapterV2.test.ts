@@ -677,6 +677,34 @@ describe("CodexAdapterV2 process spawning", () => {
         },
       },
     );
+    const configured = CodexAdapterV2.codexThreadRuntimeParams({
+      mcpSession: {
+        ...mcpSession,
+        tools: {
+          servers: [
+            {
+              name: "docs",
+              transport: {
+                type: "http",
+                url: "https://example.com/mcp",
+                headers: [{ name: "Authorization", value: "user-token", sensitive: true }],
+              },
+            },
+          ],
+          disabledSkills: ["review"],
+          fingerprint: "user-tools",
+        },
+      },
+    }).config;
+    assert.deepEqual(configured.mcp_servers, {
+      docs: { url: "https://example.com/mcp", http_headers: { Authorization: "user-token" } },
+      "t3-code": {
+        url: mcpSession.endpoint,
+        tool_timeout_sec: 3_900,
+        http_headers: { Authorization: mcpSession.authorizationHeader },
+      },
+    });
+    assert.deepEqual(configured.skills, { config: [{ name: "review", enabled: false }] });
   });
 
   it.effect("resolves Windows command shims through the shared spawn policy", () =>

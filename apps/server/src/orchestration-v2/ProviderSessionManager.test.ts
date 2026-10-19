@@ -1916,6 +1916,17 @@ it.effect(
         const captured = (yield* Ref.get(mcpConfigs))[0];
         assert.isDefined(captured);
         assert.equal(captured?.browserToolsAvailable, false);
+        assert.deepEqual(captured?.tools?.servers, [
+          {
+            name: "docs",
+            transport: {
+              type: "http",
+              url: "https://example.com/mcp",
+              headers: [{ name: "Authorization", value: "provider-secret", sensitive: true }],
+            },
+          },
+        ]);
+        assert.deepEqual(captured?.tools?.disabledSkills, ["review"]);
         const token = captured?.authorizationHeader.replace(/^Bearer\s+/, "");
         const resolved = yield* registry.resolve(token!);
         assert.deepEqual(
@@ -1934,6 +1945,26 @@ it.effect(
             mcpConfigs,
             serverSettingsLayer: ServerSettings.layerTest({
               enableAgentBrowserAccess: false,
+              disabledSkills: ["review"],
+              mcpServers: {
+                docs: {
+                  enabled: true,
+                  transport: {
+                    type: "http",
+                    url: "https://example.com/mcp",
+                    headers: [{ name: "Authorization", value: "provider-secret", sensitive: true }],
+                  },
+                },
+                disabled: {
+                  enabled: false,
+                  transport: {
+                    type: "stdio",
+                    command: "must-not-start",
+                    args: [],
+                    env: [],
+                  },
+                },
+              },
             }).pipe(Layer.orDie),
           }),
         ),

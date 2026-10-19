@@ -80,6 +80,7 @@ const durable = { durable: { aggregateID: SESSION, seq: 1, version: 1 } };
 const mcpRules = [
   { action: "t3-code-*", resource: "*", effect: "deny" },
   { action: "t3-code-thread_opencode2-adapter_*", resource: "*", effect: "allow" },
+  { action: "t3u-*", resource: "*", effect: "deny" },
 ];
 const t3Rules = [{ action: "*", resource: "*", effect: "allow" }, ...mcpRules];
 const TITLE = "Prime check";
@@ -3244,6 +3245,110 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       }).pipe(Effect.scoped),
   );
 
+  it.effect(
+    "retries failed user MCP registrations without reconnecting healthy servers or bypassing approval",
+    () =>
+      Effect.gen(function* () {
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        yield* mcpSessions.set({
+          environmentId: EnvironmentId.make("environment:opencode2-adapter"),
+          threadId,
+          providerSessionId: "mcp:opencode2-adapter",
+          providerInstanceId: instanceId,
+          endpoint: "http://127.0.0.1:3773/mcp",
+          authorizationHeader: "Bearer thread-credential",
+          browserToolsAvailable: false,
+          tools: {
+            servers: ["healthy", "retry"].map((name) => ({
+              name,
+              transport: { type: "http" as const, url: `https://${name}.example/mcp`, headers: [] },
+            })),
+            disabledSkills: [],
+            fingerprint: "two-servers",
+          },
+        });
+        yield* Effect.addFinalizer(() => mcpSessions.clear(threadId));
+        const prefix = "t3u-c26f2f1f";
+        const ownRules = [
+          ...supervisedRules,
+          { action: `${prefix}-*`, resource: "*", effect: "ask" },
+        ];
+        const t3Server = "t3-code-thread_opencode2-adapter";
+        const addT3 = out("mcp.add", {
+          server: t3Server,
+          "location[directory]": WORK,
+          config: {
+            type: "remote",
+            url: "http://127.0.0.1:3773/mcp",
+            headers: { Authorization: "Bearer thread-credential" },
+            oauth: false,
+          },
+        });
+        const addUser = (name: string) =>
+          out("mcp.add", {
+            server: `${prefix}-${name}`,
+            "location[directory]": WORK,
+            config: { type: "remote", url: `https://${name}.example/mcp`, headers: {} },
+          });
+        const turn = [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ];
+        const runtime = yield* openCode2ReplayRuntime([
+          ...opening,
+          out("session.get", { sessionID: SESSION }),
+          replyData("session.get", sessionInfo()),
+          ...noOpenRequests,
+          out("agent.list", "<any>"),
+          reply("agent.list", agentList),
+          out("session.update", { sessionID: SESSION, permissions: ownRules }),
+          reply("session.update", null),
+          addT3,
+          reply("mcp.add", null),
+          addUser("healthy"),
+          reply("mcp.add", null),
+          addUser("retry"),
+          reply("mcp.add", { status: 500, body: { message: "Unavailable" } }),
+          out("session.instructions.entry.put", {
+            sessionID: SESSION,
+            key: "t3-code",
+            value: "<any>",
+          }),
+          reply("session.instructions.entry.put", null),
+          ...turn,
+          addT3,
+          reply("mcp.add", null),
+          out("mcp.list", { "location[directory]": WORK }),
+          reply("mcp.list", {
+            location: { directory: WORK },
+            data: [{ name: `${prefix}-healthy`, status: { status: "connected" } }],
+          }),
+          addUser("retry"),
+          reply("mcp.add", null),
+          ...turn,
+          out("mcp.remove", { server: t3Server, "location[directory]": WORK }),
+          reply("mcp.remove", null),
+          out("mcp.remove", { server: `${prefix}-healthy`, "location[directory]": WORK }),
+          out("mcp.remove", { server: `${prefix}-retry`, "location[directory]": WORK }),
+          reply("mcp.remove", null),
+          reply("mcp.remove", null),
+        ]);
+        const thread = yield* runtime.resumeThread({
+          providerThread: providerThread(yield* DateTime.now),
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: policy("approval-required"),
+        });
+        for (let index = 0; index < 2; index++) {
+          const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+          yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+          assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+        }
+        yield* runtime.unloadThread!({ providerThread: thread });
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("re-registers T3 MCP each turn and drops its instructions when adding fails", () =>
     Effect.gen(function* () {
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -3325,6 +3430,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
               { action: "*", resource: "*", effect: "allow" },
               { action: "t3-code-*", resource: "*", effect: "deny" },
               { action: `${server}_*`, resource: "*", effect: "allow" },
+              { action: "t3u-*", resource: "*", effect: "deny" },
             ],
           }),
         ),
@@ -4314,6 +4420,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             { action: "*", resource: "*", effect: "allow" },
             { action: "t3-code-*", resource: "*", effect: "deny" },
             { action: "t3-code-thread_opencode2-adapter_fork_*", resource: "*", effect: "allow" },
+            { action: "t3u-*", resource: "*", effect: "deny" },
           ],
         }),
         reply("session.update", null),

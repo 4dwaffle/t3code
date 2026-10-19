@@ -61,6 +61,7 @@ import {
   type ChatAttachment,
   ClaudeSettings,
   defaultInstanceIdForDriver,
+  mcpServerVariableRecord,
   type ModelSelection,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
@@ -88,6 +89,8 @@ import {
   type ProviderRequestKind,
   type ProviderUserInputAnswers,
   type ProviderThreadId,
+  type McpServerVariable,
+  type ResolvedMcpServer,
   type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -1198,7 +1201,7 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (input.mcpServers?.["t3-code"] === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -1257,17 +1260,24 @@ export function claudeMcpQueryOverrides(input: {
 }): {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  readonly sdkSettings?: ClaudeSdkSettings;
+  readonly mcpEnvironment?: Readonly<Record<string, string>>;
 } {
   const session = input.mcpSession;
   if (session === undefined) {
     return input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools };
   }
+  const tools = session.tools ?? McpProviderSession.EMPTY_MCP_PROVIDER_SESSION_TOOLS;
   const mcpAllowedTools = input.readOnlySandbox
     ? CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
     : [CLAUDE_T3_MCP_TOOL_WILDCARD];
+  // The user's servers are not pre-approved: full access already skips the
+  // prompt, so an allow rule would only bypass the modes that ask to approve.
+  const userServers = claudeUserMcpServers(tools.servers);
   return {
     allowedTools: Array.from(new Set([...(input.allowedTools ?? []), ...mcpAllowedTools])),
     mcpServers: {
+      ...userServers.mcpServers,
       "t3-code": {
         type: "http",
         url: session.endpoint,
@@ -1277,7 +1287,65 @@ export function claudeMcpQueryOverrides(input: {
         timeout: CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
       },
     },
+    ...(tools.disabledSkills.length === 0
+      ? {}
+      : {
+          // The flag-settings layer outranks the user's and project's
+          // settings files, so an "off" here hides the skill from both the
+          // model and the slash menu whatever those files say.
+          sdkSettings: {
+            skillOverrides: Object.fromEntries(
+              tools.disabledSkills.map((name) => [name, "off" as const]),
+            ),
+          },
+        }),
+    ...(Object.keys(userServers.environment).length === 0
+      ? {}
+      : { mcpEnvironment: userServers.environment }),
   };
+}
+
+/**
+ * The user's servers for `--mcp-config`. Like T3's own token, a sensitive
+ * env value or header becomes a `${VAR}` reference there, and its value goes
+ * into the child's environment.
+ */
+function claudeUserMcpServers(servers: ReadonlyArray<ResolvedMcpServer>): {
+  readonly mcpServers: NonNullable<ClaudeQueryOptions["mcpServers"]>;
+  readonly environment: Readonly<Record<string, string>>;
+} {
+  const environment: Record<string, string> = {};
+  const values = (variables: ReadonlyArray<McpServerVariable>) => {
+    const record = mcpServerVariableRecord(variables);
+    // A repeated name keeps its last entry, as the record does.
+    const sensitive = new Map(variables.map((variable) => [variable.name, variable.sensitive]));
+    for (const name of Object.keys(record)) {
+      if (sensitive.get(name) !== true) continue;
+      // Indexed, so two names that read the same once uppercased stay apart.
+      const reference = `T3_MCP_SECRET_${Object.keys(environment).length}`;
+      environment[reference] = record[name]!;
+      record[name] = `\${${reference}}`;
+    }
+    return record;
+  };
+  const mcpServers = Object.fromEntries(
+    servers.map((server) => [
+      server.name,
+      server.transport.type === "stdio"
+        ? {
+            type: "stdio" as const,
+            command: server.transport.command,
+            args: [...server.transport.args],
+            env: values(server.transport.env),
+          }
+        : {
+            type: "http" as const,
+            url: server.transport.url,
+            headers: values(server.transport.headers),
+          },
+    ]),
+  );
+  return { mcpServers, environment };
 }
 
 function providerSession(input: {
@@ -1918,6 +1986,8 @@ export function claudeEffectiveQueryPolicyKey(
   mcpOverrides: {
     readonly allowedTools?: ReadonlyArray<string>;
     readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+    readonly sdkSettings?: ClaudeSdkSettings;
+    readonly mcpEnvironment?: Readonly<Record<string, string>>;
   },
 ): string {
   return JSON.stringify({
@@ -1928,6 +1998,9 @@ export function claudeEffectiveQueryPolicyKey(
         : { allowedTools: mcpOverrides.allowedTools }),
     }),
     mcpServers: mcpOverrides.mcpServers,
+    // Skill switches load at process start, so a change reopens the query.
+    sdkSettings: mcpOverrides.sdkSettings,
+    mcpEnvironment: mcpOverrides.mcpEnvironment,
   });
 }
 
@@ -8525,7 +8598,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
             settings: adapterOptions.settings,
-            environment: adapterOptions.environment,
+            environment: { ...adapterOptions.environment, ...mcpOverrides.mcpEnvironment },
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined
               ? {}
@@ -8533,6 +8606,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(mcpOverrides.mcpServers === undefined
               ? {}
               : { mcpServers: mcpOverrides.mcpServers }),
+            ...(mcpOverrides.sdkSettings === undefined
+              ? {}
+              : { sdkSettings: mcpOverrides.sdkSettings }),
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined
               ? {}

@@ -336,6 +336,7 @@ export const makeGrokAdapterV2 = Effect.fn("makeGrokAdapterV2")(function* (
   options: GrokAdapterV2Options,
 ) {
   return yield* makeAcpAdapterV2({
+    environment: options.environment,
     instanceId: options.instanceId,
     flavor: makeGrokAcpAdapterFlavor(options, yield* HostProcess.HomeDirectory),
     selfInvocation: options.selfInvocation,
