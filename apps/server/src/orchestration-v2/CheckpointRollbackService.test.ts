@@ -12,7 +12,6 @@ import {
   RunAttemptId,
   RunId,
   CheckpointScopeId,
-  type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
@@ -79,33 +78,25 @@ it.effect.each(["initial", "waiting"])(
     const resolveRuntimePolicy = vi.fn(() => Effect.die("runtime policy resolution must not run"));
     const readEntered = Deferred.makeUnsafe<void>();
     const release = Deferred.makeUnsafe<void>();
-    let readCount = 0;
     let projection = {
       thread: {
         worktreePath: process.cwd(),
         activeProviderThreadId: providerThreadId,
         modelSelection: { instanceId: providerInstanceId, model: "test-model" },
       },
-      providerThreads: [{ id: providerThreadId, providerSessionId, providerInstanceId }],
-      checkpoints: [
-        {
-          id: checkpointId,
-          scopeId,
-          status: state === "waiting" ? "ready" : "stale",
-          appRunOrdinal: 0,
-        },
-      ],
-      checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-    } as unknown as OrchestrationV2ThreadProjection;
-    const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(
-      () => {
-        const current = projection;
-        readCount++;
-        return readCount === 1
-          ? Deferred.succeed(readEntered, undefined).pipe(Effect.as(current))
-          : Effect.succeed(current);
+      providerThread: { id: providerThreadId, providerSessionId, providerInstanceId },
+      checkpoint: {
+        id: checkpointId,
+        scopeId,
+        status: state === "waiting" ? "ready" : "stale",
+        appRunOrdinal: 0,
       },
+      scope: { id: scopeId, cwd: process.cwd() },
+    } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
+    const getThread = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThread"]>(() =>
+      Deferred.succeed(readEntered, undefined).pipe(Effect.as(projection.thread)),
     );
+    const getCheckpointRollbackContext = vi.fn(() => Effect.succeed(projection));
     const testLayer = layerCheckpointRollbackService.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -114,7 +105,8 @@ it.effect.each(["initial", "waiting"])(
           Layer.mock(EventSink.EventSinkV2)({}),
           IdAllocator.layer,
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
-            getThreadRecords,
+            getThread,
+            getCheckpointRollbackContext,
             getShellSnapshot: () =>
               Effect.succeed({
                 schemaVersion: 1,
@@ -149,19 +141,25 @@ it.effect.each(["initial", "waiting"])(
         yield* Deferred.await(readEntered);
         projection = {
           ...projection,
-          checkpoints: projection.checkpoints.map((checkpoint) => ({
-            ...checkpoint,
-            status: "stale",
-          })),
+          checkpoint: { ...projection.checkpoint!, status: "stale" },
         };
         yield* Deferred.succeed(release, undefined);
         if (holder !== undefined) yield* Fiber.join(holder);
       }
       const error = yield* Fiber.join(rollback);
 
-      assert.equal(getThreadRecords.mock.calls.length, 2);
-      assert.deepEqual(getThreadRecords.mock.calls[0]?.[1], []);
-      assert.equal(getThreadRecords.mock.calls[1]?.[1].includes("checkpoints"), true);
+      assert.deepEqual(getThread.mock.calls, [[threadId]]);
+      assert.deepEqual(getCheckpointRollbackContext.mock.calls, [
+        [
+          threadId,
+          {
+            threadId,
+            providerThreadId,
+            checkpointId,
+            scopeId,
+          },
+        ],
+      ]);
       assert.equal(error.reason, "rollback-target-invalid");
       assert.equal(
         error.message,
@@ -198,16 +196,14 @@ it.effect("rejects a rollback when another provider thread became active", () =>
       activeProviderThreadId,
       modelSelection: { instanceId: providerInstanceId, model: "test-model" },
     },
-    providerThreads: [
-      {
-        id: requestedProviderThreadId,
-        providerSessionId,
-        providerInstanceId,
-      },
-    ],
-    checkpoints: [{ id: checkpointId, scopeId, status: "ready" }],
-    checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-  } as unknown as OrchestrationV2ThreadProjection;
+    providerThread: {
+      id: requestedProviderThreadId,
+      providerSessionId,
+      providerInstanceId,
+    },
+    checkpoint: { id: checkpointId, scopeId, status: "ready" },
+    scope: { id: scopeId, cwd: process.cwd() },
+  } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
   const layerTest = layerCheckpointRollbackService.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -216,7 +212,8 @@ it.effect("rejects a rollback when another provider thread became active", () =>
         Layer.mock(EventSink.EventSinkV2)({}),
         IdAllocator.layer,
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getThreadRecords: () => Effect.succeed(projection),
+          getThread: () => Effect.succeed(projection.thread),
+          getCheckpointRollbackContext: () => Effect.succeed(projection),
           getShellSnapshot: () =>
             Effect.succeed({
               schemaVersion: 1,
@@ -279,16 +276,14 @@ it.effect("rejects a rollback when provider selection changed before execution",
       activeProviderThreadId: providerThreadId,
       modelSelection: { instanceId: selectedProviderInstanceId, model: "test-model" },
     },
-    providerThreads: [
-      {
-        id: providerThreadId,
-        providerSessionId,
-        providerInstanceId: originalProviderInstanceId,
-      },
-    ],
-    checkpoints: [{ id: checkpointId, scopeId, status: "ready" }],
-    checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-  } as unknown as OrchestrationV2ThreadProjection;
+    providerThread: {
+      id: providerThreadId,
+      providerSessionId,
+      providerInstanceId: originalProviderInstanceId,
+    },
+    checkpoint: { id: checkpointId, scopeId, status: "ready" },
+    scope: { id: scopeId, cwd: process.cwd() },
+  } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
   const layerTest = layerCheckpointRollbackService.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -297,7 +292,8 @@ it.effect("rejects a rollback when provider selection changed before execution",
         Layer.mock(EventSink.EventSinkV2)({}),
         IdAllocator.layer,
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getThreadRecords: () => Effect.succeed(projection),
+          getThread: () => Effect.succeed(projection.thread),
+          getCheckpointRollbackContext: () => Effect.succeed(projection),
           getShellSnapshot: () =>
             Effect.succeed({
               schemaVersion: 1,
@@ -355,14 +351,16 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
       activeProviderThreadId: providerThreadId,
       modelSelection: { instanceId: providerInstanceId, model: "test-model" },
     },
-    providerThreads: [{ id: providerThreadId, providerSessionId, providerInstanceId }],
-    providerSessions: [],
-    checkpoints: [{ id: checkpointId, scopeId, status: "ready", appRunOrdinal: 1 }],
-    checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-    runs: [],
-    attempts: [],
+    providerThread: { id: providerThreadId, providerSessionId, providerInstanceId },
+    providerSession: undefined,
+    checkpoint: { id: checkpointId, scopeId, status: "ready", appRunOrdinal: 1 },
+    scope: { id: scopeId, cwd: process.cwd() },
+    runsToRollback: [],
+    targetAttempt: undefined,
+    rolledBackAttemptIds: [],
+    staleCheckpoints: [],
     providerTurns: [],
-  } as unknown as OrchestrationV2ThreadProjection;
+  } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
   const layerTest = layerCheckpointRollbackService.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -371,7 +369,8 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
         Layer.mock(EventSink.EventSinkV2)({}),
         IdAllocator.layer,
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getThreadRecords: () => Effect.succeed(projection),
+          getThread: () => Effect.succeed(projection.thread),
+          getCheckpointRollbackContext: () => Effect.succeed(projection),
           getShellSnapshot: () =>
             Effect.succeed({
               schemaVersion: 1,
@@ -447,15 +446,17 @@ it.effect.each([
         activeProviderThreadId: providerThreadId,
         modelSelection: { instanceId: providerInstanceId, model: "test-model" },
       },
-      providerThreads: [providerThread],
-      providerSessions: [],
-      checkpoints: [{ id: checkpointId, scopeId, status: "ready", appRunOrdinal: 0 }],
-      checkpointScopes: [{ id: scopeId, cwd: worktreePath }],
-      runs: [],
-      attempts: [],
-      nodes: [],
+      providerThread,
+      providerSession: undefined,
+      checkpoint: { id: checkpointId, scopeId, status: "ready", appRunOrdinal: 0 },
+      scope: { id: scopeId, cwd: worktreePath },
+      runsToRollback: [],
+      targetAttempt: undefined,
+      rolledBackAttemptIds: [],
+      staleCheckpoints: [],
+      rootNodes: [],
       providerTurns: [],
-    } as unknown as OrchestrationV2ThreadProjection;
+    } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
     const testLayer = CheckpointRollbackService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -503,7 +504,8 @@ it.effect.each([
           }),
           IdAllocator.layer,
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
-            getThreadRecords: () => Effect.succeed(projection),
+            getThread: () => Effect.succeed(projection.thread),
+            getCheckpointRollbackContext: () => Effect.succeed(projection),
             getShellSnapshot: () =>
               Effect.succeed({
                 schemaVersion: 1,
@@ -623,8 +625,8 @@ it.effect.each([
         activeProviderThreadId: providerThreadId,
         modelSelection: { instanceId, model: "test" },
       },
-      providerThreads: [providerThread],
-      providerSessions: [],
+      providerThread,
+      providerSession: undefined,
       providerTurns: [
         ...(multipleTurns
           ? [
@@ -645,20 +647,28 @@ it.effect.each([
           status: "completed",
         })),
       ],
-      nodes: [],
-      attempts: [1, 2, 3].map((ordinal) => ({ id: `attempt-${ordinal}`, runId: `run-${ordinal}` })),
-      checkpoints: [
-        { id: checkpointId, scopeId, status: "ready", appRunOrdinal: targetOrdinal || null },
-      ],
-      checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-      runs: [1, 2, 3].map((ordinal) => ({
-        id: `run-${ordinal}`,
-        ordinal,
-        status: ordinal === 3 ? "rolled_back" : "completed",
-        rootNodeId: null,
-        activeAttemptId: `attempt-${ordinal}`,
-      })),
-    } as unknown as OrchestrationV2ThreadProjection;
+      rootNodes: [],
+      targetAttempt:
+        targetOrdinal === 0 ? undefined : { id: "attempt-1", providerTurnId: "turn-1" },
+      rolledBackAttemptIds: ["attempt-3"],
+      staleCheckpoints: [],
+      checkpoint: {
+        id: checkpointId,
+        scopeId,
+        status: "ready",
+        appRunOrdinal: targetOrdinal || null,
+      },
+      scope: { id: scopeId, cwd: process.cwd() },
+      runsToRollback: [1, 2]
+        .filter((ordinal) => ordinal > targetOrdinal)
+        .map((ordinal) => ({
+          id: `run-${ordinal}`,
+          ordinal,
+          status: "completed",
+          rootNodeId: null,
+          activeAttemptId: `attempt-${ordinal}`,
+        })),
+    } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
     const layerTest = layerCheckpointRollbackService.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -685,7 +695,8 @@ it.effect.each([
           }),
           IdAllocator.layer,
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
-            getThreadRecords: () => Effect.succeed(projection),
+            getThread: () => Effect.succeed(projection.thread),
+            getCheckpointRollbackContext: () => Effect.succeed(projection),
             getThreadProviderContext: () => Effect.succeed({ providerSessions: [] } as never),
             getCheckpointContext: () =>
               Effect.succeed({
