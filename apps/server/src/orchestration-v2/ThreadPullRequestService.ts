@@ -220,8 +220,7 @@ export const make = Effect.gen(function* () {
                 thread.worktreePath === null &&
                 thread.branchPullRequest != null
               ) {
-                // Unless the branch is why the lookup reported nothing. A
-                // long-lived branch reused after its release merged has moved
+                // A long-lived branch reused after its release merged has moved
                 // off that change request, so restoring it here would put back
                 // the stale reference the lookup just rejected.
                 const superseded = yield* git.branchSupersededPullRequest({
@@ -233,7 +232,10 @@ export const make = Effect.gen(function* () {
                   const previous = yield* pullRequests.summary(thread.branchPullRequest, {
                     recoverTransientFailure: false,
                   });
-                  if (previous.state === "merged" || previous.state === "closed") {
+                  if (
+                    previous.headBranch === thread.branch &&
+                    (previous.state === "merged" || previous.state === "closed")
+                  ) {
                     branchPullRequest = thread.branchPullRequest;
                   }
                 }
