@@ -375,32 +375,45 @@ layer("GitLabPullRequestCli.layer", (it) => {
   );
 
   it.effect.each([
-    { action: "merge", autoMerge: "false" },
-    { action: "enable-auto-merge", autoMerge: "true" },
+    { action: "merge", autoMerge: "false", mergeMethod: "squash" },
+    { action: "enable-auto-merge", autoMerge: "true", mergeMethod: "squash" },
+    { action: "merge", autoMerge: "false", mergeMethod: "rebase" },
+    { action: "enable-auto-merge", autoMerge: "true", mergeMethod: "rebase" },
   ] as const)(
-    "$action succeeds on a project requiring the current source SHA",
-    ({ action, autoMerge }) =>
+    "$action with $mergeMethod succeeds on a project requiring the current source SHA",
+    ({ action, autoMerge, mergeMethod }) =>
       Effect.gen(function* () {
         const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
 
         for (const headSha of ["first-head", "updated-head"]) {
+          let currentHeadSha = headSha;
           mockedExecute.mockImplementation(({ cwd, args }) => {
+            if (args[0] === "mr" && args[1] === "rebase") {
+              return Effect.sync(() => {
+                currentHeadSha = `${headSha}-rebased`;
+                return output("");
+              });
+            }
             if (args[0] === "api") {
               return Effect.succeed(
                 output(
                   mergeRequestJson({
-                    diff_refs: { base_sha: "base", head_sha: headSha, start_sha: "start" },
+                    diff_refs: { base_sha: "base", head_sha: currentHeadSha, start_sha: "start" },
                   }),
                 ),
               );
             }
-            if (args[args.indexOf("--sha") + 1] !== headSha) {
+            if (args.includes("--rebase") || args[args.indexOf("--sha") + 1] !== currentHeadSha) {
               return Effect.fail(
                 new GitLabCli.GitLabCliCommandError({
                   operation: "execute",
                   command: "glab",
                   cwd,
-                  cause: new Error("SHA must match the current source branch HEAD"),
+                  cause: new Error(
+                    args.includes("--rebase")
+                      ? "Merge must not combine --rebase with --sha: rebase changes the source HEAD"
+                      : "SHA must match the current source branch HEAD",
+                  ),
                 }),
               );
             }
@@ -412,10 +425,14 @@ layer("GitLabPullRequestCli.layer", (it) => {
             repository: "acme/web",
             number: 7,
             action,
-            mergeMethod: "squash",
+            mergeMethod,
           });
 
-          expect(mockedExecute.mock.calls.slice(-2).map(([input]) => input.args)).toEqual([
+          const callsPerAction = mergeMethod === "rebase" ? 3 : 2;
+          expect(
+            mockedExecute.mock.calls.slice(-callsPerAction).map(([input]) => input.args),
+          ).toEqual([
+            ...(mergeMethod === "rebase" ? [["mr", "rebase", "7", "--repo", "acme/web"]] : []),
             ["api", "projects/acme%2Fweb/merge_requests/7"],
             [
               "mr",
@@ -425,13 +442,13 @@ layer("GitLabPullRequestCli.layer", (it) => {
               "acme/web",
               `--auto-merge=${autoMerge}`,
               "--yes",
-              "--squash",
+              ...(mergeMethod === "squash" ? ["--squash"] : []),
               "--sha",
-              headSha,
+              mergeMethod === "rebase" ? `${headSha}-rebased` : headSha,
             ],
           ]);
         }
-        expect(mockedExecute).toHaveBeenCalledTimes(4);
+        expect(mockedExecute).toHaveBeenCalledTimes(mergeMethod === "rebase" ? 6 : 4);
       }),
   );
 
