@@ -145,16 +145,15 @@ export class GitManager extends Context.Service<
     ) => Effect.Effect<GitBranchPullRequest | null, GitManagerServiceError>;
     /**
      * Whether this branch has moved past its latest merged or closed PR, which
-     * is why `branchPullRequest` reports nothing for it. That PR is the most
-     * recently updated one, so an older `pullRequest` from the same repository
-     * is behind the branch too. Link discovery uses it so it does not restore a
-     * reference the branch outgrew. Call it after `branchPullRequest` for the
-     * same branch: it reuses the git reads that call just confirmed.
+     * is why `branchPullRequest` reports nothing for it, and `pullRequest` is
+     * that PR or an older one from the same repository. Link discovery uses it
+     * so it does not restore a reference the branch outgrew. Call it after
+     * `branchPullRequest` for the same branch: it reuses that call's git reads.
      */
     readonly branchSupersededPullRequest: (input: {
       readonly cwd: string;
       readonly branch: string;
-      readonly pullRequest: { readonly url: string };
+      readonly pullRequest: { readonly number: number; readonly url: string };
     }) => Effect.Effect<boolean, GitManagerServiceError>;
     readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -2522,6 +2521,8 @@ export const make = Effect.gen(function* () {
       readonly refresh: boolean;
       readonly freshGitState: boolean;
       readonly includeMovedPast?: boolean;
+      /** Also judge merged or closed PRs on the default branch, which `branchPullRequest` never returns. */
+      readonly includeDefaultBranch?: boolean;
     },
   ) {
     const remember = <E>(key: string, read: Effect.Effect<string | null, E>) =>
@@ -2686,13 +2687,11 @@ export const make = Effect.gen(function* () {
     }
     const { latest } = cached;
     if (latest === null) return null;
-    if (
+    const terminalOnDefaultBranch =
       (branch === defaultBranch ||
         (defaultBranch === null && (branch === "main" || branch === "master"))) &&
-      latest.state !== "open"
-    ) {
-      return null;
-    }
+      latest.state !== "open";
+    if (terminalOnDefaultBranch && options.includeDefaultBranch !== true) return null;
     const pullRequest = {
       ...toStatusPr(latest),
       closedAt: latest.closedAt ?? null,
@@ -2707,6 +2706,7 @@ export const make = Effect.gen(function* () {
         ? { ...pullRequest, movedPast: true as const }
         : null;
     }
+    if (terminalOnDefaultBranch) return null;
     return pullRequest;
   });
   const branchPullRequest: GitManager["Service"]["branchPullRequest"] = Effect.fn(
@@ -2737,11 +2737,16 @@ export const make = Effect.gen(function* () {
         refresh: false,
         freshGitState: false,
         includeMovedPast: true,
+        includeDefaultBranch: true,
       });
+      // "Latest" means most recently updated, so a comment on an old PR can
+      // make it latest. Numbers only grow within a repository, so a newer saved
+      // PR is not judged by an older one.
       return (
         latest !== null &&
         "movedPast" in latest &&
-        latest.repositoryKey === pullRequestRepositoryKey(pullRequest.url)
+        latest.repositoryKey === pullRequestRepositoryKey(pullRequest.url) &&
+        pullRequest.number <= latest.number
       );
     });
   const invalidateLocalStatus: GitManager["Service"]["invalidateLocalStatus"] = Effect.fn(

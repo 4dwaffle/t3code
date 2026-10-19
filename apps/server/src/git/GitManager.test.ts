@@ -2580,17 +2580,20 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         manager.branchSupersededPullRequest({
           cwd: repoDir,
           branch: "develop",
-          pullRequest: { url },
+          pullRequest: { number: Number(url.split("/").at(-1)), url },
         });
       const outgrown = yield* superseded("https://github.com/pingdotgg/t3code/pull/3");
       // An older release PR from the same branch is behind it too.
       const olderRelease = yield* superseded("https://github.com/pingdotgg/t3code/pull/1");
+      // A newer PR is not judged by an older one that was merely updated later.
+      const newerRelease = yield* superseded("https://github.com/pingdotgg/t3code/pull/9");
       // Numbers repeat across repositories, so another repository's PR is not.
       const otherRepository = yield* superseded("https://github.com/acme/t3code/pull/3");
 
       expect(pullRequest).toBeNull();
       expect(outgrown).toBe(true);
       expect(olderRelease).toBe(true);
+      expect(newerRelease).toBe(false);
       expect(otherRepository).toBe(false);
       expect(gitCommands).toEqual([]);
     }),
@@ -2633,6 +2636,52 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
       expect(status.pr?.number).toBe(216);
       expect(status.pr?.state).toBe("merged");
+    }),
+  );
+
+  it.effect("the default branch reports a release PR it has moved past as superseded", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      const releasedHead = yield* runGit(repoDir, ["rev-parse", "HEAD"]);
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.writeFileString(NodePath.join(repoDir, "next.md"), "next\n");
+      yield* runGit(repoDir, ["add", "next.md"]);
+      yield* runGit(repoDir, ["commit", "-m", "Work after the release merged"]);
+      yield* runGit(repoDir, ["push", "origin", "main"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            encodeCliJson([
+              {
+                number: 5,
+                title: "Release main into production",
+                url: "https://github.com/pingdotgg/t3code/pull/5",
+                baseRefName: "production",
+                headRefName: "main",
+                headRefOid: releasedHead.stdout.trim(),
+                state: "MERGED",
+                mergedAt: "2026-04-02T15:00:00Z",
+                updatedAt: "2026-04-02T15:00:00Z",
+              },
+            ]),
+          ],
+        },
+      });
+
+      const pullRequest = yield* manager.branchPullRequest({ cwd: repoDir, branch: "main" });
+      const superseded = yield* manager.branchSupersededPullRequest({
+        cwd: repoDir,
+        branch: "main",
+        pullRequest: { number: 5, url: "https://github.com/pingdotgg/t3code/pull/5" },
+      });
+
+      expect(pullRequest).toBeNull();
+      expect(superseded).toBe(true);
     }),
   );
 
