@@ -57,47 +57,6 @@ const captureProcessResult = (
   );
 
 describe("VcsProcess.run", () => {
-  it.effect.each([
-    {
-      name: "Windows index lock",
-      stderr: "fatal: Unable to create 'C:\\private\\repo\\.git\\index.lock': File exists.\n",
-      locked: true,
-    },
-    {
-      name: "index permission error",
-      stderr: "fatal: Unable to create '/private/repo/.git/index.lock': Permission denied\n",
-      locked: false,
-    },
-    {
-      name: "a different Git lock",
-      stderr: "fatal: Unable to create '/private/repo/.git/config.lock': File exists.\n",
-      locked: false,
-    },
-  ])("distinguishes $name without retaining raw stderr", ({ stderr, locked }) =>
-    Effect.gen(function* () {
-      const error = yield* captureProcessResult(
-        Effect.succeed({
-          code: ChildProcessSpawner.ExitCode(128),
-          stdout: "",
-          stderr,
-          stdoutTruncated: false,
-          stderrTruncated: false,
-          stdoutInvalidUtf8: false,
-          stderrInvalidUtf8: false,
-          timedOut: false,
-        }),
-      );
-      expect(error).toMatchObject({
-        failureKind: "command-failed",
-        detail: locked
-          ? "Git's index is locked. Wait for other Git operations to finish, then try again."
-          : "Process exited with a non-zero status.",
-      });
-      expect(error.message).not.toContain("private");
-      expect(error).not.toHaveProperty("stderr");
-    }),
-  );
-
   it.effect("explains a locked Git index and allows restore after the lock is released", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -120,7 +79,7 @@ describe("VcsProcess.run", () => {
       ]);
       yield* fs.writeFileString(file, "after\n");
       const lock = path.join(cwd, ".git", "index.lock");
-      yield* fs.writeFileString(lock, "");
+      yield* fs.writeFileString(lock, "held by another process\n");
       const restore = ["restore", "--source=HEAD", "--worktree", "--staged", "--", "README.md"];
 
       const error = yield* Effect.flip(git(restore));
@@ -131,10 +90,8 @@ describe("VcsProcess.run", () => {
         detail: "Git's index is locked. Wait for other Git operations to finish, then try again.",
       });
       expect(error.message).not.toContain("index.lock");
-      expect(error.message).toContain("Git's index is locked.");
-      expect(error).not.toHaveProperty("stderr");
       expect(yield* fs.readFileString(file)).toBe("after\n");
-      expect(yield* fs.exists(lock)).toBe(true);
+      expect(yield* fs.readFileString(lock)).toBe("held by another process\n");
 
       yield* fs.remove(lock);
       yield* git(restore);
@@ -143,7 +100,20 @@ describe("VcsProcess.run", () => {
   );
 
   it.effect.each([
-    { stderr: "fatal: Unable to create '/private/repo/index.lock': File exists", retryable: true },
+    {
+      stderr: "fatal: Unable to create '/private/repo/index.lock': File exists",
+      retryable: true,
+      detail: "Git's index is locked. Wait for other Git operations to finish, then try again.",
+    },
+    {
+      stderr: "fatal: Unable to create 'C:\\private\\repo\\.git\\index.lock': File exists.",
+      retryable: true,
+      detail: "Git's index is locked. Wait for other Git operations to finish, then try again.",
+    },
+    {
+      stderr: "fatal: Unable to create '/private/repo/.git/config.lock': File exists.",
+      retryable: true,
+    },
     {
       stderr: "fatal: Unable to create '/private/repo/index.lock': Permission denied",
       retryable: false,
@@ -160,8 +130,8 @@ describe("VcsProcess.run", () => {
     },
     { stderr: "fatal: index file corrupt", retryable: false },
   ])(
-    "classifies Git exit retryability without retaining stderr: $stderr",
-    ({ stderr, retryable }) =>
+    "classifies Git exit retryability and safe detail without retaining stderr: $stderr",
+    ({ stderr, retryable, detail = "Process exited with a non-zero status." }) =>
       Effect.gen(function* () {
         const error = yield* captureProcessResult(
           Effect.succeed({
@@ -177,8 +147,9 @@ describe("VcsProcess.run", () => {
         );
         assert.instanceOf(error, VcsProcessExitError);
         expect(error.retryable === true).toBe(retryable);
+        expect(error.detail).toBe(detail);
         const encoded = yield* encodeExitError(error);
-        expect(encoded).not.toContain("/private/repo");
+        expect(encoded).not.toContain("private");
       }),
   );
 

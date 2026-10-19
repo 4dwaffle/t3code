@@ -35,7 +35,6 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { GIT_INDEX_LOCKED_DETAIL } from "../vcs/VcsProcess.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -239,6 +238,8 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
   }),
 );
 
+const lockedIndexMessage =
+  "Git's index is locked. Wait for other Git operations to finish, then try again.";
 const rollbackCheckpointId = CheckpointId.make("checkpoint:effect-worker-rollback");
 const rollbackScopeId = CheckpointScopeId.make("checkpoint-scope:effect-worker-rollback");
 const restoreFailure = (detail: string) =>
@@ -264,8 +265,8 @@ const restoreFailure = (detail: string) =>
 it.effect.each([
   {
     name: "a held Git index lock",
-    failure: restoreFailure(GIT_INDEX_LOCKED_DETAIL),
-    message: GIT_INDEX_LOCKED_DETAIL,
+    failure: restoreFailure(lockedIndexMessage),
+    message: lockedIndexMessage,
   },
   {
     name: "raw Git output",
