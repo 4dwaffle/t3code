@@ -459,7 +459,7 @@ describe("PullRequestSyncReactor", () => {
         });
 
         yield* Effect.gen(function* () {
-          yield* startAndSweep(fixture);
+          const reactor = yield* startAndSweep(fixture);
 
           assert.deepStrictEqual(yield* Ref.get(fixture.summaryCalls), [
             {
@@ -496,6 +496,37 @@ describe("PullRequestSyncReactor", () => {
           );
           assert.strictEqual((yield* Ref.get(fixture.stackCalls)).length, 1);
           assert.strictEqual(yield* Ref.get(fixture.shellSnapshotReads), 0);
+
+          const key = {
+            host: "code.example",
+            repository: "gitlab/team/subgroup/project",
+            number: 1,
+          };
+          const actualUrl =
+            "http://code.example:8924/gitlab/gitlab/team/subgroup/project/-/merge_requests/1";
+          for (const repositoryWebUrl of [undefined, actualUrl]) {
+            yield* Ref.set(
+              fixture.snapshots,
+              makeSnapshot([
+                makeThread("one", {
+                  pullRequests: [
+                    makeLink(1, null, {
+                      ...key,
+                      source: "agent",
+                      url: "https://code.example/gitlab/team/subgroup/project/-/merge_requests/1",
+                      ...(repositoryWebUrl === undefined ? {} : { repositoryWebUrl }),
+                    }),
+                  ],
+                }),
+              ]),
+            );
+            yield* reactor.requestSync(key);
+            yield* reactor.drain;
+            assert.strictEqual(
+              (yield* Ref.get(fixture.summaryCalls)).at(-1)?.webUrl,
+              repositoryWebUrl,
+            );
+          }
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
