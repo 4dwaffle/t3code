@@ -276,6 +276,7 @@ export function useThreadListActions(): {
                 case "pin":
                   return pinThread(thread, step.orderKey);
                 case "snooze": {
+                  if (Date.parse(step.snoozedUntil) <= Date.now()) return true;
                   if (!checkThreadOperationPermission(thread, "Could not undo settle"))
                     return false;
                   const result = await snoozeMutation({
