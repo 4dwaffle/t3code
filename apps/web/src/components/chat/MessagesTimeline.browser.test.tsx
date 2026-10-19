@@ -847,25 +847,24 @@ describe("MessagesTimeline history and thread links", () => {
         `message-${index}`,
       ),
     );
-    const timeline = (routeThreadKey: string, timelineEntries: Entry[]) => (
-      <MessagesTimeline
-        {...props}
-        routeThreadKey={routeThreadKey}
-        timelineEntries={timelineEntries}
-        hideEmptyPlaceholder
-      />
-    );
-    await renderElement(timeline("environment-local:loading", []));
+    await renderTimeline([], {
+      ...props,
+      routeThreadKey: `${props.routeThreadKey}-loading`,
+      hideEmptyPlaceholder: true,
+    });
 
-    // The list mounts for this thread, with rows far taller than estimated.
-    await act(async () => roots.at(-1)!.render(timeline("environment-local:opened", entries)));
-    for (let frame = 0; frame < 20; frame += 1) {
-      await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
-    }
-    const viewport = props.listRef.current!.getScrollableNode();
-    expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(
-      1,
+    // Each row is much taller than LegendList's estimate.
+    await act(async () =>
+      roots.at(-1)!.render(<MessagesTimeline {...props} timelineEntries={entries} />),
     );
+    const viewport = props.listRef.current!.getScrollableNode();
+    await vi.waitFor(() => {
+      expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
+      expect(text()).toContain("Paragraph 11.59");
+      expect(
+        viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+      ).toBeLessThanOrEqual(1);
+    });
   });
 
   it("does not render the transient V2 interruption request", async () => {
@@ -1237,7 +1236,7 @@ describe("MessagesTimeline scroll position", () => {
     expect(maxNestedCommits).toBeLessThan(8);
   });
 
-  it("remembers a manual reading position when the chat closes", async () => {
+  it("restores a manual reading position after reopening and switching threads", async () => {
     const props = baseProps();
     function Chat() {
       const [liveFollowEnabled, setLiveFollowEnabled] = useState(true);
@@ -1264,6 +1263,26 @@ describe("MessagesTimeline scroll position", () => {
       atEnd: false,
       scrollOffset: offset,
     });
+
+    const timeline = (routeThreadKey: string) => (
+      <MessagesTimeline {...props} routeThreadKey={routeThreadKey} timelineEntries={tallEntries} />
+    );
+    await renderElement(timeline(props.routeThreadKey));
+    const reopenedViewport = await waitForList(props);
+    await vi.waitFor(() =>
+      expect(Math.abs(reopenedViewport.scrollTop - offset)).toBeLessThanOrEqual(1),
+    );
+
+    await act(async () => roots.at(-1)!.render(timeline(`${props.routeThreadKey}-other`)));
+    await vi.waitFor(() =>
+      expect(
+        reopenedViewport.scrollHeight - reopenedViewport.clientHeight - reopenedViewport.scrollTop,
+      ).toBeLessThanOrEqual(1),
+    );
+    await act(async () => roots.at(-1)!.render(timeline(props.routeThreadKey)));
+    await vi.waitFor(() =>
+      expect(Math.abs(reopenedViewport.scrollTop - offset)).toBeLessThanOrEqual(1),
+    );
   });
 
   it("restores the composer after closing tool output only at the end", async () => {

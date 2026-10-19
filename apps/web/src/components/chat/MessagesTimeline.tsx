@@ -864,13 +864,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
   const minimapItems = deriveTimelineMinimapItems(rows);
-  // The list instance and the thread it mounted on. That list's
-  // initialScrollAtEnd keeps retargeting the end while rows measure, and an
-  // imperative scrollToEnd would replace it with one that stops at the
-  // estimated end. Once the list shows another thread, it is no longer fresh.
+  // Preserve initialScrollAtEnd's measured target until the list is reused
+  // for another thread; scrollToEnd would replace it with an estimated offset.
   const listOpenedOnRef = useRef<{
     readonly list: LegendListRef;
-    readonly identity: string | null;
+    identity: string | null;
   } | null>(null);
   useLayoutEffect(() => {
     const list = listRef.current;
@@ -879,7 +877,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     if (opened?.list !== list) {
       listOpenedOnRef.current = { list, identity: listIdentityKey };
     } else if (opened.identity !== listIdentityKey) {
-      listOpenedOnRef.current = { list, identity: null };
+      opened.identity = null;
     }
   });
   const restoreRowIndex =
