@@ -1,6 +1,7 @@
 package expo.modules.t3composereditor
 
 import android.text.InputType
+import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.inputmethod.BaseInputConnection
@@ -9,7 +10,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.InputDeviceBuilder
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36], manifest = Config.NONE)
@@ -21,10 +24,20 @@ class ComposerSubmitTest {
     submitListener = { alternate -> sends += alternate }
   }
 
+  private val hardwareKeyboard = keyboard(1)
+
+  private fun keyboard(id: Int, type: Int = InputDevice.KEYBOARD_TYPE_ALPHABETIC): InputDevice =
+    InputDeviceBuilder.newBuilder()
+      .setId(id)
+      .setSources(InputDevice.SOURCE_KEYBOARD)
+      .setKeyboardType(type)
+      .build()
+
   private fun pressReturn(
     metaState: Int = 0,
-    deviceId: Int = HARDWARE_KEYBOARD,
-    repeatCount: Int = 0
+    device: InputDevice? = hardwareKeyboard,
+    repeatCount: Int = 0,
+    flags: Int = 0
   ) {
     val event = KeyEvent(
       0,
@@ -33,9 +46,12 @@ class ComposerSubmitTest {
       KeyEvent.KEYCODE_ENTER,
       repeatCount,
       metaState,
-      deviceId,
+      device?.id ?: UNKNOWN_DEVICE,
       0,
+      flags,
     )
+    // Robolectric's getDevice() reads the event's shadow, not the InputManager device list.
+    shadowOf(event).setDevice(device)
     editor.onKeyDown(KeyEvent.KEYCODE_ENTER, event)
   }
 
@@ -49,12 +65,24 @@ class ComposerSubmitTest {
   }
 
   @Test
-  fun shiftReturnAndSoftKeyboardReturnInsertNewlines() {
+  fun shiftReturnInsertsANewline() {
     pressReturn(KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON)
-    pressReturn(deviceId = KeyCharacterMap.VIRTUAL_KEYBOARD)
 
     assertEquals(emptyList<Boolean>(), sends)
-    assertEquals("\n\n", editor.text.toString())
+    assertEquals("\n", editor.text.toString())
+  }
+
+  @Test
+  fun returnFromAnythingButAPhysicalKeyboardInsertsANewline() {
+    pressReturn(device = keyboard(KeyCharacterMap.VIRTUAL_KEYBOARD))
+    // An IME can send device 0 without FLAG_SOFT_KEYBOARD. On phones that ID is the built-in
+    // "keyboard", a key-only device such as the fingerprint sensor.
+    pressReturn(device = keyboard(0, InputDevice.KEYBOARD_TYPE_NON_ALPHABETIC))
+    pressReturn(device = null)
+    pressReturn(flags = KeyEvent.FLAG_SOFT_KEYBOARD)
+
+    assertEquals(emptyList<Boolean>(), sends)
+    assertEquals("\n\n\n\n", editor.text.toString())
   }
 
   @Test
@@ -119,6 +147,6 @@ class ComposerSubmitTest {
   }
 
   private companion object {
-    const val HARDWARE_KEYBOARD = 1
+    const val UNKNOWN_DEVICE = 99
   }
 }

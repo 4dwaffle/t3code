@@ -18,7 +18,7 @@ import android.text.style.ReplacementSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.GestureDetector
-import android.view.KeyCharacterMap
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.KeyEvent
 import android.view.ViewGroup
@@ -671,11 +671,12 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
    * configured behavior and the Ctrl chord does the other one: with "send", Return sends,
    * Ctrl-Return sends the alternate way and Shift-Return inserts a newline; with "newline",
    * Ctrl-Return sends and Ctrl-Shift-Return sends the alternate way. Returns whether the send is
-   * the alternate one, or null to insert a newline. Soft keyboards always insert a newline.
+   * the alternate one, or null to insert a newline. Anything but a physical keyboard inserts a
+   * newline.
    */
   private fun submitChord(keyCode: Int, event: KeyEvent): Boolean? {
     val isReturn = keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
-    if (!isReturn || isFromSoftKeyboard(event) || !canSubmit()) {
+    if (!isReturn || !isFromPhysicalKeyboard(event) || !canSubmit()) {
       return null
     }
     return when {
@@ -687,9 +688,16 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
     }
   }
 
-  private fun isFromSoftKeyboard(event: KeyEvent): Boolean =
-    event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
-      (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
+  // An IME may send Return with any device ID and without FLAG_SOFT_KEYBOARD, so only a real
+  // typing keyboard counts. Device ID 0 is no proof either: it aliases the built-in keyboard,
+  // which on phones is a key-only device like the fingerprint sensor.
+  private fun isFromPhysicalKeyboard(event: KeyEvent): Boolean {
+    val device = event.device
+    return (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == 0 &&
+      device != null &&
+      !device.isVirtual &&
+      device.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+  }
 
   // No composing-text check, unlike iOS's marked-text guard: Latin IMEs keep a composing region
   // over the current word even for hardware typing, so it would block every send. An IME that
