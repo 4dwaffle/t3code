@@ -903,7 +903,12 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     const hasUserMessage = selectedThreadFeed.some(
       (entry) => entry.type === "message" && entry.message.role === "user",
     );
-    if (props.activePendingApproval !== null && props.activePendingUserInput === null) {
+    // Saving a queued-message edit sends nothing, so it leaves the approval alone.
+    if (
+      props.activePendingApproval !== null &&
+      props.activePendingUserInput === null &&
+      props.queuedRunEdit === null
+    ) {
       if (
         props.respondingApprovalId === props.activePendingApproval.requestId ||
         !(await declinePendingApproval(props.activePendingApproval, props.onRespondToApproval)) ||

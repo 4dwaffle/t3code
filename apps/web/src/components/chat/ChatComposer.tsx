@@ -3982,7 +3982,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
-    if (activePendingApproval !== null && activePendingProgress === null) {
+    // Saving a queued-message edit sends nothing, so it leaves the approval alone.
+    if (
+      activePendingApproval !== null &&
+      activePendingProgress === null &&
+      !isEditingQueuedMessage
+    ) {
       event?.preventDefault();
       if (
         approvalSubmissionInFlightRef.current ||
@@ -3997,14 +4002,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setComposerSubmissionError(validationMessage);
       if (validationMessage) return;
       approvalSubmissionInFlightRef.current = true;
-      try {
-        if (
-          !(await declinePendingApproval(activePendingApproval, onRespondToApproval)) ||
-          composerDraftTargetKey !== composerDraftTargetKeyRef.current
-        )
-          return;
-      } finally {
-        approvalSubmissionInFlightRef.current = false;
+      const declined = await declinePendingApproval(
+        activePendingApproval,
+        onRespondToApproval,
+      ).catch(() => false);
+      approvalSubmissionInFlightRef.current = false;
+      if (!declined || composerDraftTargetKey !== composerDraftTargetKeyRef.current) return;
+      // A paste that started during the decline isn't in the draft snapshot yet.
+      if (
+        (pendingImageCompressionsRef.current.get(attachmentTargetKeyRef.current) ?? 0) > 0 ||
+        pendingDraftWork.has(attachmentTargetKeyRef.current)
+      ) {
+        toastManager.add({
+          type: "info",
+          title: "Still bringing attached context into this message.",
+          description: "Send again once its chip resolves.",
+        });
+        return;
       }
     }
     const submission = submitComposerDraft({
