@@ -1077,7 +1077,8 @@ const make = Effect.fn("makeWithDatabase")(function* (
     lockWaitMs: Number((clock.monotonicTimeNanosUnsafe() - start) / 1000n) / 1000,
   });
 
-  let writerBorrowCompleted = false;
+  const writerBorrowBatchSize = 16;
+  let writerBorrowsSinceYield = 0;
   const borrower: Borrower = (use) =>
     Effect.flatMap(route, (target) =>
       Effect.withFiber((fiber) => {
@@ -1097,7 +1098,9 @@ const make = Effect.fn("makeWithDatabase")(function* (
         }
         const writerUse = Effect.onExit(useConnection, (exit) =>
           Effect.sync(() => {
-            writerBorrowCompleted = Exit.isSuccess(exit);
+            writerBorrowsSinceYield = Exit.hasInterrupts(exit)
+              ? 0
+              : Math.min(writerBorrowsSinceYield + 1, writerBorrowBatchSize);
           }),
         );
         return Effect.flatMap(target.lock.withPermitsIfAvailable(1)(writerUse), (result) =>
@@ -1105,15 +1108,15 @@ const make = Effect.fn("makeWithDatabase")(function* (
             ? Effect.succeed(result.value)
             : target.lock.withPermits(1)(
                 Effect.andThen(
-                  // Successful borrowers yield between queued statements; cancellation hands off immediately.
-                  Effect.suspend(() =>
-                    writerBorrowCompleted
-                      ? Effect.callback<void>((resume) => {
-                          const immediate = setImmediate(() => resume(Effect.void));
-                          return Effect.sync(() => clearImmediate(immediate));
-                        })
-                      : Effect.void,
-                  ),
+                  // Failed SQL also consumes the batch; cancellation hands off immediately.
+                  Effect.suspend(() => {
+                    if (writerBorrowsSinceYield < writerBorrowBatchSize) return Effect.void;
+                    writerBorrowsSinceYield = 0;
+                    return Effect.callback<void>((resume) => {
+                      const immediate = setImmediate(() => resume(Effect.void));
+                      return Effect.sync(() => clearImmediate(immediate));
+                    });
+                  }),
                   writerUse,
                 ),
               ),
