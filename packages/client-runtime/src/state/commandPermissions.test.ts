@@ -10,6 +10,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
+  CommandId,
+  ProjectId,
   ThreadId,
   EnvironmentId,
   ScheduledTaskId,
@@ -300,6 +302,13 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
       id: ScheduledTaskId.make("task"),
     }).pipe(Effect.provideService(EnvironmentSupervisor, supervisor), Effect.flip);
     expect(unary._tag).toBe("EnvironmentAuthorizationError");
+    const deletion = yield* requestGuarded(WS_METHODS.projectsMutate, {
+      type: "project.delete",
+      commandId: CommandId.make("delete-project"),
+      projectId: ProjectId.make("project"),
+      force: true,
+    }).pipe(Effect.provideService(EnvironmentSupervisor, supervisor), Effect.flip);
+    expect(deletion._tag).toBe("EnvironmentAuthorizationError");
     const streamed = yield* runStreamGuarded(WS_METHODS.gitRunStackedAction, {
       actionId: "test-action",
       cwd: "/repo",

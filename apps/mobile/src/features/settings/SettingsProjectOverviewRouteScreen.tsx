@@ -1,16 +1,26 @@
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
+import * as Dialog from "../../components/ui/Dialog";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { useState } from "react";
+import { Atom } from "effect/reactivity";
+import { useContext, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { projectEnvironment } from "../../state/projects";
+import { useThreadShells } from "../../state/entities";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsActionRow } from "./components/SettingsActionRow";
 import {
   AndroidSettingsEnvironmentFilter,
   SettingsEnvironmentFilterHeader,
@@ -48,6 +58,7 @@ export function SettingsProjectOverviewRouteScreen() {
               key={`${selectedProjectKey}:${members.map((member) => member.id).join(",")}`}
               members={members}
               environments={selectedTargets}
+              hasOtherMembers={members.length < (group?.members.length ?? 0)}
             />
           )}
         </ScrollView>
@@ -59,17 +70,103 @@ export function SettingsProjectOverviewRouteScreen() {
 function ProjectOverviewContent(props: {
   readonly members: readonly EnvironmentProject[];
   readonly environments: readonly SettingsTarget[];
+  readonly hasOtherMembers: boolean;
 }) {
   const representative = props.members[0]!;
   const displayName = deriveProjectGroupLabel({ representative, members: props.members });
   const [draftName, setDraftName] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isRemoving, setIsRemoving] = useState(false);
+  const removalPending = useRef(false);
+  const registry = useContext(RegistryContext);
+  const threads = useThreadShells();
+  const canRemoveGroup = useAtomValue(
+    useMemo(
+      () =>
+        Atom.make((get) =>
+          props.members.every((member) =>
+            get(projectEnvironment.delete.permissionAtom(member.environmentId)),
+          ),
+        ),
+      [props.members],
+    ),
+  );
+  const deleteProject = useAtomCommand(projectEnvironment.delete, { reportFailure: false });
   const updateProject = useAtomCommand(projectEnvironment.update, {
     label: "project name update",
     reportFailure: true,
   });
   const nextName = (draftName ?? displayName).trim();
   const canSave = !isSaving && nextName.length > 0 && nextName !== displayName;
+
+  const checkRemovalAccess = (members: readonly EnvironmentProject[]) => {
+    const denied = members.find(
+      (member) => !registry.get(projectEnvironment.delete.permissionAtom(member.environmentId)),
+    );
+    if (!denied) return true;
+    const environment = props.environments.find(
+      (entry) => entry.environmentId === denied.environmentId,
+    );
+    Dialog.alert(
+      "Failed to remove project",
+      `This connection cannot change projects in ${environment?.label ?? "this environment"}.`,
+    );
+    return false;
+  };
+
+  const removeMembers = (members: readonly EnvironmentProject[]) => {
+    if (removalPending.current || !checkRemovalAccess(members)) return;
+    const plan = planProjectRemoval({
+      members: members.map((member) => ({
+        ...member,
+        environmentLabel: props.environments.find(
+          (entry) => entry.environmentId === member.environmentId,
+        )?.label,
+      })),
+      groupMemberCount: props.members.length,
+      hasOtherMembers: props.hasOtherMembers,
+      displayName,
+      threads,
+    });
+    removalPending.current = true;
+    Dialog.confirm({
+      title: plan.targetKind === "checkout" ? "Remove checkout" : "Remove project",
+      message: plan.confirmationMessage,
+      confirmText: plan.targetKind === "checkout" ? "Remove checkout" : "Remove project",
+      destructive: true,
+      onCancel: () => {
+        removalPending.current = false;
+      },
+      onConfirm: () => {
+        void (async () => {
+          setIsRemoving(true);
+          try {
+            if (!checkRemovalAccess(members)) return;
+            for (const member of members) {
+              if (!checkRemovalAccess([member])) return;
+              const result = await deleteProject({
+                environmentId: member.environmentId,
+                input: { projectId: member.id, force: true },
+              });
+              if (result._tag === "Failure") {
+                if (!isAtomCommandInterrupted(result)) {
+                  const error = squashAtomCommandFailure(result);
+                  Dialog.alert(
+                    `Failed to remove "${member.title}"`,
+                    error instanceof Error ? error.message : "An error occurred.",
+                  );
+                }
+                return;
+              }
+            }
+          } finally {
+            removalPending.current = false;
+            setIsRemoving(false);
+          }
+        })();
+      },
+    });
+  };
 
   const saveName = () => {
     if (!canSave) return;
@@ -163,10 +260,61 @@ function ProjectOverviewContent(props: {
               <Text className="text-sm leading-normal text-foreground-muted" selectable>
                 {member.workspaceRoot}
               </Text>
+              {props.members.length > 1 || props.hasOtherMembers ? (
+                <RemoveCheckoutAction
+                  member={member}
+                  disabled={isRemoving}
+                  onPress={() => removeMembers([member])}
+                />
+              ) : null}
             </View>
           );
         })}
       </SettingsSection>
+      <SettingsSection title="Danger">
+        <SettingsActionRow
+          icon="trash"
+          label={
+            props.hasOtherMembers
+              ? "Remove checkout"
+              : props.members.length > 1
+                ? "Remove this project everywhere"
+                : "Remove project"
+          }
+          description={
+            props.hasOtherMembers
+              ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
+              : props.members.length > 1
+                ? `Deletes all ${props.members.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                : "Deletes the project entry and its threads. Files on disk are not touched."
+          }
+          tone="danger"
+          disabled={!canRemoveGroup || isRemoving}
+          loading={isRemoving}
+          onPress={() => removeMembers(props.members)}
+        />
+      </SettingsSection>
     </>
+  );
+}
+
+function RemoveCheckoutAction(props: {
+  readonly member: EnvironmentProject;
+  readonly disabled: boolean;
+  readonly onPress: () => void;
+}) {
+  const canRemove = useAtomValue(
+    projectEnvironment.delete.permissionAtom(props.member.environmentId),
+  );
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Remove checkout ${props.member.workspaceRoot}`}
+      disabled={props.disabled || !canRemove}
+      onPress={props.onPress}
+      className="self-start rounded-full border border-border bg-card px-3 py-1.5 disabled:opacity-40"
+    >
+      <Text className="font-t3-medium text-xs text-danger-foreground">Remove checkout</Text>
+    </Pressable>
   );
 }

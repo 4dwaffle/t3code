@@ -33,7 +33,7 @@ import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 
-import { getInitialServerConfig, request } from "../rpc/client.ts";
+import { getInitialServerConfig, request, requestGuarded } from "../rpc/client.ts";
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -328,7 +328,7 @@ const mutateProject = Effect.fn("EnvironmentCommands.mutateProject")(function* (
         readonly force?: boolean;
       },
 ) {
-  return yield* request(WS_METHODS.projectsMutate, mutation);
+  return yield* requestGuarded(WS_METHODS.projectsMutate, mutation);
 });
 
 export const createProject = Effect.fn("EnvironmentCommands.createProject")(function* (
