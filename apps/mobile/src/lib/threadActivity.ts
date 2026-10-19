@@ -4,6 +4,7 @@ import type {
   ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
@@ -145,6 +146,7 @@ export interface ThreadFeedMessage {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly projectedItem?: OrchestrationV2ProjectedTurnItem;
+  readonly checkpointSummary?: ThreadCheckpointSummary;
 }
 
 export interface LocalThreadMessage {
@@ -1750,6 +1752,7 @@ export function buildThreadFeed(
     readonly anchoredMessages?: ReadonlyArray<LocalThreadMessage>;
     readonly attempts?: ReadonlyArray<OrchestrationV2RunAttempt>;
     readonly nodes?: ReadonlyArray<OrchestrationV2ExecutionNode>;
+    readonly checkpointSummaries?: ReadonlyArray<ThreadCheckpointSummary>;
   },
 ): ThreadFeedEntry[] {
   const entries: RawThreadFeedEntry[] = [];
@@ -1913,5 +1916,17 @@ export function buildThreadFeed(
     if (insertionIndex === -1) entries.push(entry);
     else entries.splice(insertionIndex, 0, entry);
   }
-  return groupAdjacentActivities(entries);
+  const checkpointByMessageId = new Map(
+    (options?.checkpointSummaries ?? [])
+      .filter((checkpoint) => checkpoint.status === "ready" && checkpoint.files.length > 0)
+      .map((checkpoint) => [checkpoint.assistantMessageId, checkpoint]),
+  );
+  return groupAdjacentActivities(
+    entries.map((entry) => {
+      if (entry.type !== "message" || entry.message.role !== "assistant") return entry;
+      const checkpointSummary = checkpointByMessageId.get(entry.message.id);
+      if (!checkpointSummary || checkpointSummary.runId !== entry.message.runId) return entry;
+      return { ...entry, message: { ...entry.message, checkpointSummary } };
+    }),
+  );
 }

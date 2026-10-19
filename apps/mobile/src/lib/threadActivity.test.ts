@@ -2,6 +2,7 @@ import {
   ContextHandoffId,
   MessageId,
   CheckpointId,
+  CheckpointRef,
   CheckpointScopeId,
   RuntimeRequestId,
   NodeId,
@@ -20,6 +21,8 @@ import {
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import { deriveThreadCheckpointSummaries } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { getReviewSectionIdForCheckpoint } from "../features/review/reviewModel";
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -252,6 +255,68 @@ describe("buildThreadFeed", () => {
     };
     const feed = buildThreadFeed([projected(assistantMessage(), 0), projected(checkpoint, 1)]);
     expect(feed.map((entry) => entry.type)).toEqual(["message"]);
+  });
+
+  it("carries a late checkpoint to only the final answer without changing cached messages", () => {
+    const earlier = {
+      ...assistantMessage(),
+      id: TurnItemId.make("earlier-item"),
+      messageId: MessageId.make("earlier-message"),
+      text: "Working on the files",
+    };
+    const final = assistantMessage("2026-06-20T00:00:04.000Z");
+    const rows = [projected(earlier, 0), projected(final, 1)];
+    const before = buildThreadFeed(rows);
+    const [summary] = deriveThreadCheckpointSummaries({
+      messages: [earlier, final].map((message) => ({
+        ...message,
+        id: message.messageId,
+        role: "assistant",
+        createdBy: "agent",
+        creationSource: "provider",
+        attachments: [],
+        createdAt: message.startedAt,
+      })),
+      checkpoints: [
+        {
+          id: CheckpointId.make("checkpoint-final"),
+          threadId,
+          scopeId: CheckpointScopeId.make("scope"),
+          runId,
+          nodeId: NodeId.make("node"),
+          parentCheckpointId: null,
+          ordinalWithinScope: 1,
+          appRunOrdinal: 2,
+          ref: CheckpointRef.make("checkpoint-ref"),
+          status: "ready",
+          capturedAt: final.updatedAt,
+          files: [
+            { path: "src/one.ts", kind: "modified", additions: 10, deletions: 2 },
+            { path: "src/two.ts", kind: "added", additions: 5, deletions: 0 },
+          ],
+        },
+      ],
+    });
+    expect(summary).toBeDefined();
+    if (!summary) return;
+    const after = buildThreadFeed(rows, { checkpointSummaries: [summary] });
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toMatchObject({
+      type: "message",
+      message: { id: final.messageId, checkpointSummary: summary },
+    });
+    expect(before[1]).not.toHaveProperty("message.checkpointSummary");
+    expect(getReviewSectionIdForCheckpoint(summary)).toBe("turn:2");
+
+    for (const checkpoint of [
+      { ...summary, files: [] },
+      ...(["missing", "error", "stale"] as const).map((status) => ({ ...summary, status })),
+      { ...summary, runId: RunId.make("another-run") },
+      { ...summary, assistantMessageId: MessageId.make("unloaded-message") },
+    ]) {
+      expect(buildThreadFeed(rows, { checkpointSummaries: [checkpoint] })).toEqual(before);
+    }
+    expect(buildThreadFeed(rows)).toEqual(before);
   });
 
   it("omits cached tool output and patch bodies from expanded and copied activity", () => {

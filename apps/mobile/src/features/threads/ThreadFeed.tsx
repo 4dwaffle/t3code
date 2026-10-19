@@ -19,6 +19,8 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   type OrchestrationMessageContext,
@@ -141,6 +143,8 @@ import {
   type MediaVideoPreviewSource,
 } from "../../lib/videoPreviewSource";
 import { CopyTextButton } from "./CopyTextButton";
+import { getReviewSectionIdForCheckpoint } from "../review/reviewModel";
+import { setReviewSelectedSectionId } from "../review/reviewState";
 import { Menu } from "../../components/ui/Menu";
 import { copyPromptLink } from "../prompt-links/prompt-link-actions";
 import { parseReviewCommentMessageSegments } from "../review/reviewCommentSelection";
@@ -990,6 +994,7 @@ function renderFeedEntry(
     readonly onToggleWorkGroup: (groupId: string, anchorKey?: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
     readonly onToggleTurnFold: (runId: RunId) => void;
+    readonly onOpenTurnDiff: (checkpoint: ThreadCheckpointSummary) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
@@ -1416,6 +1421,12 @@ function renderFeedEntry(
             <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
           );
         })}
+        {showAssistantMeta && message.checkpointSummary ? (
+          <AssistantChangedFilesSummary
+            checkpoint={message.checkpointSummary}
+            onOpenTurnDiff={props.onOpenTurnDiff}
+          />
+        ) : null}
         {showAssistantMeta ? (
           <View className="mt-1 flex-row items-center gap-1">
             <CopyTextButton
@@ -1462,6 +1473,44 @@ function renderFeedEntry(
       renderReasoning={props.renderReasoning}
       onPressPreview={props.onPressPreview}
     />
+  );
+}
+
+function AssistantChangedFilesSummary(props: {
+  readonly checkpoint: ThreadCheckpointSummary;
+  readonly onOpenTurnDiff: (checkpoint: ThreadCheckpointSummary) => void;
+}) {
+  const { files } = props.checkpoint;
+  const additions = files.reduce((total, file) => total + file.additions, 0);
+  const deletions = files.reduce((total, file) => total + file.deletions, 0);
+  const fileCountLabel = `${files.length} file${files.length === 1 ? "" : "s"} changed`;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Review turn ${props.checkpoint.checkpointTurnCount}: ${fileCountLabel}, ${additions} additions, ${deletions} deletions`}
+      onPress={() => props.onOpenTurnDiff(props.checkpoint)}
+      className="mt-2 min-h-11 gap-1 rounded-xl border border-border-subtle px-3 py-2 active:bg-subtle"
+    >
+      <View className="flex-row items-center gap-2">
+        <Text className="flex-1 font-t3-medium text-xs text-foreground-secondary">
+          {fileCountLabel}
+        </Text>
+        <Text className="font-t3-medium text-xs tabular-nums text-adaptive-emerald-700-300">
+          +{formatDiffCount(additions)}
+        </Text>
+        <Text className="font-t3-medium text-xs tabular-nums text-adaptive-rose-700-300">
+          -{formatDiffCount(deletions)}
+        </Text>
+        <SymbolView name="chevron.right" size={12} tintColorClassName="accent-foreground-muted" />
+      </View>
+      <Text className="text-xs text-foreground-muted" numberOfLines={2}>
+        {files
+          .slice(0, 3)
+          .map((file) => file.path)
+          .join(" · ")}
+        {files.length > 3 ? ` · +${files.length - 3} more` : ""}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -1680,6 +1729,19 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const duoColumns = useNativeWorkspaceColumnsSupported() && isDuoDevice(deviceType);
   const openPullRequest = useOpenPullRequest();
   const navigation = useNavigation();
+  const onOpenTurnDiff = useCallback(
+    (checkpoint: ThreadCheckpointSummary) => {
+      setReviewSelectedSectionId(
+        scopedThreadKey(props.environmentId, props.threadId),
+        getReviewSectionIdForCheckpoint(checkpoint),
+      );
+      navigation.navigate("ThreadReview", {
+        environmentId: props.environmentId,
+        threadId: props.threadId,
+      });
+    },
+    [navigation, props.environmentId, props.threadId],
+  );
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disclosureSettleFrameRef = useRef<number | null>(null);
@@ -2376,6 +2438,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onToggleWorkGroup,
             onToggleWorkRow,
             onToggleTurnFold,
+            onOpenTurnDiff,
             onPressPreview,
             onPressVideo,
             markdownLinkHandlers,
