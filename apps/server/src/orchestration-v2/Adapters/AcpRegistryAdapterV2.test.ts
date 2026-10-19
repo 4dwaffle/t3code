@@ -203,6 +203,7 @@ const claudeFrames = {
 const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
   entries: ReadonlyArray<unknown>,
   replayGate?: ProviderReplayGate,
+  continuationEnabled = true,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -219,12 +220,12 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
     ACP_REGISTRY_PROVIDER,
   );
   const offers: Array<ProviderContinuationRequest> = [];
-  const offered = yield* Deferred.make<void>();
+  const offered = yield* Queue.unbounded<void>();
   const continuationRequests = {
     offer: (request: ProviderContinuationRequest) =>
       Effect.sync(() => {
         offers.push(request);
-      }).pipe(Effect.andThen(Deferred.succeed(offered, undefined)), Effect.asVoid),
+      }).pipe(Effect.andThen(Queue.offer(offered, undefined)), Effect.asVoid),
   };
   const instanceId = ProviderInstanceId.make("claude-lifecycle");
   let onTermination: NonNullable<
@@ -245,7 +246,7 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
     instanceId,
     settings: yield* decodeAcpRegistryAdapterSettings({ agentId: "claude-acp" }),
     environment: {},
-    continuationRequests,
+    ...(continuationEnabled ? { continuationRequests } : {}),
     makeRuntime: (runtimeInput: Parameters<typeof replayRuntime>[0]) => {
       onTermination = runtimeInput.onTermination;
       return replayRuntime(runtimeInput);
@@ -269,10 +270,12 @@ const openClaudeReplaySession = Effect.fn("openClaudeReplaySession")(function* (
     runtimePolicy,
   });
   yield* Effect.addFinalizer(() => Effect.sync(() => replayGate?.releaseAll()));
-  assert.isDefined(
-    runtime.hasPendingBackgroundWork,
-    "Claude ACP v2 must report background work after foreground idle",
-  );
+  if (continuationEnabled) {
+    assert.isDefined(
+      runtime.hasPendingBackgroundWork,
+      "Claude ACP v2 must report background work after foreground idle",
+    );
+  }
   const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
   yield* runtime.events.pipe(
     Stream.runForEach((event) => Queue.offer(events, event)),
@@ -699,6 +702,41 @@ describe("AcpRegistryAdapterV2", () => {
         "0",
       );
       assert.isUndefined(yield* launchSwitch({ agentId: "gemini" }));
+      const fallback = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          claudeFrames.prompt(1)[0],
+          claudeChild[0],
+          claudeFrames.update(CLAUDE_ROOT_SESSION, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "agent-1",
+            status: "completed",
+          }),
+          ...claudeFrames.prompt(1).slice(1),
+          claudeFrames.idle("end_turn"),
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        undefined,
+        false,
+      );
+      assert.isUndefined(
+        fallback.runtime.hasPendingBackgroundWork,
+        "an adapter without a continuation dispatcher must use ordinary prompt completion",
+      );
+      yield* fallback.runtime.startTurn(fallback.turnInput(1));
+      const completed = yield* fallback.until((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        completed.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "dynamic_tool" &&
+            event.turnItem.nativeItemRef?.nativeId === "agent-1",
+        ),
+      );
+      const terminal = completed.at(-1)!;
+      if (terminal.type !== "turn.terminal") throw new Error("Missing fallback terminal");
+      assert.equal(terminal.status, "completed");
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
@@ -741,7 +779,15 @@ describe("AcpRegistryAdapterV2", () => {
             status: "failed",
             rawInput: { description: "Missing prompt" },
           }),
-          ...claudeChild,
+          ...claudeChild.slice(0, 2),
+          update("child-1", {
+            sessionUpdate: "agent_message_chunk",
+            messageId: "early-reply",
+            content: { type: "text", text: "First review result." },
+          }),
+          claudeFrames.childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+          ...claudeChild.slice(2),
+          update("child-1", { sessionUpdate: "state_update", state: "running" }),
           ...claudeUnrelatedChildren,
           update(CLAUDE_ROOT_SESSION, {
             sessionUpdate: "agent_message_chunk",
@@ -799,6 +845,21 @@ describe("AcpRegistryAdapterV2", () => {
       if (foregroundTerminal.type !== "turn.terminal")
         throw new Error("Missing foreground terminal");
       assert.equal(foregroundTerminal.status, "completed");
+      const earlyResult = foreground.findLast(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.isDefined(earlyResult, "a child can finish before its spawn acknowledgement");
+      if (earlyResult?.type !== "subagent.updated") throw new Error("Missing early result");
+      assert.equal(earlyResult.subagent.result, "First review result.");
+      const earlyItem = foreground.findLast(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.status === "completed",
+      );
+      if (earlyItem?.type !== "turn_item.updated" || earlyItem.turnItem.type !== "subagent")
+        throw new Error("Missing early parent item");
+      assert.equal(earlyItem.turnItem.result, "First review result.");
       assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
       gate.release("child-output");
       const childOutput = yield* session.throughMarker("child output");
@@ -833,6 +894,9 @@ describe("AcpRegistryAdapterV2", () => {
           (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
         ),
       );
+      const latestChild = childOutput.findLast((event) => event.type === "subagent.updated");
+      if (latestChild?.type !== "subagent.updated") throw new Error("Missing current child result");
+      assert.equal(latestChild.subagent.result, "Found the regression.");
       const rootItems = new Map(
         [...foreground, ...childOutput].flatMap((event) =>
           event.type === "turn_item.updated" &&
@@ -859,7 +923,7 @@ describe("AcpRegistryAdapterV2", () => {
       assert.deepEqual(pendingBackgroundTurnItems({ turnItems: [...rootItems.values()] }), []);
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
       gate.release("wake");
-      yield* Deferred.await(session.offered);
+      yield* Queue.take(session.offered);
       yield* session.throughMarker("continuation idle");
       const offer = session.offers[0]!;
       yield* offer.dispatchIfCurrent!(Effect.void);
@@ -886,7 +950,7 @@ describe("AcpRegistryAdapterV2", () => {
     { kind: "question", stopReason: "error", status: "failed" },
   ] as const)("continues Claude's background $kind and preserves $status idle", (testCase) =>
     Effect.gen(function* () {
-      const gate = makeProviderReplayGate(["wake"]);
+      const gate = makeProviderReplayGate(["wake", "stop-request"]);
       const method =
         testCase.kind === "approval" ? "session/request_permission" : "elicitation/create";
       const params =
@@ -957,8 +1021,25 @@ describe("AcpRegistryAdapterV2", () => {
               ? { error: { code: -32603, message: "API Error: 529 overloaded" } }
               : {}),
           }),
+          {
+            type: "emit_inbound",
+            label: "stop-request",
+            frame: { kind: "request", method, params },
+          },
           claudeFrames.closeRequest,
           claudeFrames.closed,
+          {
+            type: "expect_outbound",
+            frame: {
+              kind: "response",
+              method,
+              result:
+                testCase.kind === "approval"
+                  ? { outcome: { outcome: "cancelled" } }
+                  : { action: "cancel" },
+            },
+          },
+          claudeMarker("detached request cancelled"),
         ],
         gate,
       );
@@ -966,7 +1047,7 @@ describe("AcpRegistryAdapterV2", () => {
       assert.equal((yield* session.terminal).status, "completed");
       assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
       gate.release("wake");
-      yield* Deferred.await(session.offered);
+      yield* Queue.take(session.offered);
       const offer = session.offers[0]!;
       assert.isDefined(offer.dispatchIfCurrent);
       yield* offer.dispatchIfCurrent!(Effect.void);
@@ -1003,6 +1084,21 @@ describe("AcpRegistryAdapterV2", () => {
         assert.isUndefined(terminal.childTurnsContinue);
         assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
       }
+      gate.release("stop-request");
+      yield* Queue.take(session.offered);
+      yield* session.runtime.interruptTurn({
+        providerThread: session.providerThread,
+        providerTurnId: terminal.providerTurnId,
+        requestRuntimeRestart: true,
+      });
+      const cancelled = yield* session.throughMarker("detached request cancelled");
+      assert.isFalse(
+        cancelled.some(
+          (event) =>
+            event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+        ),
+        "detached requests are cancelled before turn admission",
+      );
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
@@ -1034,6 +1130,11 @@ describe("AcpRegistryAdapterV2", () => {
               kind: "execute",
               status: "in_progress",
               rawInput: { command: "cat package.json" },
+            }),
+            update("child-1", {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "progress",
+              content: { type: "text", text: "Review in progress." },
             }),
             idle(stopReason),
             ...prompt(2),
@@ -1109,6 +1210,22 @@ describe("AcpRegistryAdapterV2", () => {
               label: "nested-idle",
             },
             claudeMarker("nested idle"),
+            ...prompt(4),
+            update("child-1", {
+              sessionUpdate: "session_message",
+              messageId: "second-review",
+              senderSessionId: CLAUDE_ROOT_SESSION,
+              recipientSessionId: "child-1",
+              content: [{ type: "text", text: "Review the fix." }],
+            }),
+            childState(CLAUDE_ROOT_SESSION, "child-1", "running"),
+            update("child-1", {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "nested-reply",
+              content: { type: "text", text: "The fix is correct." },
+            }),
+            childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+            idle("end_turn"),
             claudeFrames.closeRequest,
             claudeFrames.closed,
           ],
@@ -1124,6 +1241,11 @@ describe("AcpRegistryAdapterV2", () => {
         assert.isDefined(row);
         if (row?.type !== "subagent.updated") throw new Error("Missing resumed child");
         assert.equal(row.subagent.runId, session.turnInput(2).runId);
+        assert.equal(
+          row.subagent.result,
+          "Review in progress.",
+          "live handoff retains current execution progress",
+        );
         assert.lengthOf(
           resumed.filter(
             (event) =>
@@ -1152,7 +1274,7 @@ describe("AcpRegistryAdapterV2", () => {
         assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
         gate.release("nested-output");
         const childOutput = yield* session.throughMarker("nested");
-        yield* Deferred.await(session.offered);
+        yield* Queue.take(session.offered);
         assert.lengthOf(session.offers, 1);
         yield* session.offers[0]!.dispatchIfCurrent!(Effect.void);
         yield* session.runtime.startTurn(session.turnInput(3, { continuation: true }));
@@ -1203,6 +1325,37 @@ describe("AcpRegistryAdapterV2", () => {
         );
         assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
         assert.lengthOf(session.offers, 1, "nested frames make progress in one continuation");
+        const firstResult = finished.findLast((event) => event.type === "subagent.updated");
+        if (firstResult?.type !== "subagent.updated")
+          throw new Error("Missing first review result");
+        assert.equal(
+          firstResult.subagent.result,
+          "Review in progress.",
+          "reopening the visible owner for a running descendant keeps its execution result",
+        );
+        yield* session.runtime.startTurn(session.turnInput(4));
+        const reviewed = yield* session.until((event) => event.type === "turn.terminal");
+        const currentResult = reviewed.findLast((event) => event.type === "subagent.updated");
+        if (currentResult?.type !== "subagent.updated")
+          throw new Error("Missing second review result");
+        assert.equal(currentResult.subagent.id, row.subagent.id);
+        assert.equal(currentResult.subagent.childThreadId, row.subagent.childThreadId);
+        assert.equal(currentResult.subagent.result, "The fix is correct.");
+        const currentItem = reviewed.findLast(
+          (event) => event.type === "turn_item.updated" && event.turnItem.type === "subagent",
+        );
+        if (currentItem?.type !== "turn_item.updated" || currentItem.turnItem.type !== "subagent")
+          throw new Error("Missing current parent item");
+        assert.equal(currentItem.turnItem.result, "The fix is correct.");
+        assert.lengthOf(
+          reviewed.filter(
+            (event) =>
+              event.type === "message.updated" && event.message.text === "The fix is correct.",
+          ),
+          1,
+          "a new execution does not append the previous execution's text",
+        );
+        assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
