@@ -4643,7 +4643,7 @@ function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentConte
         </div>
       </div>
       {comment.text.length > 0 && (
-        <div className="whitespace-pre-wrap wrap-break-word text-sm">
+        <div className="wrap-break-word text-sm">
           <ChatMarkdown
             text={comment.text}
             cwd={ctx.markdownCwd}
