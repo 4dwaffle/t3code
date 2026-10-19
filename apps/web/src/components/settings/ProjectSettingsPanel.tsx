@@ -56,7 +56,7 @@ const ProjectIconPickerDialog = lazy(() =>
   })),
 );
 
-export type ProjectSettingsCategory = "general" | "integrations" | "source-control" | "project";
+export type ProjectSettingsCategory = "general" | "source-control" | "project";
 
 export function ProjectSettingsPanel({
   projectKey,
