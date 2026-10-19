@@ -1,6 +1,7 @@
 import { type TerminalSummary, WS_METHODS } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import {
   createAtomCommandScheduler,
@@ -9,11 +10,11 @@ import {
   createEnvironmentSubscriptionAtomFamily,
 } from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
-import { subscribe, type EnvironmentRpcInput } from "../rpc/client.ts";
+import { subscribe, subscribeDynamic, type EnvironmentRpcInput } from "../rpc/client.ts";
 import {
   applyTerminalAttachStreamEvent,
   applyTerminalMetadataStreamEvent,
-  EMPTY_TERMINAL_BUFFER_STATE,
+  nextTerminalAttachSeedState,
 } from "./terminalSession.ts";
 
 export function createTerminalEnvironmentAtoms<R, E>(
@@ -37,12 +38,31 @@ export function createTerminalEnvironmentAtoms<R, E>(
   }) => JSON.stringify([environmentId, input.threadId, input.terminalId ?? null]);
   const lifecycleConcurrency = { mode: "serial" as const, key: terminalThreadKey };
   return {
+    observe: createEnvironmentSubscriptionAtomFamily(runtime, {
+      label: "environment-data:terminal:observe",
+      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.terminalObserve>) =>
+        Stream.suspend(() =>
+          subscribe(WS_METHODS.terminalObserve, input).pipe(
+            Stream.scan(nextTerminalAttachSeedState, applyTerminalAttachStreamEvent),
+          ),
+        ),
+    }),
     attach: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:terminal:attach",
-      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.terminalAttach>) =>
-        subscribe(WS_METHODS.terminalAttach, input).pipe(
-          Stream.scan(EMPTY_TERMINAL_BUFFER_STATE, applyTerminalAttachStreamEvent),
-        ),
+      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.terminalAttach>) => {
+        // Retry an unanswered first attach unchanged so it can still open the shell.
+        let replied = false;
+        return subscribeDynamic(WS_METHODS.terminalAttach, () =>
+          Effect.sync(() => (replied ? { ...input, resume: true } : input)),
+        ).pipe(
+          Stream.onFirst(() =>
+            Effect.sync(() => {
+              replied = true;
+            }),
+          ),
+          Stream.scan(nextTerminalAttachSeedState, applyTerminalAttachStreamEvent),
+        );
+      },
     }),
     events: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:terminal:events",
@@ -52,7 +72,7 @@ export function createTerminalEnvironmentAtoms<R, E>(
       label: "environment-data:terminal:metadata",
       subscribe: (_input: null) =>
         subscribe(WS_METHODS.subscribeTerminalMetadata, {}).pipe(
-          Stream.scan([] as ReadonlyArray<TerminalSummary>, applyTerminalMetadataStreamEvent),
+          Stream.scan((): ReadonlyArray<TerminalSummary> => [], applyTerminalMetadataStreamEvent),
         ),
     }),
     open: createEnvironmentRpcCommand(runtime, {
