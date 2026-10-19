@@ -8,6 +8,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
@@ -18,6 +19,10 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
+
+const encodeLaunchRequest = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String])),
+);
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -63,14 +68,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller, scope } = context;
-        // A retry with the same key replays the first launch: the ids derive
-        // from the caller and the key, and the launch service replays a
-        // command it already accepted.
+        // JSON preserves lone surrogates and separates the caller from the key.
         const commandId =
           input.clientRequestId === undefined
             ? yield* newCommandId()
             : CommandId.make(
-                `mcp:launch:${encodeURIComponent(scope.requestNamespace)}:${encodeURIComponent(input.clientRequestId)}`,
+                `mcp:launch:${encodeURIComponent(encodeLaunchRequest([scope.requestNamespace, input.clientRequestId]))}`,
               );
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);

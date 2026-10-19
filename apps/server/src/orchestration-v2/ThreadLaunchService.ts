@@ -945,6 +945,7 @@ const make = Effect.gen(function* () {
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
         }
+
         let runId: RunId | null = null;
         let messageWasAlreadyAccepted = false;
         if (input.initialMessage !== undefined) {
@@ -978,11 +979,8 @@ const make = Effect.gen(function* () {
               creationSource: input.creationSource,
             })
             .pipe(
-              // An agent's launch may land on a thread a replay, or a
-              // concurrent launch with the same key, created with broader modes
-              // than it asks for. The orchestrator refuses the message under
-              // the thread's lock. The user's own clients launch into their
-              // own drafts, whatever modes those hold.
+              // A retry may find a thread with broader modes; enforce the agent's
+              // limit under the command lock before dispatching its message.
               input.createdBy === "agent"
                 ? Effect.provideService(DispatchModeLimit, {
                     runtimeMode: input.runtimeMode,
