@@ -1,9 +1,11 @@
 import { waitForTitleRegenerationFailure } from "@t3tools/client-runtime/state/title-regeneration";
 import type { CommandId, ScopedThreadRef } from "@t3tools/contracts";
+import { Atom } from "effect/reactivity";
 
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadShells } from "../state/threads";
+import { environmentShell } from "../state/shell";
 
 const TITLE_REGENERATION_TIMEOUT_MS = 5 * 60_000;
 
@@ -30,7 +32,6 @@ export function createTitleRegenerationReporter() {
       }),
       onClose: () => {
         toastId = null;
-        failures = 0;
       },
     };
     if (toastId === null) toastId = toastManager.add(options);
@@ -42,7 +43,12 @@ export function createTitleRegenerationReporter() {
       const controller = new AbortController();
       void waitForTitleRegenerationFailure({
         registry: appAtomRegistry,
-        atom: environmentThreadShells.threadShellAtom(threadRef),
+        atom: Atom.make((get) => {
+          const status = get(environmentShell.statusAtom(threadRef.environmentId));
+          return status === "cached" || status === "empty"
+            ? null
+            : get(environmentThreadShells.threadShellAtom(threadRef));
+        }),
         requestId,
         timeoutMs: TITLE_REGENERATION_TIMEOUT_MS,
         signal: controller.signal,

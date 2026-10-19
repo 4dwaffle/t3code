@@ -4,7 +4,6 @@ import {
   type ChatAttachment,
   type MessageId,
   type ServerSettingsError,
-  TextGenerationError,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -13,7 +12,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
-import * as Schema from "effect/Schema";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
@@ -25,20 +23,6 @@ import { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTi
 export { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
 
 const TITLE_GENERATION_FAILED_MESSAGE = "The thread title could not be generated.";
-// The reason is persisted on the thread and sent with its shell, so CLI output is capped.
-const TITLE_GENERATION_FAILURE_MAX_LENGTH = 500;
-const isTextGenerationError = Schema.is(TextGenerationError);
-
-/** The provider's reason when text generation failed, or a fixed message for anything else. */
-const titleGenerationFailureMessage = (cause: Cause.Cause<unknown>): string => {
-  const error = Cause.squash(cause);
-  const detail = isTextGenerationError(error) ? error.detail.trim() : "";
-  if (detail.length === 0) return TITLE_GENERATION_FAILED_MESSAGE;
-  return detail.length > TITLE_GENERATION_FAILURE_MAX_LENGTH
-    ? `${detail.slice(0, TITLE_GENERATION_FAILURE_MAX_LENGTH - 1).trimEnd()}…`
-    : detail;
-};
-
 type TitleOutcome =
   | { readonly type: "stale" }
   | { readonly type: "complete"; readonly title?: string; readonly failure?: string };
@@ -158,7 +142,8 @@ const make = Effect.gen(function* () {
             }).pipe(
               Effect.as({
                 type: "complete" as const,
-                failure: titleGenerationFailureMessage(cause),
+                // CLI output belongs in the logged cause, never the durable failure.
+                failure: TITLE_GENERATION_FAILED_MESSAGE,
               }),
             ),
       ),

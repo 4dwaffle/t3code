@@ -114,6 +114,9 @@ vi.mock("../../state/thread-order", () => ({
     };
   },
 }));
+vi.mock("../../state/shell", () => ({
+  environmentShell: { statusAtom: () => "shell-status" },
+}));
 vi.mock("../../state/threads", () => ({
   environmentThreadShells: {
     threadShellsAtom: "thread-shells",

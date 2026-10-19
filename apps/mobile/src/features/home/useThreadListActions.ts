@@ -5,6 +5,7 @@ import { waitForTitleRegenerationFailure } from "@t3tools/client-runtime/state/t
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { AuthOrchestrationOperateScope, CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import { Atom } from "effect/reactivity";
 import * as Haptics from "expo-haptics";
 import { useRef } from "react";
 
@@ -15,6 +16,7 @@ import { uuidv4 } from "../../lib/uuid";
 import { refreshArchivedThreadsForEnvironment } from "../archive/useArchivedThreadSnapshots";
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentShell } from "../../state/shell";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { readEnvironmentScope } from "../../state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
@@ -467,9 +469,16 @@ export function useThreadListActions(): {
       const watcher = new AbortController();
       void waitForTitleRegenerationFailure({
         registry: appAtomRegistry,
-        atom: environmentThreadShells.threadShellAtom(
-          scopeThreadRef(thread.environmentId, thread.id),
-        ),
+        atom: Atom.make((get) => {
+          const status = get(environmentShell.statusAtom(thread.environmentId));
+          return status === "cached" || status === "empty"
+            ? null
+            : get(
+                environmentThreadShells.threadShellAtom(
+                  scopeThreadRef(thread.environmentId, thread.id),
+                ),
+              );
+        }),
         requestId,
         timeoutMs: TITLE_REGENERATION_TIMEOUT_MS,
         signal: watcher.signal,

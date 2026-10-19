@@ -1,21 +1,11 @@
-// @effect-diagnostics globalTimers:off -- Promise helper for UI callers, outside an Effect runtime.
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
 
-/**
- * Waits for title regeneration `requestId` to settle on the thread shell in
- * `atom`. Resolves with the server's failure reason, or null once the request
- * finishes without failing, the thread goes away, `signal` aborts, or
- * `timeoutMs` elapses without the request in flight.
- *
- * Start it before sending the regeneration command, and abort it if the command
- * is rejected. A success is only recognized after this client saw the request
- * in flight, so a watcher started late waits for its timeout. A failure keeps
- * the request id and is reported either way. A request still in flight at the
- * timeout keeps the watcher, since a bulk regeneration can queue behind slow
- * generations for longer than any fixed deadline.
- */
+/** Arm before sending the command; abort when it is rejected. A null shell
+    cancels observation, including when the caller loses its live connection. */
 export function waitForTitleRegenerationFailure(input: {
   readonly registry: AtomRegistry.AtomRegistry;
   readonly atom: Atom.Atom<EnvironmentThreadShell | null>;
@@ -23,49 +13,33 @@ export function waitForTitleRegenerationFailure(input: {
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
 }): Promise<string | null> {
-  return new Promise((resolve) => {
+  let unsubscribe: (() => void) | undefined;
+  const observation = Effect.callback<string | null>((resume) => {
     let sawInFlight = false;
-    let settled = false;
-    let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
-    let unsubscribe: (() => void) | undefined;
-
-    const abort = () => finish(null);
-    const finish = (failure: string | null) => {
-      if (settled) return;
-      settled = true;
-      if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId);
-      input.signal?.removeEventListener("abort", abort);
-      unsubscribe?.();
-      resolve(failure);
-    };
-    if (input.signal?.aborted) return finish(null);
-    input.signal?.addEventListener("abort", abort, { once: true });
     const inspect = (thread: EnvironmentThreadShell | null) => {
-      if (thread === null) return finish(null);
+      if (thread === null) return resume(Effect.succeed(null));
       if (thread.titleRegenerationFailure?.requestId === input.requestId) {
-        return finish(thread.titleRegenerationFailure.message);
+        return resume(Effect.succeed(thread.titleRegenerationFailure.message));
       }
       if (thread.titleRegeneration?.requestId === input.requestId) {
         sawInFlight = true;
       } else if (sawInFlight) {
-        finish(null);
+        resume(Effect.succeed(null));
       }
     };
-
-    const stop = input.registry.subscribe(input.atom, inspect);
-    unsubscribe = stop;
-    if (settled) {
-      stop();
-      return;
-    }
+    unsubscribe = input.registry.subscribe(input.atom, inspect);
     inspect(input.registry.get(input.atom));
-    if (!settled) {
-      timeoutId = globalThis.setTimeout(() => {
-        timeoutId = undefined;
-        if (input.registry.get(input.atom)?.titleRegeneration?.requestId !== input.requestId) {
-          finish(null);
-        }
-      }, input.timeoutMs);
-    }
-  });
+  }).pipe(Effect.ensuring(Effect.sync(() => unsubscribe?.())));
+  // A queued generation may outlast this deadline. Only abandon requests that
+  // never started (or whose successful completion arrived without its start).
+  const unobserved = Effect.sleep(input.timeoutMs).pipe(
+    Effect.andThen(() =>
+      input.registry.get(input.atom)?.titleRegeneration?.requestId === input.requestId
+        ? Effect.never
+        : Effect.succeed(null),
+    ),
+  );
+  return Effect.runPromiseExit(Effect.raceFirst(observation, unobserved), {
+    signal: input.signal,
+  }).then((exit) => (Exit.isSuccess(exit) ? exit.value : null));
 }

@@ -72,6 +72,7 @@ import {
   ToolActivitySource,
 } from "./providerRuntime.ts";
 import { ThreadTokenUsageSnapshot } from "./providerRuntime.ts";
+import { ThreadTitleRegenerationFailure } from "./threadTitle.ts";
 
 export const OrchestrationV2Actor = Schema.Literals(["user", "agent", "system"]);
 export type OrchestrationV2Actor = typeof OrchestrationV2Actor.Type;
@@ -411,14 +412,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
     ),
   ),
   /** Latest title generation that failed; cleared when the next regeneration starts. */
-  titleRegenerationFailure: Schema.optional(
-    Schema.NullOr(
-      Schema.Struct({
-        requestId: CommandId,
-        message: TrimmedNonEmptyString,
-      }),
-    ),
-  ),
+  titleRegenerationFailure: Schema.optional(Schema.NullOr(ThreadTitleRegenerationFailure)),
   rollbackRequestId: Schema.optional(CommandId),
   rollbackFailure: Schema.optional(
     Schema.NullOr(
@@ -1876,12 +1870,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
     ),
   ),
   /** Latest failed title generation; omitted when the last one did not fail. */
-  titleRegenerationFailure: Schema.optional(
-    Schema.Struct({
-      requestId: CommandId,
-      message: TrimmedNonEmptyString,
-    }),
-  ),
+  titleRegenerationFailure: Schema.optional(ThreadTitleRegenerationFailure),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2ThreadShell = typeof OrchestrationV2ThreadShell.Type;
