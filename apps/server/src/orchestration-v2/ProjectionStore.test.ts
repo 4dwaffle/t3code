@@ -9,7 +9,6 @@ import {
   MessageId,
   type ModelSelection,
   type OrchestrationV2ProviderThread,
-  type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShellSnapshot,
   NodeId,
   ProjectId,
@@ -5874,7 +5873,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             deletedAt: null,
           },
         });
-      // Each turn is one run with one user prompt.
       const addTurn = Effect.fnUntraced(function* (threadId: ThreadId, turn: number, text: string) {
         const runId = RunId.make(`run:${threadId}:${turn}`);
         const nodeId = NodeId.make(`node:${threadId}:${turn}`);
@@ -5936,71 +5934,53 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           },
         });
       });
-      const firstPage = (projection: OrchestrationV2ThreadProjection) => {
-        const bounded = buildBoundedThreadProjection({ projection, snapshotSequence: 0 });
-        return {
-          items: bounded.projection.visibleTurnItems,
-          historyCursor: bounded.historyCursor,
-          hasMoreHistory: bounded.hasMoreHistory,
-        };
-      };
-      // The initial window must be the tail of the full timeline, with the same
-      // positions, and bound to the same first page and cursor.
-      const readFirstPage = Effect.fnUntraced(function* (threadId: ThreadId) {
-        const full = (yield* store.getThreadSnapshot(threadId)).projection;
-        const { window, parsedParent } = yield* Effect.acquireUseRelease(
+      const readFirstPage = Effect.fnUntraced(function* (
+        threadId: ThreadId,
+        parsesParent: boolean,
+      ) {
+        const full = yield* store.getThreadSnapshot(threadId);
+        // Measure only the window read; the full snapshot is the pagination oracle.
+        const parse = yield* Effect.acquireRelease(
           Effect.sync(() => vi.spyOn(JSON, "parse")),
-          (parse) =>
-            store
-              .getThreadSnapshotWindow(threadId, {
-                rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
-                userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
-              })
-              .pipe(
-                Effect.map(({ projection }) => ({
-                  window: projection,
-                  parsedParent: parse.mock.calls.some(([text]) => text.includes(parentText)),
-                })),
-              ),
-          (parse) => Effect.sync(() => parse.mockRestore()),
+          (spy) => Effect.sync(() => spy.mockRestore()),
         );
-        const visible = window.visibleTurnItems;
-        assert.deepEqual(visible, full.visibleTurnItems.slice(-visible.length));
-        const page = firstPage(window);
-        assert.deepEqual(page, firstPage(full));
-        return { page, parsedParent };
-      });
+        const window = yield* store.getThreadSnapshotWindow(threadId, {
+          rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
+          userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+        });
+        assert.equal(
+          parse.mock.calls.some(([text]) => text.includes(parentText)),
+          parsesParent,
+        );
+        const page = buildBoundedThreadProjection(window);
+        assert.deepEqual(page, buildBoundedThreadProjection(full));
+        assert.isTrue(page.hasMoreHistory);
+        assert.isNotNull(page.historyCursor);
+        return page.projection.visibleTurnItems;
+      }, Effect.scoped);
 
       yield* createThread(parentId, null);
-      for (const turn of [1, 2, 3]) yield* addTurn(parentId, turn, parentText);
-      // The parent kept going after the fork, so its third turn is not inherited.
+      for (const turn of [1, 2, 3]) yield* addTurn(parentId, turn, `${parentText} ${turn}`);
+      // The third parent turn is after the fork boundary and must stay excluded.
       yield* createThread(forkId, { threadId: parentId, runId: RunId.make(`run:${parentId}:2`) });
       for (let turn = 1; turn <= 9; turn += 1) yield* addTurn(forkId, turn, "fork prompt");
-
-      // Nine local turns leave room for the parent's last inherited turn, so
-      // the window still reads parent bodies.
-      const partial = yield* readFirstPage(forkId);
+      const partial = yield* readFirstPage(forkId, true);
       assert.include(
-        partial.page.items.map((row) => row.visibility),
+        partial.map((row) => row.visibility),
         "inherited",
       );
-      assert.isTrue(partial.parsedParent);
 
-      // Ten local turns fill the page: parent rows only shift positions and
-      // the cursor, so their bodies are not read.
       yield* addTurn(forkId, 10, "fork prompt");
-      const filled = yield* readFirstPage(forkId);
-      assert.isNotNull(filled.page.historyCursor);
-      assert.isFalse(filled.parsedParent);
+      const filled = yield* readFirstPage(forkId, false);
+      assert.notInclude(
+        filled.map((row) => row.visibility),
+        "inherited",
+      );
 
-      // A fork of the fork inherits the grandparent's rows through its parent,
-      // and its parent's own ten turns fill a page too. Counting rows at either
-      // level would misplace the page, so a nested fork keeps the full read.
       const nestedId = ThreadId.make("thread:filled-fork:nested");
       yield* createThread(nestedId, { threadId: forkId, runId: RunId.make(`run:${forkId}:10`) });
       for (let turn = 1; turn <= 10; turn += 1) yield* addTurn(nestedId, turn, "nested prompt");
-      const nested = yield* readFirstPage(nestedId);
-      assert.isTrue(nested.parsedParent);
+      yield* readFirstPage(nestedId, true);
     }),
   );
 
