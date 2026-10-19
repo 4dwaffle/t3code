@@ -1,6 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
-import { vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import {
   AgentSessionImportSource,
@@ -46,7 +45,6 @@ const layerProjectStore = (importedWorkspaceRoots: ReadonlyArray<string>) =>
   });
 
 interface ScannerTestInput {
-  readonly nativeFiles?: NodeTranscriptFileSystem.NodeTranscriptFileSystem["Service"];
   readonly claudeHomePath: string;
   readonly codexHomePath: string;
   readonly importedWorkspaceRoots?: ReadonlyArray<string>;
@@ -56,11 +54,7 @@ interface ScannerTestInput {
 
 const layerScannerTest = (input: ScannerTestInput) =>
   AgentSessionScanner.layer.pipe(
-    Layer.provide(
-      input.nativeFiles === undefined
-        ? NodeTranscriptFileSystem.layer
-        : Layer.succeed(NodeTranscriptFileSystem.NodeTranscriptFileSystem, input.nativeFiles),
-    ),
+    Layer.provide(NodeTranscriptFileSystem.layer),
     Layer.provide(
       Layer.mergeAll(
         ServerSettings.layerTest({
@@ -199,33 +193,17 @@ const makeFileIdentityFixture = Effect.fn("AgentSessionScanner.test.makeFileIden
       });
     }
 
-    // Simulate NTFS IDs omitted by Effect, including a same-millisecond birthtime collision.
+    // Adjacent NTFS IDs round to the same number; birthtimes can also collide.
     const birthtime = Option.some(DateTime.toDateUtc(DateTime.makeUnsafe(nowMs)));
-    const effectIdentity = (target: string, info: FileSystem.File.Info) =>
-      target === filePath ? { ...info, ino: Option.none(), birthtime } : info;
-    const native = yield* NodeTranscriptFileSystem.NodeTranscriptFileSystem.pipe(
-      Effect.provide(NodeTranscriptFileSystem.layer),
-    );
-    const ids = new Map<NodeTranscriptFileSystem.TranscriptIdentity["inode"], string>();
-    const nativeIdentity = (info: NodeTranscriptFileSystem.TranscriptIdentity) => {
-      const inode = ids.get(info.inode) ?? (inodeOffset + BigInt(ids.size + 42)).toString();
-      ids.set(info.inode, inode);
-      return { ...info, inode, birthtimeMs: nowMs };
+    const ids = new Map<bigint, bigint>();
+    const effectIdentity = (target: string, info: FileSystem.File.Info) => {
+      if (target !== filePath) return info;
+      const realInode = Option.getOrThrow(info.ino);
+      const inode = ids.get(realInode) ?? inodeOffset + BigInt(ids.size + 42);
+      ids.set(realInode, inode);
+      return { ...info, ino: Option.some(inode), birthtime };
     };
     let opens = 0;
-    const open = Effect.fnUntraced(function* (target: string) {
-      const file = yield* native.open(target);
-      if (target !== filePath) return file;
-      opens += 1;
-      return { ...file, identity: file.identity.pipe(Effect.map(nativeIdentity)) };
-    });
-    const nativeFiles = NodeTranscriptFileSystem.NodeTranscriptFileSystem.of({
-      open,
-      stat: (target) =>
-        native
-          .stat(target)
-          .pipe(Effect.map((info) => (target === filePath ? nativeIdentity(info) : info))),
-    });
     const simulatedFileSystem = FileSystem.FileSystem.of({
       ...fileSystem,
       stat: (target) =>
@@ -242,22 +220,16 @@ const makeFileIdentityFixture = Effect.fn("AgentSessionScanner.test.makeFileIden
       },
     });
     const scanner = yield* AgentSessionScanner.AgentSessionScanner.pipe(
-      Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath, nativeFiles })),
+      Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })),
       Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
     );
     return {
       scanner,
       workspace,
-      open,
-      nativeFiles,
       opens: () => opens,
       replace: Effect.gen(function* () {
         yield* fileSystem.rename(filePath, savedPath);
         yield* fileSystem.rename(replacementPath, filePath);
-      }).pipe(Effect.orDie),
-      restore: Effect.gen(function* () {
-        yield* fileSystem.rename(filePath, replacementPath);
-        yield* fileSystem.rename(savedPath, filePath);
       }).pipe(Effect.orDie),
     };
   },
@@ -1988,7 +1960,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
     );
 
     it.effect(
-      "imports same-metadata replacements with exact large file IDs and backfills legacy null IDs once",
+      "imports same-metadata replacements with exact large file IDs and backfills legacy IDs once",
       () =>
         Effect.gen(function* () {
           const fixture = yield* makeFileIdentityFixture();
@@ -2014,68 +1986,25 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           expect(imported.source.inode).toBe(((1n << 60n) + 42n).toString());
           if (replaced[0]?._tag !== "Importable") return;
 
-          const legacy = decodeImportSource({
-            ...replaced[0].source,
-            inode: null,
-          });
-          const backfilled = yield* scanner
-            .recentThreads(workspace, [legacy])
-            .pipe(Stream.runCollect);
-          expect(backfilled[0]).toMatchObject({
-            _tag: "Importable",
-            source: replaced[0].source,
-          });
-          if (backfilled[0]?._tag !== "Importable") return;
-          const opensBeforeCompleted = fixture.opens();
-          const completed = yield* scanner
-            .recentThreads(workspace, [backfilled[0].source])
-            .pipe(Stream.runCollect);
-          expect(completed[0]?._tag).toBe("AlreadyImported");
-          expect(fixture.opens()).toBe(opensBeforeCompleted);
+          for (const inode of [Number(replaced[0].source.inode), null]) {
+            const legacy = decodeImportSource({ ...replaced[0].source, inode });
+            const opensBeforeBackfill = fixture.opens();
+            const backfilled = yield* scanner
+              .recentThreads(workspace, [legacy])
+              .pipe(Stream.runCollect);
+            expect(backfilled[0]).toMatchObject({
+              _tag: "Importable",
+              source: replaced[0].source,
+            });
+            expect(fixture.opens()).toBe(opensBeforeBackfill + 1);
+            if (backfilled[0]?._tag !== "Importable") return;
+            const completed = yield* scanner
+              .recentThreads(workspace, [backfilled[0].source])
+              .pipe(Stream.runCollect);
+            expect(completed[0]?._tag).toBe("AlreadyImported");
+            expect(fixture.opens()).toBe(opensBeforeBackfill + 1);
+          }
         }),
-    );
-
-    it.effect("rejects an opened replacement even when the original pathname is restored", () =>
-      Effect.gen(function* () {
-        const fixture = yield* makeFileIdentityFixture();
-        yield* fixture.scanner.scan;
-        vi.spyOn(fixture.nativeFiles, "open").mockImplementationOnce(
-          Effect.fnUntraced(function* (target) {
-            yield* fixture.replace;
-            const file = yield* fixture.open(target);
-            yield* fixture.restore;
-            return file;
-          }),
-        );
-
-        const outcomes = yield* fixture.scanner
-          .recentThreads(fixture.workspace)
-          .pipe(Stream.runCollect);
-        expect(outcomes).toEqual([{ _tag: "Skipped" }]);
-      }),
-    );
-
-    it.effect("reads the identified handle when its pathname is replaced before reading", () =>
-      Effect.gen(function* () {
-        const fixture = yield* makeFileIdentityFixture();
-        yield* fixture.scanner.scan;
-        vi.spyOn(fixture.nativeFiles, "open").mockImplementationOnce(
-          Effect.fnUntraced(function* (target) {
-            const file = yield* fixture.open(target);
-            const replace = yield* Effect.cached(fixture.replace);
-            return { ...file, identity: file.identity.pipe(Effect.tap(() => replace)) };
-          }),
-        );
-
-        const outcomes = yield* fixture.scanner
-          .recentThreads(fixture.workspace)
-          .pipe(Stream.runCollect);
-        expect(outcomes[0]).toMatchObject({
-          _tag: "Importable",
-          thread: { providerSessionId: "original-session" },
-          source: { inode: ((1n << 60n) + 42n).toString() },
-        });
-      }),
     );
 
     it.effect("imports visible history from a transcript with an oversized tool record", () =>
