@@ -1,6 +1,6 @@
 import { CommandId, EnvironmentId } from "@t3tools/contracts";
 import { Atom, AtomRegistry } from "effect/reactivity";
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 
 import { scopeThreadShell, type EnvironmentThreadShell } from "./models.ts";
 import { v2Now, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
@@ -86,4 +86,32 @@ it("resolves null when the watcher is aborted after a rejected command", async (
   const { wait, abort } = setup(settled);
   abort();
   await expect(wait).resolves.toBeNull();
+});
+
+it("keeps watching a request still in flight at the timeout", async () => {
+  vi.useFakeTimers();
+  try {
+    const { wait, set } = setup(inFlight);
+    let result: string | null | undefined;
+    void wait.then((value) => {
+      result = value;
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(result).toBeUndefined();
+    set(failed);
+    await expect(wait).resolves.toBe("refresh_token_reused");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("gives up at the timeout when the request never appears in flight", async () => {
+  vi.useFakeTimers();
+  try {
+    const { wait } = setup(settled);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(wait).resolves.toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
 });

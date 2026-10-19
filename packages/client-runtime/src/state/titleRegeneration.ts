@@ -7,12 +7,14 @@ import type { EnvironmentThreadShell } from "./models.ts";
  * Waits for title regeneration `requestId` to settle on the thread shell in
  * `atom`. Resolves with the server's failure reason, or null once the request
  * finishes without failing, the thread goes away, `signal` aborts, or
- * `timeoutMs` elapses.
+ * `timeoutMs` elapses without the request in flight.
  *
  * Start it before sending the regeneration command, and abort it if the command
  * is rejected. A success is only recognized after this client saw the request
  * in flight, so a watcher started late waits for its timeout. A failure keeps
- * the request id and is reported either way.
+ * the request id and is reported either way. A request still in flight at the
+ * timeout keeps the watcher, since a bulk regeneration can queue behind slow
+ * generations for longer than any fixed deadline.
  */
 export function waitForTitleRegenerationFailure(input: {
   readonly registry: AtomRegistry.AtomRegistry;
@@ -58,7 +60,12 @@ export function waitForTitleRegenerationFailure(input: {
     }
     inspect(input.registry.get(input.atom));
     if (!settled) {
-      timeoutId = globalThis.setTimeout(() => finish(null), input.timeoutMs);
+      timeoutId = globalThis.setTimeout(() => {
+        timeoutId = undefined;
+        if (input.registry.get(input.atom)?.titleRegeneration?.requestId !== input.requestId) {
+          finish(null);
+        }
+      }, input.timeoutMs);
     }
   });
 }
