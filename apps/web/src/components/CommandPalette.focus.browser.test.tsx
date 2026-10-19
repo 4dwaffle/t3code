@@ -48,6 +48,7 @@ vi.mock("../state/entities", async (importOriginal) => ({
   useProjects: () => [],
   useThreadShells: () => [],
   useServerConfigs: () => new Map(),
+  useEnvironmentSupportsSideChats: () => false,
 }));
 vi.mock("../state/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/queries")>()),
