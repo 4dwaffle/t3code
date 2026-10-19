@@ -153,7 +153,7 @@ function makeRecordLimitTranscript(cwd: string, overflow: boolean): string {
 }
 
 const makeFileIdentityFixture = Effect.fn("AgentSessionScanner.test.makeFileIdentityFixture")(
-  function* (inodeOffset = 1n << 60n) {
+  function* (originalInode = 10_000_000_000_000_001n, replacementInode = 10_000_000_000_000_000n) {
     const path = yield* Path.Path;
     const fileSystem = yield* FileSystem.FileSystem;
     const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
@@ -197,7 +197,7 @@ const makeFileIdentityFixture = Effect.fn("AgentSessionScanner.test.makeFileIden
     const effectIdentity = (target: string, info: FileSystem.File.Info) => {
       if (target !== filePath) return info;
       const realInode = Option.getOrThrow(info.ino);
-      const inode = ids.get(realInode) ?? inodeOffset + BigInt(ids.size + 42);
+      const inode = ids.get(realInode) ?? (ids.size === 0 ? originalInode : replacementInode);
       ids.set(realInode, inode);
       return { ...info, ino: Option.some(inode), birthtime };
     };
@@ -1929,7 +1929,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
     it.effect("checks file identity and provider before skipping completed history", () =>
       Effect.gen(function* () {
-        const fixture = yield* makeFileIdentityFixture(0n);
+        const fixture = yield* makeFileIdentityFixture(42n, 43n);
         const { scanner, workspace } = fixture;
         const initial = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
         const imported = initial[0];
@@ -1978,20 +1978,24 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             source: {
               ...imported.source,
               providerSessionId: "replaced-session",
-              inode: ((1n << 60n) + 43n).toString(),
+              inode: "10000000000000000",
             },
           });
-          expect(imported.source.inode).toBe(((1n << 60n) + 42n).toString());
+          expect(imported.source.inode).toBe("10000000000000001");
           if (replaced[0]?._tag !== "Importable") return;
 
-          for (const inode of [Number(replaced[0].source.inode), null]) {
-            const legacy = decodeImportSource({ ...replaced[0].source, inode });
+          const roundedInode = Number(imported.source.inode);
+          expect(Number.isSafeInteger(roundedInode)).toBe(false);
+          expect(String(roundedInode)).toBe(replaced[0].source.inode);
+          for (const inode of [null, roundedInode]) {
+            const legacy = decodeImportSource({ ...imported.source, inode });
             const opensBeforeBackfill = fixture.opens();
             const backfilled = yield* scanner
               .recentThreads(workspace, [legacy])
               .pipe(Stream.runCollect);
             expect(backfilled[0]).toMatchObject({
               _tag: "Importable",
+              thread: { providerSessionId: "replaced-session" },
               source: replaced[0].source,
             });
             expect(fixture.opens()).toBe(opensBeforeBackfill + 1);
