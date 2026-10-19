@@ -193,6 +193,14 @@ it.effect.each([
     const threadId = yield* addRolledBackRecoveryCandidate("thread-wait");
     const initial = yield* store.getThreadProjection(threadId);
     const at = initial.updatedAt;
+    const previousCommand = initial.turnItems.find((item) => item.type === "command_execution")!;
+    const itemBase = {
+      ...previousCommand,
+      providerThreadId: previousCommand.providerThreadId ?? null,
+      providerTurnId: previousCommand.providerTurnId ?? null,
+      nativeItemRef: previousCommand.nativeItemRef ?? null,
+      parentItemId: previousCommand.parentItemId ?? null,
+    };
     yield* store.apply({
       id: EventId.make("event:thread-wait:previous-completed"),
       type: "run.updated",
@@ -220,7 +228,7 @@ it.effect.each([
         id: EventId.make(`event:thread-wait:item:${sequence++}`),
         type: "turn-item.updated",
         threadId,
-        runId: payload.runId,
+        runId: payload.runId ?? undefined,
         driver,
         occurredAt: at,
         payload,
@@ -234,7 +242,7 @@ it.effect.each([
       }
     });
     const wait = {
-      ...initial.turnItems[0]!,
+      ...itemBase,
       id: TurnItemId.make("item:thread-wait:active"),
       runId: run.id,
       type: "dynamic_tool" as const,
@@ -263,7 +271,7 @@ it.effect.each([
     yield* assertBlocked(true);
 
     const command = {
-      ...initial.turnItems[0]!,
+      ...itemBase,
       id: TurnItemId.make("item:thread-wait:concurrent"),
       runId: run.id,
     };
@@ -272,6 +280,16 @@ it.effect.each([
     yield* updateItem({ ...wait, status: "waiting" });
     yield* assertBlocked(false);
     yield* updateItem({ ...command, status: "completed", completedAt: at });
+    yield* assertBlocked(true);
+    const fileChange = {
+      ...command,
+      id: TurnItemId.make("item:thread-wait:concurrent-edit"),
+      type: "file_change" as const,
+      fileName: "example.ts",
+    };
+    yield* updateItem(fileChange);
+    yield* assertBlocked(false);
+    yield* updateItem({ ...fileChange, status: "completed", completedAt: at });
     yield* assertBlocked(true);
     yield* updateItem({ ...wait, status: "completed", completedAt: at });
     yield* assertBlocked(false);
@@ -290,6 +308,18 @@ it.effect.each([
       id: TurnItemId.make("item:thread-wait:blocking-delegation"),
       input: { task: "Review", mode: "wait" },
     };
+    yield* updateItem({
+      ...command,
+      id: TurnItemId.make("item:thread-wait:child"),
+      type: "subagent",
+      subagentId: NodeId.make("node:thread-wait:child"),
+      origin: "app_owned",
+      driver,
+      providerInstanceId,
+      childThreadId: ThreadId.make("child-thread"),
+      prompt: "Review",
+      result: null,
+    });
     yield* updateItem(blockingDelegation);
     yield* assertBlocked(true);
     yield* updateItem({ ...blockingDelegation, status: "completed", completedAt: at });
