@@ -32,7 +32,8 @@ export function createOutdatedServerDescriptionCommand<E>(
 ) {
   return createRuntimeCommand(runtime, {
     label: "environment-data:server:describe-outdated-server",
-    execute: (environmentId: EnvironmentId) => describeOutdatedHost(environmentId),
+    execute: (environmentId: EnvironmentId) =>
+      describeOutdatedHost(environmentId).pipe(Effect.timeout("20 seconds")),
   });
 }
 
