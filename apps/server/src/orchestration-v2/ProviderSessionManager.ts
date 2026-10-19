@@ -202,8 +202,9 @@ interface LiveSessionEntry {
   /**
    * The session as last reported by the runtime. `runtime.providerSession` is
    * the snapshot it opened with; a session can move afterwards (Claude's
-   * EnterWorktree changes its cwd), and attach/release must not write the
-   * opening snapshot back over that.
+   * EnterWorktree changes its cwd), and attach, release, and every turn start
+   * (through `exposedRuntime.providerSession`) must not write the opening
+   * snapshot back over that.
    */
   readonly providerSession: Ref.Ref<OrchestrationV2ProviderSession>;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -1712,6 +1713,7 @@ export const layerWithOptions = (
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        providerSession: Ref.Ref<OrchestrationV2ProviderSession>,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
@@ -1727,6 +1729,11 @@ export const layerWithOptions = (
           });
         return {
           ...runtime,
+          // Live, so a turn start publishes where the session is now, not
+          // where it opened (see LiveSessionEntry.providerSession).
+          get providerSession() {
+            return Ref.getUnsafe(providerSession);
+          },
           subscribeEvents,
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
@@ -2190,7 +2197,8 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
-              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const providerSession = yield* Ref.make(runtime.providerSession);
+              const exposedRuntime = decorateRuntime(runtime, eventSubscribers, providerSession);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
@@ -2203,7 +2211,7 @@ export const layerWithOptions = (
                   runtime.providerSession.capabilities.sessions
                     .supportsMultipleProviderThreadsPerSession,
                 runtime,
-                providerSession: yield* Ref.make(runtime.providerSession),
+                providerSession,
                 exposedRuntime,
                 eventSubscribers,
                 requestEventPermit: yield* Semaphore.make(1),

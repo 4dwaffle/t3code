@@ -2055,6 +2055,38 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         (yield* orchestrator.getThreadProjection(threadId)).thread.branch,
         "feature-renamed",
       );
+
+      // A move into a worktree another thread already uses still commits the
+      // location, but leaves the branch unset instead of claiming the other
+      // thread's branch (followWorktreeMove after Claude's EnterWorktree).
+      const movedId = ThreadId.make("runtime-layer-drift-guard-moved");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-drift-guard-moved-create"),
+        threadId: movedId,
+        projectId,
+        title: "Drift guard moved thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "main",
+        worktreePath: null,
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("runtime-layer-drift-guard-moved-follow"),
+        threadId: movedId,
+        worktreePath,
+        expectedWorktreePath: null,
+        branch: "feature-renamed",
+        preserveProviderSession: true,
+        requireExclusiveWorktree: true,
+      });
+      const moved = (yield* orchestrator.getThreadProjection(movedId)).thread;
+      assert.equal(moved.worktreePath, worktreePath);
+      assert.isNull(moved.branch);
     }),
   );
 

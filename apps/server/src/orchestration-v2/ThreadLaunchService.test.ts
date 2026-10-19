@@ -174,6 +174,7 @@ function makeHarness(options: HarnessOptions = {}) {
           workingTree: { files: [], insertions: 0, deletions: 0 },
         } as never)),
   );
+  const invalidateLocalStatus = vi.fn((_cwd: string) => Effect.void);
   const removeWorktree = vi.fn(
     (_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
       Effect.void,
@@ -214,6 +215,7 @@ function makeHarness(options: HarnessOptions = {}) {
       createWorktree,
       renameBranch,
       localStatus,
+      invalidateLocalStatus,
       fetchRemote: options.fetchRemote ?? (() => Effect.void),
       hasCommit: options.hasCommit ?? (() => Effect.succeed(false)),
       remoteExists: () => Effect.succeed(true),
@@ -288,6 +290,7 @@ function makeHarness(options: HarnessOptions = {}) {
     removeWorktree,
     renameBranch,
     localStatus,
+    invalidateLocalStatus,
     generateBranchName,
     generateThreadTitle,
     runSetup,
@@ -1547,6 +1550,12 @@ it.effect(
         yield* Deferred.await(branchNameStarted);
         yield* Deferred.succeed(allowBranchName, undefined);
         yield* waitUntil(() => Effect.sync(() => harness.localStatus.mock.calls.length > 0));
+        // Read fresh, not from a status cached before the agent's checkout.
+        assert.deepEqual(harness.invalidateLocalStatus.mock.calls, [["/repo-worktrees/temp"]]);
+        assert.isBelow(
+          harness.invalidateLocalStatus.mock.invocationCallOrder[0]!,
+          harness.localStatus.mock.invocationCallOrder[0]!,
+        );
         // The actual `git branch -m` never runs against a ref the agent has
         // already checked off of.
         assert.equal(harness.renameBranch.mock.calls.length, 0);

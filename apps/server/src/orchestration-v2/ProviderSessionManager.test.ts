@@ -2643,7 +2643,7 @@ it.effect("ProviderSessionManagerV2 terminal detach revokes the thread's MCP cre
   }),
 );
 
-it.effect("ProviderSessionManagerV2 releases a session at the cwd it last reported", () =>
+it.effect("ProviderSessionManagerV2 starts turns and releases at the cwd it last reported", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     const effect = Effect.gen(function* () {
@@ -2683,6 +2683,8 @@ it.effect("ProviderSessionManagerV2 releases a session at the cwd it last report
       });
       // Subscribers hear an update only after the pump persisted it.
       yield* subscription.events.pipe(Stream.take(1), Stream.runDrain);
+      // What the next turn start publishes as the session.
+      assert.equal(runtime.providerSession.cwd, "/workspace/moved");
 
       yield* manager.close(providerSessionId);
 
