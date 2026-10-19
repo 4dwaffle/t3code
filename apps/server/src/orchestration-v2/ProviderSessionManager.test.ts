@@ -1063,12 +1063,16 @@ it.effect("ProviderSessionManagerV2 records provider session and turn metrics", 
 );
 
 it.effect(
-  "ProviderSessionManagerV2 replaces rebuilt adapters when idle, deferring for background work",
+  "ProviderSessionManagerV2 replaces rebuilt adapters when idle despite release write failures, deferring for background work",
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const rebuiltState = yield* Ref.make(emptyState);
       const pending = yield* Ref.make(false);
+      const flaky: FlakyReleaseWrites = {
+        failing: yield* Ref.make<"none" | "session" | "session-and-requests">("none"),
+        failures: yield* Queue.unbounded<void>(),
+      };
       const adapter = yield* Ref.make(
         yield* makeProviderAdapter(state, { capabilities: ExclusiveCapabilities }),
       );
@@ -1101,7 +1105,10 @@ it.effect(
             hasPendingBackgroundWork: Ref.get(pending),
           }),
         );
+        yield* Ref.set(flaky.failing, "session");
         const second = yield* open;
+        yield* Queue.take(flaky.failures);
+        yield* Ref.set(flaky.failing, "none");
         assert.notStrictEqual(second, first);
         assert.equal((yield* Ref.get(state)).closeCount, 1);
         assert.equal((yield* Ref.get(rebuiltState)).openCount, 1);
@@ -1124,7 +1131,9 @@ it.effect(
       });
 
       yield* effect.pipe(
-        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, layerRegistry })),
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60_000, layerRegistry, flakyReleaseWrites: flaky }),
+        ),
       );
     }).pipe(Effect.provide(McpProviderSessions.layer)),
 );

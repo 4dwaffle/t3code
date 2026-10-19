@@ -2114,7 +2114,7 @@ export const layerWithOptions = (
                   detail: `Provider instance ${live.runtime.instanceId} settings changed.`,
                   onlyIfIdleGeneration: live.idleGeneration,
                   onlyIfAttachedTo: input.threadId,
-                });
+                }).pipe(logReleaseFailure(input.providerSessionId));
               }
               const existing = outdated ? (yield* Ref.get(sessions)).get(key) : live;
               if (existing !== undefined) {
