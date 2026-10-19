@@ -199,6 +199,13 @@ interface LiveSessionEntry {
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+  /**
+   * The session as last reported by the runtime. `runtime.providerSession` is
+   * the snapshot it opened with; a session can move afterwards (Claude's
+   * EnterWorktree changes its cwd), and attach/release must not write the
+   * opening snapshot back over that.
+   */
+  readonly providerSession: Ref.Ref<OrchestrationV2ProviderSession>;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
     ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
@@ -607,7 +614,7 @@ export const layerWithOptions = (
         Effect.gen(function* () {
           const now = yield* DateTime.now;
           const payload: OrchestrationV2ProviderSession = {
-            ...input.entry.runtime.providerSession,
+            ...(yield* Ref.get(input.entry.providerSession)),
             status: releaseStatusFor(input.reason),
             updatedAt: now,
             lastError:
@@ -1385,7 +1392,7 @@ export const layerWithOptions = (
                     runtime: entry.runtime,
                     threadIds: [input.threadId],
                     type: "provider-session.attached",
-                    payload: entry.runtime.providerSession,
+                    payload: yield* Ref.get(entry.providerSession),
                   }),
                 );
               }
@@ -1894,6 +1901,7 @@ export const layerWithOptions = (
           if (current?.runtime !== entry.runtime) {
             return;
           }
+          yield* Ref.set(entry.providerSession, event.providerSession);
           yield* writeProviderSessionEvents({
             runtime: entry.runtime,
             threadIds: current.attachedThreadIds,
@@ -2195,6 +2203,7 @@ export const layerWithOptions = (
                   runtime.providerSession.capabilities.sessions
                     .supportsMultipleProviderThreadsPerSession,
                 runtime,
+                providerSession: yield* Ref.make(runtime.providerSession),
                 exposedRuntime,
                 eventSubscribers,
                 requestEventPermit: yield* Semaphore.make(1),

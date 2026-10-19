@@ -2643,6 +2643,58 @@ it.effect("ProviderSessionManagerV2 terminal detach revokes the thread's MCP cre
   }),
 );
 
+it.effect("ProviderSessionManagerV2 releases a session at the cwd it last reported", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* idAllocator.allocate.project({
+        fixtureName: "provider-session-manager-moved-cwd",
+      });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-moved-cwd",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const subscription = yield* runtime.subscribeEvents!;
+      const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(adapterQueue);
+      // A session that moved itself, like Claude's EnterWorktree.
+      yield* Queue.offer(adapterQueue!, {
+        type: "provider_session.updated",
+        driver: CODEX_DRIVER,
+        providerSession: { ...runtime.providerSession, cwd: "/workspace/moved", updatedAt: now },
+      });
+      // Subscribers hear an update only after the pump persisted it.
+      yield* subscription.events.pipe(Stream.take(1), Stream.runDrain);
+
+      yield* manager.close(providerSessionId);
+
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.equal(projection.providerSessions.at(-1)?.status, "stopped");
+      assert.equal(projection.providerSessions.at(-1)?.cwd, "/workspace/moved");
+    });
+
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 releases idle sessions without sweeping all sessions", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
