@@ -6543,6 +6543,7 @@ export default function ChatView(props: ChatViewProps) {
       // the user sent.
       const attachmentIdsAtSend = composerAttachmentsSnapshot.map((attachment) => attachment.id);
       const draftChangedSinceSend = () => {
+        if (composerRef.current?.hasPendingAttachments() === true) return true;
         // A direct annotation send writes its image and reference into the draft as it sends,
         // so the live draft trails the message by design.
         if (directAnnotation) return false;
@@ -6553,8 +6554,7 @@ export default function ChatView(props: ChatViewProps) {
         return (
           promptRef.current !== promptAtSend ||
           attachmentIds.length !== attachmentIdsAtSend.length ||
-          attachmentIds.some((id, index) => id !== attachmentIdsAtSend[index]) ||
-          composerRef.current?.hasPendingAttachments() === true
+          attachmentIds.some((id, index) => id !== attachmentIdsAtSend[index])
         );
       };
       const draftBeforeDecline = useComposerDraftStore
