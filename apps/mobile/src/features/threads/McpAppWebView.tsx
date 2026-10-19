@@ -47,9 +47,7 @@ const ROW_BOTTOM_MARGIN = 8;
 // Android exposes `ReactNativeWebView` to every frame, so a frame nested in the
 // app could post to React Native directly. The outer page therefore wraps what
 // it relays with a secret only it holds, and React Native drops anything else.
-// A tap in the app also activates the outer page, its parent, so each relayed
-// message says whether the reader just used the app (`active`), the same user
-// activation web reads. The app cannot set it: it runs no code in this page.
+// The relay also attests activation; the sandboxed app cannot set that flag.
 function outerDocument(src: string, allow: string, secret: string) {
   const attribute = (value: string) =>
     value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -251,8 +249,6 @@ export function ThreadMcpApp(props: {
   }, [props.environmentId, props.threadId, props.itemId, app.tool]);
   const webView = useRef<WebView<object>>(null);
   const hostRef = useRef<McpAppHost | null>(null);
-  // Whether the reader had just used the app when the message being handled
-  // was sent; the host reads it while handling that message.
   const userActive = useRef(false);
 
   useEffect(() => {
@@ -366,10 +362,7 @@ export function ThreadMcpApp(props: {
       },
       requestDisplayMode: async (mode) => {
         const current = latest.current.props;
-        // Full screen opens only right after the reader used the app, as on
-        // web: one that asks on load or on every retry would otherwise reopen
-        // it each time the reader closes it. Read before any await, while this
-        // request is the message being handled.
+        // receive dispatches synchronously; read activation before awaiting teardown.
         if (
           mode === "fullscreen" &&
           (!userActive.current ||

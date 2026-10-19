@@ -150,6 +150,15 @@ it("keeps load and idle retries inline even after the page-input cooldown", asyn
   expect(isFullscreen()).toBe(false);
 });
 
+it("allows an app click immediately after loading on an idle page", async () => {
+  expect(await nextAnswer(renderApp)).toBe("load:inline");
+  const appButton = page
+    .frameLocator(page.getByTitle("srv app"))
+    .getByRole("button", { name: "Open full screen" });
+  expect(await nextAnswer(() => userEvent.click(appButton))).toBe("tap:fullscreen");
+  expect(isFullscreen()).toBe(true);
+});
+
 it("opens full screen only from a tap in the app, never from activation the page got elsewhere", async () => {
   const appButton = page
     .frameLocator(page.getByTitle("srv app"))

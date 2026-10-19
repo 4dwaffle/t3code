@@ -48,8 +48,7 @@ const fullscreenSupported =
   typeof HTMLElement !== "undefined" && "popover" in HTMLElement.prototype;
 
 const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
-// How long a click or key press anywhere on the page activates it: 5 seconds
-// in Chromium, Firefox and WebKit.
+// Exclude activation left by input elsewhere in T3.
 const PAGE_ACTIVATION_MS = 5_000;
 
 function saveBlob(blob: Blob, name: string) {
@@ -171,15 +170,14 @@ export function McpAppFrame(props: {
     latest.current = live;
   });
 
-  // Input inside the app's frame never reaches this window, so this records
-  // only the reader's clicks and keys elsewhere in T3. It starts at mount
-  // because the click that opened the thread may still activate the page.
+  // Frame input does not bubble here. An app can refocus itself, so focus
+  // alone cannot exclude activation from input elsewhere in T3.
   const lastPageInputAt = useRef(Number.NEGATIVE_INFINITY);
   useEffect(() => {
     const note = () => {
       lastPageInputAt.current = performance.now();
     };
-    note();
+    if (navigator.userActivation?.isActive) note();
     const types = ["pointerdown", "pointerup", "touchend", "keydown"] as const;
     for (const type of types) window.addEventListener(type, note, true);
     return () => {
@@ -359,11 +357,6 @@ export function McpAppFrame(props: {
         if (result._tag !== "Success") throw commandFailure(result);
       },
       requestDisplayMode: async (mode) => {
-        // Full screen opens only right after the reader used this frame, as
-        // links do: an app that asks on load or on every retry would otherwise
-        // take the page back each time the reader leaves. An app can focus its
-        // own frame, so activation left by a click elsewhere in T3, such as
-        // the one that left full screen, has to run out before a tap counts.
         const otherFullscreen = document.querySelector("[data-mcp-app-fullscreen]");
         if (
           mode === "fullscreen" &&
