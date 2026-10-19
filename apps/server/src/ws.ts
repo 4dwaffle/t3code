@@ -252,6 +252,7 @@ import {
   withUsageLimitsCommands,
 } from "@t3tools/shared/usageLimits";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import * as NodeTranscriptFileSystem from "./project/NodeTranscriptFileSystem.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
@@ -3168,7 +3169,9 @@ export const layer = Layer.unwrap(
               // their defects, not the rest of the server's.
               Layer.provide(DefectReporter.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
-              Layer.provide(AgentSessionScanner.layer),
+              Layer.provide(
+                AgentSessionScanner.layer.pipe(Layer.provide(NodeTranscriptFileSystem.layer)),
+              ),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // One server-lifetime service means clients share the same PR caches, and a WS

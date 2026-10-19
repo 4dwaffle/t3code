@@ -1,7 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Inject replacements at the native open boundary.
-import * as NodeFSP from "node:fs/promises";
 import { vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -27,11 +25,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
-
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof NodeFSP>();
-  return { ...actual, open: vi.fn(actual.open), stat: vi.fn(actual.stat) };
-});
+import * as NodeTranscriptFileSystem from "./NodeTranscriptFileSystem.ts";
 
 const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => ({
   id: ProjectId.make("project-1"),
@@ -52,6 +46,7 @@ const layerProjectStore = (importedWorkspaceRoots: ReadonlyArray<string>) =>
   });
 
 interface ScannerTestInput {
+  readonly nativeFiles?: NodeTranscriptFileSystem.NodeTranscriptFileSystem["Service"];
   readonly claudeHomePath: string;
   readonly codexHomePath: string;
   readonly importedWorkspaceRoots?: ReadonlyArray<string>;
@@ -61,6 +56,11 @@ interface ScannerTestInput {
 
 const layerScannerTest = (input: ScannerTestInput) =>
   AgentSessionScanner.layer.pipe(
+    Layer.provide(
+      input.nativeFiles === undefined
+        ? NodeTranscriptFileSystem.layer
+        : Layer.succeed(NodeTranscriptFileSystem.NodeTranscriptFileSystem, input.nativeFiles),
+    ),
     Layer.provide(
       Layer.mergeAll(
         ServerSettings.layerTest({
@@ -203,37 +203,29 @@ const makeFileIdentityFixture = Effect.fn("AgentSessionScanner.test.makeFileIden
     const birthtime = Option.some(DateTime.toDateUtc(DateTime.makeUnsafe(nowMs)));
     const effectIdentity = (target: string, info: FileSystem.File.Info) =>
       target === filePath ? { ...info, ino: Option.none(), birthtime } : info;
-    const native = yield* Effect.promise(() => vi.importActual<typeof NodeFSP>("node:fs/promises"));
-    const ids = new Map<bigint, bigint>();
-    const nativeIdentity = (info: import("node:fs").BigIntStats) => {
-      const inode = ids.get(info.ino) ?? inodeOffset + BigInt(ids.size + 42);
-      ids.set(info.ino, inode);
-      return { ...info, ino: inode, birthtimeMs: BigInt(nowMs) };
+    const native = yield* NodeTranscriptFileSystem.NodeTranscriptFileSystem.pipe(
+      Effect.provide(NodeTranscriptFileSystem.layer),
+    );
+    const ids = new Map<NodeTranscriptFileSystem.TranscriptIdentity["inode"], string>();
+    const nativeIdentity = (info: NodeTranscriptFileSystem.TranscriptIdentity) => {
+      const inode = ids.get(info.inode) ?? (inodeOffset + BigInt(ids.size + 42)).toString();
+      ids.set(info.inode, inode);
+      return { ...info, inode, birthtimeMs: nowMs };
     };
     let opens = 0;
-    const open: typeof NodeFSP.open = async (target, flags, mode) => {
-      const handle = await native.open(target, flags, mode);
-      if (target === filePath) {
-        opens += 1;
-        const stat = handle.stat.bind(handle);
-        vi.spyOn(handle, "stat").mockImplementation(async (options) =>
-          options?.bigint ? nativeIdentity(await stat({ bigint: true })) : stat(options),
-        );
-      }
-      return handle;
-    };
-    vi.mocked(NodeFSP.open).mockImplementation(open);
-    vi.mocked(NodeFSP.stat).mockImplementation(async (target, options) =>
-      target === filePath && options?.bigint
-        ? nativeIdentity(await native.stat(target, { bigint: true }))
-        : native.stat(target, options),
-    );
-    yield* Effect.addFinalizer(() =>
-      Effect.sync(() => {
-        vi.mocked(NodeFSP.open).mockReset().mockImplementation(native.open);
-        vi.mocked(NodeFSP.stat).mockReset().mockImplementation(native.stat);
-      }),
-    );
+    const open = Effect.fnUntraced(function* (target: string) {
+      const file = yield* native.open(target);
+      if (target !== filePath) return file;
+      opens += 1;
+      return { ...file, identity: file.identity.pipe(Effect.map(nativeIdentity)) };
+    });
+    const nativeFiles = NodeTranscriptFileSystem.NodeTranscriptFileSystem.of({
+      open,
+      stat: (target) =>
+        native
+          .stat(target)
+          .pipe(Effect.map((info) => (target === filePath ? nativeIdentity(info) : info))),
+    });
     const simulatedFileSystem = FileSystem.FileSystem.of({
       ...fileSystem,
       stat: (target) =>
@@ -250,22 +242,23 @@ const makeFileIdentityFixture = Effect.fn("AgentSessionScanner.test.makeFileIden
       },
     });
     const scanner = yield* AgentSessionScanner.AgentSessionScanner.pipe(
-      Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })),
+      Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath, nativeFiles })),
       Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
     );
     return {
       scanner,
       workspace,
       open,
+      nativeFiles,
       opens: () => opens,
-      replace: async () => {
-        await NodeFSP.rename(filePath, savedPath);
-        await NodeFSP.rename(replacementPath, filePath);
-      },
-      restore: async () => {
-        await NodeFSP.rename(filePath, replacementPath);
-        await NodeFSP.rename(savedPath, filePath);
-      },
+      replace: Effect.gen(function* () {
+        yield* fileSystem.rename(filePath, savedPath);
+        yield* fileSystem.rename(replacementPath, filePath);
+      }).pipe(Effect.orDie),
+      restore: Effect.gen(function* () {
+        yield* fileSystem.rename(filePath, replacementPath);
+        yield* fileSystem.rename(savedPath, filePath);
+      }).pipe(Effect.orDie),
     };
   },
 );
@@ -1982,7 +1975,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           .pipe(Stream.runCollect);
         expect(wrongProvider[0]?._tag).toBe("Importable");
 
-        yield* Effect.promise(fixture.replace);
+        yield* fixture.replace;
         const replaced = yield* scanner
           .recentThreads(workspace, [imported.source])
           .pipe(Stream.runCollect);
@@ -2005,7 +1998,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           expect(imported?._tag).toBe("Importable");
           if (imported?._tag !== "Importable") return;
 
-          yield* Effect.promise(fixture.replace);
+          yield* fixture.replace;
           const replaced = yield* scanner
             .recentThreads(workspace, [imported.source])
             .pipe(Stream.runCollect);
@@ -2046,12 +2039,14 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       Effect.gen(function* () {
         const fixture = yield* makeFileIdentityFixture();
         yield* fixture.scanner.scan;
-        vi.mocked(NodeFSP.open).mockImplementationOnce(async (...args) => {
-          await fixture.replace();
-          const handle = await fixture.open(...args);
-          await fixture.restore();
-          return handle;
-        });
+        vi.spyOn(fixture.nativeFiles, "open").mockImplementationOnce(
+          Effect.fnUntraced(function* (target) {
+            yield* fixture.replace;
+            const file = yield* fixture.open(target);
+            yield* fixture.restore;
+            return file;
+          }),
+        );
 
         const outcomes = yield* fixture.scanner
           .recentThreads(fixture.workspace)
@@ -2064,16 +2059,13 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       Effect.gen(function* () {
         const fixture = yield* makeFileIdentityFixture();
         yield* fixture.scanner.scan;
-        vi.mocked(NodeFSP.open).mockImplementationOnce(async (...args) => {
-          const handle = await fixture.open(...args);
-          const stat = handle.stat.bind(handle);
-          vi.spyOn(handle, "stat").mockImplementationOnce(async (options) => {
-            const info = await stat(options);
-            await fixture.replace();
-            return info;
-          });
-          return handle;
-        });
+        vi.spyOn(fixture.nativeFiles, "open").mockImplementationOnce(
+          Effect.fnUntraced(function* (target) {
+            const file = yield* fixture.open(target);
+            const replace = yield* Effect.cached(fixture.replace);
+            return { ...file, identity: file.identity.pipe(Effect.tap(() => replace)) };
+          }),
+        );
 
         const outcomes = yield* fixture.scanner
           .recentThreads(fixture.workspace)
