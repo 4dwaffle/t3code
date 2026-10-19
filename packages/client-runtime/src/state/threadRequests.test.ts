@@ -5,16 +5,64 @@ import {
   TurnItemId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { AsyncResult } from "effect/reactivity";
+import * as Cause from "effect/Cause";
 import { v2Now, v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
   createQuestionHistoryProjector,
   derivePendingThreadRequests,
+  declinePendingApproval,
   seedUserInputDraftAnswers,
+  type ApprovalResponder,
+  type ThreadPendingApproval,
 } from "./threadRequests.ts";
 
 const requestId = RuntimeRequestId.make("async-question");
 const nodeId = NodeId.make("async-question-node");
+
+describe("declining an approval before sending", () => {
+  const approval: ThreadPendingApproval = {
+    requestId,
+    requestKind: "command",
+    createdAt: "2026-10-19T00:00:00Z",
+    responseCapability: "live",
+  };
+
+  it("waits for the active request's decline response", async () => {
+    let resolve!: (value: Awaited<ReturnType<ApprovalResponder>>) => void;
+    const response = new Promise<Awaited<ReturnType<ApprovalResponder>>>((done) => {
+      resolve = done;
+    });
+    const respond = vi.fn(() => response);
+    const send = vi.fn();
+    const submission = (async () => {
+      if (await declinePendingApproval(approval, respond)) send();
+    })();
+    expect(respond).toHaveBeenCalledWith(requestId, "decline");
+    expect(send).not.toHaveBeenCalled();
+    resolve(AsyncResult.success(undefined));
+    await submission;
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it.each([AsyncResult.failure(Cause.fail("decline failed")), undefined])(
+    "does not send when the decline is unsuccessful: %s",
+    async (response) => {
+      const send = vi.fn();
+      if (await declinePendingApproval(approval, async () => response)) send();
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not respond to an approval whose provider is unavailable", async () => {
+    const respond = vi.fn(async () => AsyncResult.success(undefined));
+    expect(
+      await declinePendingApproval({ ...approval, responseCapability: "not_resumable" }, respond),
+    ).toBe(false);
+    expect(respond).not.toHaveBeenCalled();
+  });
+});
 
 describe("initial user input drafts", () => {
   const questions = [

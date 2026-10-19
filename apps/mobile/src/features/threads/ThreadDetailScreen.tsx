@@ -25,7 +25,6 @@ import type {
   EnvironmentId,
   MessageId,
   ModelSelection,
-  ProviderApprovalDecision,
   ProviderInteractionMode,
   RuntimeMode,
   RuntimeRequestId,
@@ -38,7 +37,11 @@ import {
   appendCodexArtifactTemplateUsePrompt,
   type CodexArtifactTemplate,
 } from "@t3tools/shared/codexArtifactTemplates";
-import type { ThreadUserInputQuestion } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  declinePendingApproval,
+  type ApprovalResponder,
+  type ThreadUserInputQuestion,
+} from "@t3tools/client-runtime/state/thread-requests";
 import {
   presentPendingBackgroundWork,
   presentProviderGoal,
@@ -223,10 +226,7 @@ export interface ThreadDetailScreenProps {
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateThreadInteractionMode: (interactionMode: ProviderInteractionMode) => void;
-  readonly onRespondToApproval: (
-    requestId: RuntimeRequestId,
-    decision: ProviderApprovalDecision,
-  ) => Promise<unknown>;
+  readonly onRespondToApproval: ApprovalResponder;
   readonly onSelectUserInputOption: (
     requestId: RuntimeRequestId,
     question: ThreadUserInputQuestion,
@@ -903,6 +903,15 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     const hasUserMessage = selectedThreadFeed.some(
       (entry) => entry.type === "message" && entry.message.role === "user",
     );
+    if (props.activePendingApproval !== null && props.activePendingUserInput === null) {
+      if (
+        props.respondingApprovalId === props.activePendingApproval.requestId ||
+        !(await declinePendingApproval(props.activePendingApproval, props.onRespondToApproval)) ||
+        selectedThreadKeyRef.current !== targetThreadKey
+      ) {
+        return null;
+      }
+    }
     const messageId = await props.onSendMessage(followUp);
     if (messageId === null || selectedThreadKeyRef.current !== targetThreadKey) {
       return messageId;
@@ -1300,7 +1309,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         canOperateThread={props.canOperateThread}
                         reportedModelSelection={reportedModelSelection}
                         editorRef={composerEditorRef}
-                        placeholder="Ask the repo agent, or run a command…"
+                        placeholder={
+                          props.activePendingApproval
+                            ? "Send a message to decline and redirect the agent"
+                            : "Ask the repo agent, or run a command…"
+                        }
                         contentMaxWidth={contentMaxWidth}
                         connectionState={props.connectionStateLabel}
                         environmentLabel={props.environmentLabel}

@@ -3,10 +3,25 @@ import type {
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
   ProviderApprovalOption,
+  ProviderApprovalDecision,
   ProviderRequestKind,
   RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import type { AtomCommandResult } from "./runtime.ts";
+
+export type ApprovalResponder = (
+  requestId: RuntimeRequestId,
+  decision: ProviderApprovalDecision,
+) => Promise<AtomCommandResult<unknown, unknown> | undefined>;
+
+export async function declinePendingApproval(
+  approval: ThreadPendingApproval,
+  respond: ApprovalResponder,
+): Promise<boolean> {
+  if (approval.responseCapability !== "live") return false;
+  return (await respond(approval.requestId, "decline"))?._tag === "Success";
+}
 
 export interface ThreadPendingApproval {
   readonly requestId: RuntimeRequestId;
