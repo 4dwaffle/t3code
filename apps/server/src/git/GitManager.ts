@@ -144,14 +144,17 @@ export class GitManager extends Context.Service<
       options?: { readonly refresh?: boolean; readonly freshGitState?: boolean },
     ) => Effect.Effect<GitBranchPullRequest | null, GitManagerServiceError>;
     /**
-     * Whether this branch has moved off `pullRequest`'s head commit, which is
-     * why `branchPullRequest` reports nothing for it. Link discovery uses it so
-     * it does not restore the very reference the branch outgrew.
+     * Whether this branch has moved past its latest merged or closed PR, which
+     * is why `branchPullRequest` reports nothing for it. That PR is the most
+     * recently updated one, so an older `pullRequest` from the same repository
+     * is behind the branch too. Link discovery uses it so it does not restore a
+     * reference the branch outgrew. Call it after `branchPullRequest` for the
+     * same branch: it reuses the git reads that call just confirmed.
      */
     readonly branchSupersededPullRequest: (input: {
       readonly cwd: string;
       readonly branch: string;
-      readonly pullRequest: { readonly number: number; readonly url: string };
+      readonly pullRequest: { readonly url: string };
     }) => Effect.Effect<boolean, GitManagerServiceError>;
     readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -1224,6 +1227,7 @@ export const make = Effect.gen(function* () {
   const getPrLookup = (key: string) => detachStackFrame(Cache.get(prLookupCache, key));
   interface LastKnownPr {
     readonly pr: ReturnType<typeof toStatusPr> | null;
+    readonly headSha: string | null;
     readonly upstreamRef: string | null;
     readonly headBranch: string;
     readonly remoteName: string | null;
@@ -1277,11 +1281,37 @@ export const make = Effect.gen(function* () {
    * rather than dates keeps squash and rebase merges working. Unknown when the
    * host reports no head commit or the branch has no local tip, so the PR stays.
    */
-  const branchMovedPastPullRequest = (tipOid: string | null, pr: PullRequestInfo) => {
+  const branchMovedPastPullRequest = (
+    tipOid: string | null,
+    pr: Pick<PullRequestInfo, "state" | "headSha">,
+  ) => {
     const headSha = pr.headSha?.trim().toLowerCase() ?? "";
     const tip = tipOid?.trim().toLowerCase() ?? "";
     return pr.state !== "open" && headSha.length > 0 && tip.length > 0 && tip !== headSha;
   };
+  /**
+   * Status reads the checked-out branch, so HEAD is its tip. Only a terminal
+   * PR with a known head commit costs this one read.
+   */
+  const statusMovedPastPullRequest = (
+    cwd: string,
+    pr: Pick<PullRequestInfo, "state" | "headSha">,
+  ) =>
+    pr.state === "open" || !pr.headSha
+      ? Effect.succeed(false)
+      : gitCore
+          .execute({
+            operation: "GitManager.lookupStatusPr.head",
+            cwd,
+            args: ["rev-parse", "--verify", "--quiet", "HEAD"],
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) =>
+              branchMovedPastPullRequest(result.exitCode === 0 ? result.stdout : null, pr),
+            ),
+            Effect.orElseSucceed(() => false),
+          );
   const lookupStatusPr = Effect.fn("lookupStatusPr")(function* (
     cwd: string,
     details: {
@@ -1307,34 +1337,22 @@ export const make = Effect.gen(function* () {
     return yield* getPrLookup(cacheKey).pipe(
       Effect.flatMap(({ latest, headContext }) =>
         Effect.gen(function* () {
-          if (!latest) return { pr: null, headContext };
+          if (!latest) return { pr: null, headContext, headSha: null };
           // Merged/closed matches are usually reverse-merge history, not the thread's PR context.
           if (details.isDefaultBranch && latest.state !== "open") {
-            return { pr: null, headContext };
+            return { pr: null, headContext, headSha: null };
           }
-          // Status reads the checked-out branch, so HEAD is its tip. Only a
-          // terminal PR with a known head commit costs this one read.
-          if (latest.state !== "open" && latest.headSha) {
-            const tipOid = yield* gitCore
-              .execute({
-                operation: "GitManager.lookupStatusPr.head",
-                cwd,
-                args: ["rev-parse", "--verify", "--quiet", "HEAD"],
-                allowNonZeroExit: true,
-              })
-              .pipe(
-                Effect.map((result) => (result.exitCode === 0 ? result.stdout : null)),
-                Effect.orElseSucceed(() => null),
-              );
-            if (branchMovedPastPullRequest(tipOid, latest)) return { pr: null, headContext };
+          if (yield* statusMovedPastPullRequest(cwd, latest)) {
+            return { pr: null, headContext, headSha: null };
           }
-          return { pr: toStatusPr(latest), headContext };
+          return { pr: toStatusPr(latest), headContext, headSha: latest.headSha ?? null };
         }),
       ),
-      Effect.tap(({ pr, headContext }) =>
+      Effect.tap(({ pr, headContext, headSha }) =>
         Effect.sync(() =>
           rememberLastKnownPr(branchKey, {
             pr,
+            headSha,
             upstreamRef: details.upstreamRef,
             headBranch: headContext.headBranch,
             remoteName: headContext.remoteName,
@@ -1344,7 +1362,8 @@ export const make = Effect.gen(function* () {
       ),
       Effect.map(({ pr }) => pr),
       Effect.catch((error) => {
-        const fallback = lastKnownPrByBranchKey.get(branchKey)?.pr
+        const lastKnown = lastKnownPrByBranchKey.get(branchKey);
+        const fallback = lastKnown?.pr
           ? resolveLookupHeadContext(cwd, details).pipe(
               Effect.map(({ headContext }) =>
                 resolveLastKnownPr(branchKey, {
@@ -1353,6 +1372,15 @@ export const make = Effect.gen(function* () {
                   remoteName: headContext.remoteName,
                   headRemoteUrlKey: headContext.headRemoteUrlKey,
                 }),
+              ),
+              // The branch may have moved on since this PR was last shown.
+              Effect.flatMap((pr) =>
+                pr === null
+                  ? Effect.succeed(null)
+                  : statusMovedPastPullRequest(cwd, {
+                      state: pr.state,
+                      headSha: lastKnown.headSha ?? undefined,
+                    }).pipe(Effect.map((movedPast) => (movedPast ? null : pr))),
               ),
             )
           : Effect.succeed(null);
@@ -2676,14 +2704,12 @@ export const make = Effect.gen(function* () {
       const cacheCwd = yield* normalizeStatusCacheKey(cwd);
       const latest = yield* lookupBranchPullRequest(cacheCwd, branch, {
         refresh: false,
-        freshGitState: true,
+        freshGitState: false,
         includeMovedPast: true,
       });
-      // Numbers repeat across repositories, so the URLs have to agree too.
       return (
         latest !== null &&
         "movedPast" in latest &&
-        latest.number === pullRequest.number &&
         latest.repositoryKey === pullRequestRepositoryKey(pullRequest.url)
       );
     });

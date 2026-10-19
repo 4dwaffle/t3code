@@ -619,10 +619,6 @@ describe("ThreadPullRequestServiceV2 restore guard", () => {
       Effect.gen(function* () {
         const { commands, summaryCalls } = yield* runSynchronize(true);
 
-        // The guard answers the question itself; restoring a merged/closed
-        // reference without checking it first is exactly the bug being
-        // guarded against, so this would also catch a regression that calls
-        // through regardless of the guard's answer.
         expect(summaryCalls).toBe(0);
         expect(commands).toHaveLength(1);
         expect(commands[0]?.branchPullRequest).toBeNull();
@@ -633,8 +629,7 @@ describe("ThreadPullRequestServiceV2 restore guard", () => {
     Effect.gen(function* () {
       const { commands, summaryCalls } = yield* runSynchronize(false);
 
-      // Restoring here reproduces the saved reference exactly, so the
-      // thread is already up to date and nothing is dispatched.
+      // The restored reference is the saved one, so nothing is dispatched.
       expect(summaryCalls).toBe(1);
       expect(commands).toHaveLength(0);
     }),

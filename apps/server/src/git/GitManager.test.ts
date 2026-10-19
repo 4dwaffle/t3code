@@ -2552,7 +2552,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["commit", "-m", "Work after the release merged"]);
       yield* runGit(repoDir, ["push", "origin", "develop"]);
 
+      const gitCommands: string[] = [];
       const { manager } = yield* makeManager({
+        gitCommands,
         ghScenario: {
           prListSequence: [
             encodeCliJson([
@@ -2573,22 +2575,24 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       });
 
       const pullRequest = yield* manager.branchPullRequest({ cwd: repoDir, branch: "develop" });
-      const outgrown = yield* manager.branchSupersededPullRequest({
-        cwd: repoDir,
-        branch: "develop",
-        pullRequest: { number: 3, url: "https://github.com/pingdotgg/t3code/pull/3" },
-      });
-      // A different change request on the same branch is not what was rejected,
-      // so a thread holding it keeps its historical reference.
-      const other = yield* manager.branchSupersededPullRequest({
-        cwd: repoDir,
-        branch: "develop",
-        pullRequest: { number: 9, url: "https://github.com/pingdotgg/t3code/pull/9" },
-      });
+      gitCommands.length = 0;
+      const superseded = (url: string) =>
+        manager.branchSupersededPullRequest({
+          cwd: repoDir,
+          branch: "develop",
+          pullRequest: { url },
+        });
+      const outgrown = yield* superseded("https://github.com/pingdotgg/t3code/pull/3");
+      // An older release PR from the same branch is behind it too.
+      const olderRelease = yield* superseded("https://github.com/pingdotgg/t3code/pull/1");
+      // Numbers repeat across repositories, so another repository's PR is not.
+      const otherRepository = yield* superseded("https://github.com/acme/t3code/pull/3");
 
       expect(pullRequest).toBeNull();
       expect(outgrown).toBe(true);
-      expect(other).toBe(false);
+      expect(olderRelease).toBe(true);
+      expect(otherRepository).toBe(false);
+      expect(gitCommands).toEqual([]);
     }),
   );
 
@@ -3675,6 +3679,52 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* manager.invalidateStatus(repoDir);
       const second = yield* manager.status({ cwd: repoDir });
       expect(second.pr?.number).toBe(214);
+    }),
+  );
+
+  it.effect("status does not fall back to a merged PR its branch has since moved past", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "develop"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "develop"]);
+      const releasedHead = yield* runGit(repoDir, ["rev-parse", "HEAD"]);
+
+      const { manager } = yield* makeManager({
+        ghScenario: {
+          prListSequence: [
+            encodeCliJson([
+              {
+                number: 3,
+                title: "Release develop into main",
+                url: "https://github.com/pingdotgg/codething-mvp/pull/3",
+                baseRefName: "main",
+                headRefName: "develop",
+                headRefOid: releasedHead.stdout.trim(),
+                state: "MERGED",
+                mergedAt: "2026-04-02T15:00:00Z",
+                updatedAt: "2026-04-02T15:00:00Z",
+              },
+            ]),
+          ],
+          failWith:
+            "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI and run `gh auth login`.",
+          failAfterCalls: 1,
+        },
+      });
+
+      const first = yield* manager.status({ cwd: repoDir });
+      expect(first.pr?.number).toBe(3);
+
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.writeFileString(NodePath.join(repoDir, "next.md"), "next\n");
+      yield* runGit(repoDir, ["add", "next.md"]);
+      yield* runGit(repoDir, ["commit", "-m", "Work after the release merged"]);
+      yield* manager.invalidateStatus(repoDir);
+      const second = yield* manager.status({ cwd: repoDir });
+      expect(second.pr).toBeNull();
     }),
   );
 
