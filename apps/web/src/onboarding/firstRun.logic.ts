@@ -149,11 +149,6 @@ export function resolveFirstRunDecision(input: FirstRunDecisionInput): {
     : { decision: "app", persistCompletion: input.workspaceAuthoritative };
 }
 
-/**
- * Hosted mode never opens setup by itself. Its home screen asks the user to
- * sign in and adds the computers on their account. It only waits for
- * settings, so unreadable settings still show recovery.
- */
 export function resolveHostedFirstRunDecision(hydrated: boolean): {
   readonly decision: FirstRunDecision;
   readonly persistCompletion: boolean;

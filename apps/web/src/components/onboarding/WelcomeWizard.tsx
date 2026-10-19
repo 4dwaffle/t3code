@@ -222,8 +222,6 @@ export function WelcomeWizard({
       disablePointerDismissal
       onOpenChange={(_, event) => {
         event.cancel();
-        // Only the close button skips setup. Escape stays with the setup
-        // terminal and pairing form, so a stray key press cannot end setup.
         if (event.reason === "close-press" && !isImporting) void finish();
       }}
     >

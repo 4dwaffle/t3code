@@ -4,7 +4,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
 import { useAuth } from "@clerk/react";
 import { CheckIcon } from "lucide-react";
-import { type ReactNode, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { isElectron } from "../env";
@@ -40,7 +40,7 @@ function ChatIndexRouteView() {
 
   if (authGateState.status === "hosted-static") {
     if (!isReady) return null;
-    if (environments.length === 0) return <HostedStaticOnboardingState />;
+    if (environments.length === 0) return <HostedEmptyState />;
   }
 
   return <IndexDraftLanding />;
@@ -129,14 +129,8 @@ export const Route = createFileRoute("/_chat/")({
   component: ChatIndexRouteView,
 });
 
-/**
- * Hosted app with no computer yet. This is hosted onboarding: setup never
- * opens here. With T3 Connect it recommends signing in, then adds the linked
- * computers by itself. Without T3 Connect it points at `npx t3 pair`.
- */
-function HostedStaticOnboardingState() {
+function HostedEmptyState() {
   const cloudEnabled = hasCloudPublicConfig();
-  // Desktop with its own computer switched off: it needs Connections, not a download.
   const localEnvironmentOff = isLocalEnvironmentDisabled();
 
   return (
@@ -180,13 +174,11 @@ function HostedStaticOnboardingState() {
   );
 }
 
-/** Needs ClerkProvider, which the app mounts whenever cloud config exists. */
 function T3ConnectSteps() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const { openAuthPrompt } = useT3ConnectAuthPrompt();
-  // Selection mode adds each linked computer once, the same way setup does.
-  // The first one added replaces this screen with the app, so wait until
-  // every computer's health check is done and add them all in one pass.
+  // Adding the first computer unmounts this screen. Wait for all health checks
+  // so every compatible registration is queued before that happens.
   const [autoAddedComputers] = useState(() => new Set<EnvironmentId>());
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<EnvironmentId>>(() => new Set());
   const discovered = [...useRelayEnvironmentDiscovery().environments.values()];

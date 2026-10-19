@@ -389,7 +389,6 @@ export function CloudEnvironmentConnectRows({
           />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm font-medium">{environment.label}</span>
-            {/* Say which side needs an update; a tooltip is easy to miss and absent on touch. */}
             {unsupportedDetail !== null ? (
               <span className="mt-0.5 block text-xs text-muted-foreground">
                 {unsupportedDetail}

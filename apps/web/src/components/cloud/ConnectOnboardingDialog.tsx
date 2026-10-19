@@ -9,10 +9,10 @@ import {
   ConnectOnboardingOptOutSchema,
   EMPTY_CONNECT_ONBOARDING_OPT_OUT_STATE,
 } from "~/cloud/connectOnboarding";
-import { isHostedStaticApp } from "../../hostedPairing";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { isHostedStaticApp } from "~/hostedPairing";
 import {
   useEnvironments,
   usePrimaryEnvironment,
@@ -48,9 +48,7 @@ function ConfiguredConnectOnboardingDialog() {
   );
 
   const { environments, isReady: environmentsReady } = useEnvironments();
-  // With no computers in this browser, the hosted home screen adds the
-  // account's computers after sign-in, so this wizard would repeat it. A
-  // pending request waits for the catalog to load before this is decided.
+  // The empty hosted home already adds account computers after sign-in.
   const homeScreenAddsComputers =
     isHostedStaticApp() && environmentsReady && environments.length === 0;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
