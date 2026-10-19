@@ -1,0 +1,28 @@
+diff --git a/lib/index.js b/lib/index.js
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -141,9 +141,23 @@
+    * @type {FromMarkdownHandle}
+    */
+   function exitMathText(token) {
+-    const data = this.resume()
++    let data = this.resume()
+     const node = this.stack[this.stack.length - 1]
+     assert(node.type === 'inlineMath')
++    if (this.stack.some((ancestor) => ancestor.type === 'tableCell')) {
++      let value = ''
++      for (let index = 0; index < data.length; index++) {
++        if (data[index] === '\\' && (data[index + 1] === '|' || data[index + 1] === '\\')) {
++          if (data[index + 1] === '\\') value += data[index]
++          value += data[++index]
++        } else value += data[index]
++      }
++      data = value
++    }
++    const source = this.sliceSerialize(token)
++    if (source.startsWith('$$') || source.startsWith('\\[')) {
++      node.data.hProperties.className = ['language-math', 'math-display']
++    }
+     this.exit(token)
+     node.value = data
+     const children = /** @type {Array<HastElementContent>} */ (

@@ -65,14 +65,13 @@ describe("chat math parsing", () => {
     },
   );
 
-  it("falls back to ordinary Markdown when every private-use marker is present", () => {
-    const source =
-      "$x$ " + Array.from({ length: 65536 }, (_, index) => String.fromCharCode(index)).join("");
-    const tree = parse(source);
-    expect(tree.type).toBe("root");
-    expect(
-      collect(tree).filter((node) => node.type === "math" || node.type === "inlineMath"),
-    ).toEqual([]);
+  it("parses formulas without reserving private-use characters", () => {
+    const characters = Array.from({ length: 6400 }, (_, index) =>
+      String.fromCharCode(0xe000 + index),
+    ).join("");
+    const source = "$x$ " + characters;
+    expect(formulas(source)).toEqual([["inline", "x"]]);
+    expect(text(source)).toBe(" " + characters);
   });
 
   it("only exposes closed explicit math fences to editors and native rendering", () => {

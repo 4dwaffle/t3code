@@ -109,7 +109,8 @@ import { parseComposerContextHref } from "@t3tools/shared/composerContextReferen
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import { MarkdownThreadLink } from "./chat/MarkdownThreadLink";
-import { mathKind, mayContainMath, remarkChatMath } from "@t3tools/shared/markdownMath";
+import { mathKind, mayContainMath } from "@t3tools/shared/markdownMath";
+import remarkMath from "remark-math";
 import {
   artifactTemplateFromHastProperties,
   renderCodexInlineDirectivesAsMarkdown,
@@ -400,12 +401,14 @@ function orderedListGutterStyle(
   return { "--list-gutter": `${markerWidth + 2}ch` };
 }
 
-const CHAT_MARKDOWN_MATH_REMARK_PLUGINS = [remarkChatMath, ...CHAT_MARKDOWN_REMARK_PLUGINS];
-
-const CHAT_MARKDOWN_MATH_REMARK_PLUGINS_WITH_BREAKS = [
-  remarkChatMath,
-  ...CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
+const CHAT_MARKDOWN_MATH_REMARK_PLUGINS: NonNullable<ReactMarkdownOptions["remarkPlugins"]> = [
+  [remarkMath, { singleDollarTextMath: true }],
+  ...CHAT_MARKDOWN_REMARK_PLUGINS,
 ];
+
+const CHAT_MARKDOWN_MATH_REMARK_PLUGINS_WITH_BREAKS: NonNullable<
+  ReactMarkdownOptions["remarkPlugins"]
+> = [[remarkMath, { singleDollarTextMath: true }], ...CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS];
 
 function chatMarkdownRemarkPlugins(lineBreaks: boolean, math: boolean) {
   if (math) {

@@ -1,0 +1,102 @@
+diff --git a/dev/lib/syntax.js b/dev/lib/syntax.js
+--- a/dev/lib/syntax.js
++++ b/dev/lib/syntax.js
+@@ -46,6 +46,8 @@
+   let sizeB = 0
+   /** @type {boolean | undefined} */
+   let seen
++  let mathEnd = 0
++  let afterMath
+ 
+   return start
+ 
+@@ -223,6 +225,21 @@
+    * @type {State}
+    */
+   function headRowData(code) {
++    const construct = (self.parser.constructs.text[code] || []).find(
++      (entry) => entry.name === 'mathText' || entry.name === 'mathTexText'
++    )
++    if (construct && (!construct.previous || construct.previous.call(self, self.previous))) {
++      afterMath = headRowData
++      return effects.check({tokenize: checkMath}, mathData, ordinaryData)(code)
++    }
++    return ordinaryData(code)
++
++    function ordinaryData(code) {
++      return headRowDataOrdinary(code)
++    }
++  }
++
++  function headRowDataOrdinary(code) {
+     if (
+       code === codes.eof ||
+       code === codes.verticalBar ||
+@@ -585,6 +602,21 @@
+    * @type {State}
+    */
+   function bodyRowData(code) {
++    const construct = (self.parser.constructs.text[code] || []).find(
++      (entry) => entry.name === 'mathText' || entry.name === 'mathTexText'
++    )
++    if (construct && (!construct.previous || construct.previous.call(self, self.previous))) {
++      afterMath = bodyRowData
++      return effects.check({tokenize: checkMath}, mathData, ordinaryData)(code)
++    }
++    return ordinaryData(code)
++
++    function ordinaryData(code) {
++      return bodyRowDataOrdinary(code)
++    }
++  }
++
++  function bodyRowDataOrdinary(code) {
+     if (
+       code === codes.eof ||
+       code === codes.verticalBar ||
+@@ -618,6 +650,33 @@
+ 
+     return bodyRowData(code)
+   }
++  function checkMath(effects, ok, nok) {
++    const context = this
++    const startLine = context.now().line
++    return startMath
++
++    function startMath(code) {
++      const construct = context.parser.constructs.text[code].find(
++        (entry) => entry.name === 'mathText' || entry.name === 'mathTexText'
++      )
++      const inlineContext = Object.create(context)
++      inlineContext.mathSingleLine = true
++      return construct.tokenize.call(inlineContext, effects, done, nok)(code)
++    }
++
++    function done(code) {
++      if (context.now().line !== startLine) return nok(code)
++      mathEnd = context.now().offset
++      return ok(code)
++    }
++  }
++
++  function mathData(code) {
++    if (self.now().offset >= mathEnd) return afterMath(code)
++    effects.consume(code)
++    return mathData
++  }
++
+ }
+ 
+ /** @type {Resolver} */
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -27,7 +27,7 @@
+   },
+   "exports": {
+     "development": "./dev/index.js",
+-    "default": "./index.js"
++    "default": "./dev/index.js"
+   },
+   "files": [
+     "dev/",

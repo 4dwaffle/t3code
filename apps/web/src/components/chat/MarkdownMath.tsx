@@ -5,7 +5,7 @@ import { RenderErrorBoundary } from "../RenderErrorBoundary";
 const MathTypeset = lazy(() => import("./MathTypeset"));
 
 /**
- * One formula from `remarkChatMath`. Shows its TeX until KaTeX loads, and
+ * One formula from `remark-math`. Shows its TeX until KaTeX loads, and
  * keeps showing it when KaTeX cannot parse it, such as mid-stream. Copying
  * any part of a formula copies its whole TeX source.
  */
