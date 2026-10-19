@@ -5539,7 +5539,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         SELECT i.thread_id, i.payload_json, NULL AS owning_provider_instance_id
         FROM orchestration_v2_projection_turn_items i
         WHERE i.run_id IN ${sql.in(activeRunIds)}
-          AND i.type NOT IN ('command_execution', 'dynamic_tool', 'subagent')
+          AND i.type IN ('file_change', 'file_search', 'web_search', 'compaction')
           AND i.status IN ('running', 'waiting')
       `
       }

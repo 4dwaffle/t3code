@@ -13,6 +13,7 @@ import {
   type OrchestrationV2ThreadShellSnapshot,
   NodeId,
   ProjectId,
+  PlanId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
@@ -270,6 +271,41 @@ it.effect.each([
     yield* updateItem(wait);
     yield* assertBlocked(true);
 
+    yield* updateItem({
+      ...wait,
+      id: TurnItemId.make("item:thread-wait:plan"),
+      type: "todo_list",
+      planId: PlanId.make("plan:thread-wait"),
+      steps: [{ id: "review", text: "Review the child result", status: "running" }],
+    });
+    yield* assertBlocked(true);
+    yield* updateItem({
+      ...wait,
+      id: TurnItemId.make("item:thread-wait:proposed-plan"),
+      type: "proposed_plan",
+      planId: PlanId.make("plan:thread-wait:proposed"),
+      markdown: "Review the child result",
+      streaming: true,
+    });
+    yield* updateItem({
+      ...wait,
+      id: TurnItemId.make("item:thread-wait:named-message"),
+      nativeItemRef: { driver, nativeId: "named-message", strength: "weak" },
+      type: "assistant_message",
+      messageId: MessageId.make("message:thread-wait:named"),
+      text: "Waiting for the child result",
+      streaming: true,
+    });
+    yield* updateItem({
+      ...wait,
+      id: TurnItemId.make("item:thread-wait:named-thought"),
+      nativeItemRef: { driver, nativeId: "named-thought", strength: "weak" },
+      type: "reasoning",
+      text: "I need the child result",
+      streaming: true,
+    });
+    yield* assertBlocked(true);
+
     const command = {
       ...itemBase,
       id: TurnItemId.make("item:thread-wait:concurrent"),
@@ -290,6 +326,16 @@ it.effect.each([
     yield* updateItem(fileChange);
     yield* assertBlocked(false);
     yield* updateItem({ ...fileChange, status: "completed", completedAt: at });
+    yield* assertBlocked(true);
+    const compaction = {
+      ...command,
+      id: TurnItemId.make("item:thread-wait:compaction"),
+      type: "compaction" as const,
+      driver,
+    };
+    yield* updateItem(compaction);
+    yield* assertBlocked(false);
+    yield* updateItem({ ...compaction, status: "completed", completedAt: at });
     yield* assertBlocked(true);
     yield* updateItem({ ...wait, status: "completed", completedAt: at });
     yield* assertBlocked(false);

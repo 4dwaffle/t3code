@@ -18,6 +18,15 @@ const BACKGROUND_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
   "subagent",
 ]);
 
+// Plans and text streams can stay open across tool calls without executing work.
+const EXECUTION_TURN_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
+  ...BACKGROUND_TURN_ITEM_TYPES,
+  "file_change",
+  "file_search",
+  "web_search",
+  "compaction",
+]);
+
 const TERMINAL_RUN_STATUSES = new Set<OrchestrationV2Run["status"]>([
   "cancelled",
   "completed",
@@ -59,6 +68,7 @@ export function deriveBlockedOnThreadWait(input: {
   for (const item of input.turnItems) {
     if (
       item.runId !== input.activeRun.id ||
+      !EXECUTION_TURN_ITEM_TYPES.has(item.type) ||
       (item.status !== "running" && item.status !== "waiting") ||
       // App-owned rows track the child, including the child a blocking delegate is waiting for.
       (item.type === "subagent" && item.origin === "app_owned")
