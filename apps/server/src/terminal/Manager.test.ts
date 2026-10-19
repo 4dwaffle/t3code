@@ -2248,6 +2248,79 @@ it.layer(
       }),
   );
 
+  it.effect("turns off fish terminal queries unless the user chose query-term", () =>
+    Effect.gen(function* () {
+      for (const [platform, env, runtimeEnv, expected] of [
+        ["linux", {}, {}, { fish_features: "no-query-term" }],
+        [
+          "linux",
+          { fish_features: "qmark-noglob" },
+          {},
+          { fish_features: "qmark-noglob,no-query-term" },
+        ],
+        [
+          "linux",
+          { fish_features: "qmark-noglob,query-term" },
+          {},
+          { fish_features: "qmark-noglob,query-term" },
+        ],
+        [
+          "linux",
+          { fish_features: "qmark-noglob,no-query-term" },
+          {},
+          { fish_features: "qmark-noglob,no-query-term" },
+        ],
+        [
+          "linux",
+          { fish_features: "query-term" },
+          { fish_features: "qmark-noglob" },
+          { fish_features: "qmark-noglob,no-query-term" },
+        ],
+        [
+          "win32",
+          { FISH_FEATURES: "qmark-noglob" },
+          {},
+          { FISH_FEATURES: "qmark-noglob,no-query-term" },
+        ],
+        [
+          "win32",
+          { Fish_Features: "qmark-noglob,query-term" },
+          {},
+          { Fish_Features: "qmark-noglob,query-term" },
+        ],
+        [
+          "win32",
+          { FISH_FEATURES: "qmark-noglob,no-query-term" },
+          {},
+          { FISH_FEATURES: "qmark-noglob,no-query-term" },
+        ],
+        [
+          "win32",
+          { Fish_Features: "query-term" },
+          { fish_features: "qmark-noglob" },
+          { Fish_Features: "qmark-noglob,no-query-term" },
+        ],
+        [
+          "win32",
+          { FISH_FEATURES: "no-query-term" },
+          { fish_features: "qmark-noglob,query-term" },
+          { FISH_FEATURES: "qmark-noglob,query-term" },
+        ],
+      ] as const) {
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          env,
+        }).pipe(Effect.provide(layerWithHostPlatform(platform)));
+        yield* manager.open(openInput({ env: runtimeEnv }));
+        const fishFeatures = Object.fromEntries(
+          Object.entries(ptyAdapter.spawnInputs[0]!.env).filter(
+            ([key]) => key.toLowerCase() === "fish_features",
+          ),
+        );
+        expect.soft(fishFeatures, JSON.stringify({ platform, env, runtimeEnv })).toEqual(expected);
+      }
+    }),
+  );
+
   it.effect("filters app runtime env variables from terminal sessions", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(5, {
@@ -2256,9 +2329,14 @@ it.layer(
           T3CODE_PORT: "3773",
           VITE_DEV_SERVER_URL: "http://localhost:5173",
           TEST_TERMINAL_KEEP: "keep-me",
+          TMUX: "/tmp/tmux-1000/default,1234,0",
+          TMUX_PANE: "%3",
+          ZELLIJ_SESSION_NAME: "work",
+          ZELLIJ_CONFIG_DIR: "/home/user/.config/zellij",
         },
       });
       yield* manager.open(openInput());
+      yield* manager.open(openInput({ terminalId: "explicit", env: { TMUX_PANE: "%9" } }));
       const spawnInput = ptyAdapter.spawnInputs[0];
       expect(spawnInput).toBeDefined();
       if (!spawnInput) return;
@@ -2267,6 +2345,11 @@ it.layer(
       expect(spawnInput.env.T3CODE_PORT).toBeUndefined();
       expect(spawnInput.env.VITE_DEV_SERVER_URL).toBeUndefined();
       expect(spawnInput.env.TEST_TERMINAL_KEEP).toBe("keep-me");
+      expect(spawnInput.env.TMUX).toBeUndefined();
+      expect(spawnInput.env.TMUX_PANE).toBeUndefined();
+      expect(spawnInput.env.ZELLIJ_SESSION_NAME).toBeUndefined();
+      expect(spawnInput.env.ZELLIJ_CONFIG_DIR).toBe("/home/user/.config/zellij");
+      expect(ptyAdapter.spawnInputs[1]?.env.TMUX_PANE).toBe("%9");
     }),
   );
 
