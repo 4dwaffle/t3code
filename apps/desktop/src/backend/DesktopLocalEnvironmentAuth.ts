@@ -42,6 +42,15 @@ export class DesktopLocalEnvironmentAuthBackendNotConfiguredError extends Schema
   }
 }
 
+export class DesktopLocalEnvironmentAuthBackendNotReadyError extends Schema.TaggedError<DesktopLocalEnvironmentAuthBackendNotReadyError>()(
+  "DesktopLocalEnvironmentAuthBackendNotReadyError",
+  {},
+) {
+  override get message(): string {
+    return "Local backend did not become ready.";
+  }
+}
+
 export class DesktopLocalEnvironmentAuthSessionBootstrapError extends Schema.TaggedError<DesktopLocalEnvironmentAuthSessionBootstrapError>()(
   "DesktopLocalEnvironmentAuthSessionBootstrapError",
   { cause: Schema.Defect() },
@@ -53,6 +62,7 @@ export class DesktopLocalEnvironmentAuthSessionBootstrapError extends Schema.Tag
 
 export const DesktopLocalEnvironmentAuthError = Schema.Union([
   DesktopLocalEnvironmentAuthBackendNotConfiguredError,
+  DesktopLocalEnvironmentAuthBackendNotReadyError,
   DesktopLocalEnvironmentAuthSessionBootstrapError,
 ]);
 export type DesktopLocalEnvironmentAuthError = typeof DesktopLocalEnvironmentAuthError.Type;
@@ -83,9 +93,7 @@ export const make = Effect.gen(function* () {
         const primary = instances.find((instance) => instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID);
         // Cold startup must not spend the HTTP retry budget before the server can accept auth.
         if (primary !== undefined && !(yield* primary.waitForReady(BACKEND_START_TIMEOUT))) {
-          return yield* new DesktopLocalEnvironmentAuthSessionBootstrapError({
-            cause: new Error("Local backend did not become ready."),
-          });
+          return yield* new DesktopLocalEnvironmentAuthBackendNotReadyError();
         }
         const configOption = primary === undefined ? Option.none() : yield* primary.currentConfig;
         if (Option.isNone(configOption)) {
