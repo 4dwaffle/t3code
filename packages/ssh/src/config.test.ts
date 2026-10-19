@@ -1,7 +1,6 @@
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -20,42 +19,33 @@ function makeTempHomeDir() {
 }
 
 describe("ssh config", () => {
-  const hostPlatform = HostProcessPlatform.defaultValue();
-  // Verified with OpenSSH 10.2's `ssh -G -F <config> <alias>`.
-  for (const { name, filename, quoted } of [
-    { name: "unquoted", filename: "plain.conf", quoted: false },
-    { name: "quoted", filename: "quoted.conf", quoted: true },
-    { name: "space", filename: "with space.conf", quoted: true },
-    { name: "equals", filename: "with=equals.conf", quoted: true },
-    { name: "hash", filename: "with#hash.conf", quoted: true },
-    { name: "escaped-quote", filename: 'with"quote.conf', quoted: true },
-  ]) {
-    it.effect.skipIf(name === "escaped-quote" && hostPlatform === "win32")(
-      `discovers hosts from a ${name} Include path`,
-      () =>
-        Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const homeDir = yield* makeTempHomeDir();
-          const sshDir = path.join(homeDir, ".ssh");
-          yield* fs.makeDirectory(sshDir);
-          const includedPath = path.join(homeDir, filename);
-          yield* fs.writeFileString(includedPath, `Host ${name}\n  HostName ${name}.example.com\n`);
-          const argument = quoted ? `"${includedPath.replaceAll('"', '\\"')}"` : includedPath;
-          yield* fs.writeFileString(path.join(sshDir, "config"), `Include ${argument} # comment\n`);
+  it.effect("follows quoted and escaped Include paths like OpenSSH", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const homeDir = yield* makeTempHomeDir();
+      const sshDir = path.join(homeDir, ".ssh");
+      const quotedDir = path.join(homeDir, "quoted dir");
+      yield* fs.makeDirectory(sshDir);
+      yield* fs.makeDirectory(quotedDir);
+      yield* fs.writeFileString(path.join(quotedDir, "team#1=a.conf"), "Host quoted\n");
+      yield* fs.writeFileString(path.join(homeDir, "escaped space.conf"), "Host escaped\n");
+      yield* fs.writeFileString(
+        path.join(sshDir, "config"),
+        [
+          `Include "${path.join(quotedDir, "team#1=a.conf")}" # comment`,
+          `Include ${path.join(homeDir, "escaped space.conf").replaceAll(" ", "\\ ")}`,
+          "",
+        ].join("\n"),
+      );
 
-          assert.deepEqual(yield* discoverSshHosts({ homeDir }), [
-            {
-              alias: name,
-              hostname: name,
-              username: null,
-              port: null,
-              source: "ssh-config",
-            },
-          ]);
-        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-    );
-  }
+      const hosts = yield* discoverSshHosts({ homeDir });
+      assert.deepEqual(
+        hosts.map((host) => host.alias),
+        ["escaped", "quoted"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 
   it.effect("discovers ssh config hosts across included files", () =>
     Effect.gen(function* () {

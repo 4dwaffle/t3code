@@ -11,54 +11,54 @@ import { SshHostDiscoveryError } from "./errors.ts";
 
 const NO_HOSTS: ReadonlyArray<string> = [] as const;
 
-function splitDirectiveArgs(value: string): ReadonlyArray<string> {
-  const match = /^\s*([^\s=]+)\s*=?\s*(.*)$/u.exec(value);
+// Mirrors OpenSSH readconf: the keyword may be followed by one optional "=",
+// then the arguments are split like misc.c argv_split() with quotes, the
+// escapes \\ \" \' and unquoted "\ ", and "#" starting a comment only at
+// the start of a token. A line with an unterminated quote is ignored.
+function splitDirectiveArgs(line: string): ReadonlyArray<string> {
+  const match = /^\s*([^\s=]+)\s*=?\s*(.*)$/u.exec(line);
   if (!match) {
-    return NO_HOSTS;
+    return [];
   }
 
   const args = [match[1]!];
-  const remainder = match[2]!;
-  let entry = "";
-  let quote = "";
-  let started = false;
-  for (let index = 0; index < remainder.length; index += 1) {
-    const character = remainder[index]!;
-    const next = remainder[index + 1];
+  const rest = match[2]!;
+  let token: string | null = null;
+  let quote: string | null = null;
+  for (let index = 0; index < rest.length; index += 1) {
+    const char = rest[index]!;
+    const next = rest[index + 1];
     if (
-      character === "\\" &&
-      (next === '"' || next === "'" || next === "\\" || (quote === "" && next === " "))
+      char === "\\" &&
+      (next === '"' || next === "'" || next === "\\" || (quote === null && next === " "))
     ) {
-      entry += next;
+      token = (token ?? "") + next;
       index += 1;
-      started = true;
-    } else if (quote !== "") {
-      if (character === quote) {
-        quote = "";
+    } else if (quote !== null) {
+      if (char === quote) {
+        quote = null;
       } else {
-        entry += character;
+        token = (token ?? "") + char;
       }
-    } else if (character === '"' || character === "'") {
-      quote = character;
-      started = true;
-    } else if (/\s/u.test(character)) {
-      if (started) {
-        args.push(entry);
-        entry = "";
-        started = false;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      token ??= "";
+    } else if (/\s/u.test(char)) {
+      if (token !== null) {
+        args.push(token);
+        token = null;
       }
-    } else if (character === "#" && !started) {
+    } else if (char === "#" && token === null) {
       break;
     } else {
-      entry += character;
-      started = true;
+      token = (token ?? "") + char;
     }
   }
-  if (quote !== "") {
-    return NO_HOSTS;
+  if (quote !== null) {
+    return [];
   }
-  if (started) {
-    args.push(entry);
+  if (token !== null) {
+    args.push(token);
   }
   return args;
 }
