@@ -6897,9 +6897,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   promptGeneration,
                   Effect.gen(function* () {
                     if (context.finalized) return;
+                    const error = Cause.findError(cause);
+                    // Native close rejects prompts cancelled before insertion with -32800.
+                    const interrupted =
+                      context.interrupted ||
+                      (pendingStopCloseTurn === context &&
+                        Result.isSuccess(error) &&
+                        error.success._tag === "AcpRequestError" &&
+                        error.success.code === -32800);
                     yield* finalizeTurn(
                       context,
-                      context.interrupted ? "interrupted" : "failed",
+                      interrupted ? "interrupted" : "failed",
                       flavor.promptFailure?.(Cause.squash(cause)) ??
                         makeProviderFailure({
                           cause: Cause.squash(cause),
@@ -7186,11 +7194,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                                 cause,
                               }),
                           ),
-                          Effect.ensuring(
-                            Effect.sync(() => {
-                              pendingStopCloseTurn = null;
-                            }),
-                          ),
                         );
                         if (Option.isNone(closed)) {
                           return yield* new ProviderAdapter.ProviderAdapterProtocolError({
@@ -7370,7 +7373,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         teardownBarrier,
                         settledSoftInterrupt,
                       };
-                    });
+                    }).pipe(
+                      Effect.ensuring(
+                        Effect.sync(() => {
+                          pendingStopCloseTurn = null;
+                        }),
+                      ),
+                    );
                     if (transition === undefined) return;
                     const {
                       context,
