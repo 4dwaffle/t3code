@@ -241,6 +241,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         kind: request.kind,
         ...(prompt === undefined ? {} : { prompt: prompt.slice(0, 4000).join("") }),
         ...(prompt !== undefined && prompt.length > 4000 ? { promptTruncated: true } : {}),
+        ...(approval?.appName === undefined ? {} : { appName: approval.appName }),
         ...(approval?.options === undefined ? {} : { options: approval.options }),
       };
     }),

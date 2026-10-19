@@ -669,6 +669,7 @@ it.effect("lists, reads and resolves approvals with offered decisions and caller
         requestKind: "command",
         prompt:
           id === "approve-client" ? `${"🙂".repeat(3999)}🚀hidden warning` : "Run the command?",
+        ...(id === "approve-client" ? { appName: "Fixture app" } : {}),
         options,
       });
     }
@@ -709,6 +710,7 @@ it.effect("lists, reads and resolves approvals with offered decisions and caller
       kind: "command",
       prompt: `${"🙂".repeat(3999)}🚀`,
       promptTruncated: true,
+      appName: "Fixture app",
       options,
     });
 
