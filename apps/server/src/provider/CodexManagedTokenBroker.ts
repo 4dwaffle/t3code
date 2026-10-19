@@ -4,6 +4,7 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -112,9 +113,19 @@ const acquireListener = Effect.gen(function* () {
   const sockets = new Set<NodeNet.Socket>();
   let closing = false;
   let admitted = 0;
-  const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Protocol.Request), {
-    onExcessProperty: "error",
-  });
+  // Keep branded validation here so the helper need not load the contracts graph.
+  const decode = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(
+      Schema.Struct({
+        ...Protocol.Request.fields,
+        instanceId: ProviderInstanceId,
+        environmentId: EnvironmentId,
+      }),
+    ),
+    {
+      onExcessProperty: "error",
+    },
+  );
   const server = NodeNet.createServer((socket) => {
     socket.on("error", () => {});
     if (closing || sockets.size >= MAX_CONNECTIONS) {

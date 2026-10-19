@@ -1,18 +1,17 @@
 // @effect-diagnostics nodeBuiltinImport:off - Private local IPC framing, shared by server and lean CLI.
 import type * as NodeNet from "node:net";
-import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 export const Request = Schema.Struct({
   version: Schema.Literal(1),
-  instanceId: ProviderInstanceId,
-  environmentId: EnvironmentId,
+  instanceId: Schema.NonEmptyString,
+  environmentId: Schema.NonEmptyString,
   profileKey: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
 });
 export const Response = Schema.Struct({ token: Schema.NonEmptyString });
-// A request contains only a slug, UUID and SHA-256 binding. Tokens can be larger
-// JWTs. Never truncate either frame into something that could be accepted.
+// Selectors are small; tokens can be larger JWTs. Never truncate either frame
+// into something that could be accepted.
 export const REQUEST_BYTES = 1024;
 export const RESPONSE_BYTES = 64 * 1024;
 // Idle/incomplete peers and blocked response consumers must not retain sockets.
