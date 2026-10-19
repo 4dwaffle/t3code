@@ -151,10 +151,7 @@ describe("rewriting what has already been said", () => {
 
   const providerWith = make.pipe(
     Effect.provide(
-      Layer.mock(GitLabPullRequestCli.GitLabPullRequestCli)({
-        updateMergeRequest,
-        updateNote,
-      }),
+      Layer.mock(GitLabPullRequestCli.GitLabPullRequestCli)({ updateMergeRequest, updateNote }),
     ),
   );
 

@@ -322,6 +322,14 @@ export interface SupportedProject {
   readonly repositoryKey: string | null;
 }
 
+function withoutUrlCredentials(value: string): string {
+  const url = URL.parse(value);
+  if (url === null) return value;
+  url.username = "";
+  url.password = "";
+  return url.toString();
+}
+
 const providerRef = (project: SupportedProject): ProviderRepositoryRef => ({
   cwd: project.project.workspaceRoot,
   repository: project.repository,
@@ -771,7 +779,7 @@ export const make = Effect.gen(function* () {
             repository,
             host,
             ...(/^https?:\/\//i.test(identity.locator.remoteUrl)
-              ? { webUrl: identity.locator.remoteUrl }
+              ? { webUrl: withoutUrlCredentials(identity.locator.remoteUrl) }
               : {}),
             remote: repositoryKey ?? normalizeGitRemoteUrl(`https://${host}/${repository}`),
             repositoryKey:
@@ -796,7 +804,7 @@ export const make = Effect.gen(function* () {
           if (host === undefined || host === own.host)
             return Effect.succeed({
               ...own,
-              ...(ref.webUrl === undefined ? {} : { webUrl: ref.webUrl }),
+              ...(ref.webUrl === undefined ? {} : { webUrl: withoutUrlCredentials(ref.webUrl) }),
             });
         }
         if (host === undefined) {
@@ -853,7 +861,9 @@ export const make = Effect.gen(function* () {
                       api: withRateLimitBackoff(api, host, rateLimits),
                       repository,
                       host,
-                      ...(ref.webUrl === undefined ? {} : { webUrl: ref.webUrl }),
+                      ...(ref.webUrl === undefined
+                        ? {}
+                        : { webUrl: withoutUrlCredentials(ref.webUrl) }),
                       remote: normalizeGitRemoteUrl(`https://${host}/${repository}`),
                       repositoryKey: null,
                     };
@@ -868,7 +878,12 @@ export const make = Effect.gen(function* () {
             return Effect.succeed({
               ...route,
               repository: sameRepository ? route.repository : repository,
-              webUrl: ref.webUrl ?? (sameRepository ? route.webUrl : undefined),
+              webUrl:
+                ref.webUrl === undefined
+                  ? sameRepository
+                    ? route.webUrl
+                    : undefined
+                  : withoutUrlCredentials(ref.webUrl),
               remote: sameRepository
                 ? route.remote
                 : normalizeGitRemoteUrl(`https://${host}/${repository}`),
@@ -2514,7 +2529,6 @@ export const make = Effect.gen(function* () {
       ref.host?.toLowerCase() ?? "",
       ref.repository.toLowerCase(),
       ref.number,
-      ref.webUrl ?? null,
     ]);
   const mergedEpochs = new Map<string, number>();
   const refEpoch = (ref: PullRequestRef) => {

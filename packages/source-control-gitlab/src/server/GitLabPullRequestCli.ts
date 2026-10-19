@@ -1113,6 +1113,8 @@ export const make = Effect.gen(function* () {
       Effect.try({
         try: () => {
           const url = new URL(webUrl);
+          url.username = "";
+          url.password = "";
           // glab owns the installation prefix; only the known MR suffix is removed here.
           url.pathname = url.pathname.replace(/\/-\/merge_requests\/\d+(?:\/.*)?$/, "");
           url.search = "";

@@ -26,6 +26,7 @@ import * as Option from "effect/Option";
 
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
+import * as PullRequestService from "../../../pullRequest/PullRequestService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
 import { pullRequestSyncKey } from "../../../pullRequest/pullRequestSyncKey.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -79,7 +80,13 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
     if (parsed === null) {
       return yield* new PullRequestUrlInvalidError({});
     }
-    return { ...normalizeThreadPullRequestKey(parsed), url: input.url } satisfies ResolvedTarget;
+    const url = new URL(input.url);
+    url.username = "";
+    url.password = "";
+    return {
+      ...normalizeThreadPullRequestKey(parsed),
+      url: url.toString(),
+    } satisfies ResolvedTarget;
   }
   if (input.repository === undefined || input.number === undefined) {
     return yield* new PullRequestTargetIncompleteError({});
@@ -186,6 +193,7 @@ function projectForPullRequest(
 const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
+  const pullRequests = yield* PullRequestService.PullRequestService;
 
   const projects = yield* ProjectService.ProjectService;
   const crypto = yield* Crypto.Crypto;
@@ -248,6 +256,27 @@ const make = Effect.gen(function* () {
         ? Effect.failCause(cause as Cause.Cause<never>)
         : Effect.fail(new Failure({ cause }));
 
+  const resolveLink = Effect.fn("PullRequestsToolkit.resolveLink")(function* (
+    target: ResolvedTarget,
+    input: PullRequestTargetInput,
+    project: OrchestrationProjectShell | undefined,
+  ) {
+    if (input.url !== undefined) {
+      return { url: target.url, repositoryWebUrl: target.url };
+    }
+    if (project?.repositoryIdentity?.provider !== "gitlab") return { url: target.url };
+    const detail = yield* pullRequests.detail({
+      projectId: project.id,
+      host: target.host,
+      repository: target.repository,
+      number: target.number,
+    });
+    const url = yield* Effect.try(() => new URL(detail.url));
+    url.username = "";
+    url.password = "";
+    return { url: url.toString(), repositoryWebUrl: url.toString() };
+  });
+
   const setWatching = Effect.fn("PullRequestsToolkit.setWatching")(function* (
     input: PullRequestTargetInput,
     watching: boolean,
@@ -266,6 +295,11 @@ const make = Effect.gen(function* () {
     if (watching && before?.snapshot?.state === "merged") {
       return yield* new PullRequestNotOpenError({ state: "merged" });
     }
+    const link = watching
+      ? yield* resolveLink(target, input, project).pipe(
+          Effect.mapError((cause) => new PullRequestWatchFailedError({ cause })),
+        )
+      : undefined;
     yield* engine
       .dispatch({
         type: "thread.pull-request.watch",
@@ -275,7 +309,7 @@ const make = Effect.gen(function* () {
         repository: target.repository,
         number: target.number,
         watching,
-        ...(watching ? { link: { url: target.url, source: "agent" as const } } : {}),
+        ...(link === undefined ? {} : { link: { ...link, source: "agent" as const } }),
       })
       .pipe(Effect.catchCause(dispatchFailure(PullRequestWatchFailedError)));
     const after = yield* requireThread(PullRequestWatchFailedError, thread.id);
@@ -283,7 +317,7 @@ const make = Effect.gen(function* () {
       host: target.host,
       repository: target.repository,
       number: target.number,
-      url: target.url,
+      url: link?.url ?? target.url,
       watching: watchedLink(after)?.watch !== undefined,
       wasWatching: before?.watch !== undefined,
     };
@@ -348,7 +382,10 @@ const make = Effect.gen(function* () {
           threadPullRequestKeysEqual(link, target),
         );
         if (existing && existing.source !== "stack-dismissed")
-          return { ...target, alreadyLinked: true };
+          return { ...target, url: existing.url, alreadyLinked: true };
+        const link = yield* resolveLink(target, input, project).pipe(
+          Effect.mapError((cause) => new PullRequestLinkFailedError({ cause })),
+        );
         const alreadyLinked = yield* engine
           .dispatch({
             type: "thread.pull-request.link",
@@ -357,7 +394,7 @@ const make = Effect.gen(function* () {
             host: target.host,
             repository: target.repository,
             number: target.number,
-            url: target.url,
+            ...link,
             source: "agent",
           })
           .pipe(
@@ -365,7 +402,7 @@ const make = Effect.gen(function* () {
 
             Effect.catchCause(dispatchFailure(PullRequestLinkFailedError)),
           );
-        return { ...target, alreadyLinked };
+        return { ...target, url: link.url, alreadyLinked };
       }),
     ),
     unlink_pull_request: writesThread((input) =>
