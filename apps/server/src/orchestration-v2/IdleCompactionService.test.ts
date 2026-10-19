@@ -34,7 +34,7 @@ import * as ServerActivation from "../serverActivation.ts";
 import {
   idleCompactionWindow,
   idleCompactionCandidate,
-  PROMPT_CACHE_TTL_MS,
+  UNREPORTED_PROMPT_CACHE_TTL_MS,
 } from "./IdleCompaction.ts";
 import * as IdleCompactionService from "./IdleCompactionService.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -130,7 +130,7 @@ function projection(): {
         handoffIds: [],
         forkedFrom: null,
         pendingBackgroundTasks: [],
-        contextUsage: { usedTokens: 20_000 },
+        contextUsage: { usedTokens: 200_000 },
         createdAt: at(-MINUTE_MS),
         updatedAt: at(),
       },
@@ -152,15 +152,35 @@ function projection(): {
   };
 }
 
+function providerTurn(
+  value: OrchestrationV2ThreadProjection,
+  usage: { readonly promptCacheTtlMs?: number } = {},
+  offset = 0,
+): OrchestrationV2ThreadProjection["providerTurns"][number] {
+  return {
+    id: ProviderTurnId.make("provider-turn"),
+    providerThreadId: value.providerThreads[0]!.id,
+    nodeId: NodeId.make("root-node"),
+    runAttemptId: null,
+    nativeTurnRef: null,
+    ordinal: 1,
+    status: "completed",
+    startedAt: at(offset - MINUTE_MS),
+    completedAt: at(offset),
+    tokenUsage: { usedTokens: 200_000, ...usage, updatedAt: DateTime.formatIso(at(offset)) },
+  };
+}
+
 describe("idle compaction eligibility", () => {
   it("is opt-in and supports configured instances of each compacting driver", () => {
     expect(DEFAULT_SERVER_SETTINGS.compactIdleThreads).toBe(false);
     expect(idleCompactionCandidate(projection(), false, NOW_MS)).toBeNull();
-    for (const driver of Object.keys(PROMPT_CACHE_TTL_MS)) {
+    for (const driver of Object.keys(UNREPORTED_PROMPT_CACHE_TTL_MS)) {
       const value = projection();
       value.providerThreads = [
         { ...value.providerThreads[0]!, driver: ProviderDriverKind.make(driver) },
       ];
+      value.providerTurns = [providerTurn(value, { promptCacheTtlMs: 5 * MINUTE_MS })];
       expect(idleCompactionCandidate(value, true, NOW_MS)?.driver).toBe(driver);
     }
   });
@@ -245,24 +265,11 @@ describe("idle compaction eligibility", () => {
 
   it("requires measured occupancy, preferring current turn usage to cumulative accounting", () => {
     const value = projection();
-    for (const usage of [null, { usedTokens: 19_999, totalProcessedTokens: 500_000 }]) {
+    for (const usage of [null, { usedTokens: 199_999, totalProcessedTokens: 500_000 }]) {
       value.providerThreads = [{ ...value.providerThreads[0]!, contextUsage: usage }];
       expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
     }
-    value.providerTurns = [
-      {
-        id: ProviderTurnId.make("provider-turn"),
-        providerThreadId: value.providerThreads[0]!.id,
-        nodeId: NodeId.make("root-node"),
-        runAttemptId: null,
-        nativeTurnRef: null,
-        ordinal: 1,
-        status: "completed",
-        startedAt: at(-MINUTE_MS),
-        completedAt: at(),
-        tokenUsage: { usedTokens: 20_000, updatedAt: DateTime.formatIso(at()) },
-      },
-    ];
+    value.providerTurns = [providerTurn(value)];
     expect(idleCompactionCandidate(value, true, NOW_MS)).not.toBeNull();
     value.thread = {
       ...value.thread,
@@ -273,23 +280,36 @@ describe("idle compaction eligibility", () => {
 });
 
 describe("idle compaction timing", () => {
-  it("fires in the last 10% of each provider's cache TTL and supports the dev override", () => {
-    expect(idleCompactionWindow(at(), ProviderDriverKind.make("claudeAgent"))).toEqual({
+  it("fires at the end of the cache TTL, never in a window the minute sweep can miss", () => {
+    expect(idleCompactionWindow(at(), 60 * MINUTE_MS)).toEqual({
       startMs: NOW_MS + 54 * MINUTE_MS,
       endMs: NOW_MS + 60 * MINUTE_MS,
     });
-    expect(idleCompactionWindow(at(), ProviderDriverKind.make("codex"))).toEqual({
-      startMs: NOW_MS + 27 * MINUTE_MS,
-      endMs: NOW_MS + 30 * MINUTE_MS,
+    expect(idleCompactionWindow(at(), 5 * MINUTE_MS)).toEqual({
+      startMs: NOW_MS + 3 * MINUTE_MS,
+      endMs: NOW_MS + 5 * MINUTE_MS,
     });
-    expect(idleCompactionWindow(at(), ProviderDriverKind.make("future-driver"))).toEqual({
-      startMs: NOW_MS + 27 * MINUTE_MS,
-      endMs: NOW_MS + 30 * MINUTE_MS,
-    });
-    expect(idleCompactionWindow(at(), ProviderDriverKind.make("codex"), MINUTE_MS)).toEqual({
+    expect(idleCompactionWindow(at(), 30 * MINUTE_MS, MINUTE_MS)).toEqual({
       startMs: NOW_MS + MINUTE_MS,
       endMs: NOW_MS + 4 * MINUTE_MS,
     });
+  });
+
+  it("uses Claude's reported cache TTL and skips Claude sessions that never reported one", () => {
+    const value = projection();
+    value.providerThreads = [
+      { ...value.providerThreads[0]!, driver: ProviderDriverKind.make("claudeAgent") },
+    ];
+    expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
+    value.providerTurns = [
+      providerTurn(value, { promptCacheTtlMs: 5 * MINUTE_MS }, -MINUTE_MS),
+      // A fully cached turn creates no cache entry, so it reports no TTL.
+      { ...providerTurn(value, {}, 0), id: ProviderTurnId.make("cached-turn"), ordinal: 2 },
+    ];
+    expect(idleCompactionCandidate(value, true, NOW_MS)?.promptCacheTtlMs).toBe(5 * MINUTE_MS);
+    expect(idleCompactionCandidate(projection(), true, NOW_MS)?.promptCacheTtlMs).toBe(
+      30 * MINUTE_MS,
+    );
   });
 });
 
@@ -328,7 +348,41 @@ const seed = Effect.fn("seedIdleCompactionThread")(function* (
     occurredAt: at(),
     payload: value.providerThreads[0]!,
   });
+  for (const turn of value.providerTurns) {
+    yield* store.apply({
+      id: EventId.make(`provider-turn:${turn.id}`),
+      type: "provider-turn.updated",
+      threadId: value.thread.id,
+      occurredAt: at(),
+      payload: turn,
+    });
+  }
 });
+
+it.effect("reads Claude's reported cache TTL in SQL like the memory check", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const value = projection();
+    value.providerThreads = [
+      { ...value.providerThreads[0]!, driver: ProviderDriverKind.make("claudeAgent") },
+    ];
+    yield* seed(value);
+    expect(yield* store.getIdleCompactionCandidates({ completedAfter: at(-MINUTE_MS) })).toEqual(
+      [],
+    );
+    value.providerTurns = [providerTurn(value, { promptCacheTtlMs: 5 * MINUTE_MS })];
+    yield* seed(value);
+    const candidate = idleCompactionCandidate(
+      yield* store.getThreadProjection(value.thread.id),
+      true,
+      NOW_MS,
+    );
+    expect(candidate?.promptCacheTtlMs).toBe(5 * MINUTE_MS);
+    expect(yield* store.getIdleCompactionCandidates({ completedAfter: at(-MINUTE_MS) })).toEqual([
+      candidate,
+    ]);
+  }).pipe(Effect.provide(layerProjections)),
+);
 
 it.effect.each([null, "fork", "subagent"] as const)(
   "keeps SQL and memory eligibility aligned for %s children",

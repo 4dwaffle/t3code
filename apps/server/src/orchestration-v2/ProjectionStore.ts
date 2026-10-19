@@ -3,7 +3,8 @@ import { projectTurnItemForWire } from "./WireProjection.ts";
 import {
   idleCompactionCandidate,
   MIN_IDLE_COMPACTION_CONTEXT_TOKENS,
-  PROMPT_CACHE_TTL_MS,
+  resolvePromptCacheTtlMs,
+  UNREPORTED_PROMPT_CACHE_TTL_MS,
 } from "./IdleCompaction.ts";
 import * as Stream from "effect/Stream";
 import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
@@ -218,6 +219,7 @@ export interface ProjectionIdleCompactionCandidate {
   readonly threadId: ThreadId;
   readonly runId: OrchestrationV2Run["id"];
   readonly completedAt: DateTime.Utc;
+  readonly promptCacheTtlMs: number;
   readonly driver: ProviderDriverKind;
 }
 
@@ -5679,9 +5681,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly run_id: string;
         readonly completed_at: string;
         readonly driver: string;
+        readonly prompt_cache_ttl_ms: number | null;
       }>`
         SELECT t.thread_id, r.run_id, r.completed_at,
-          json_extract(p.payload_json, '$.driver') AS driver
+          json_extract(p.payload_json, '$.driver') AS driver,
+          (
+            SELECT json_extract(turn.payload_json, '$.tokenUsage.promptCacheTtlMs')
+            FROM orchestration_v2_projection_provider_turns turn
+            WHERE turn.provider_thread_id = p.provider_thread_id
+              AND json_extract(turn.payload_json, '$.tokenUsage.promptCacheTtlMs') IS NOT NULL
+            ORDER BY json_extract(turn.payload_json, '$.tokenUsage.updatedAt') DESC LIMIT 1
+          ) AS prompt_cache_ttl_ms
         FROM orchestration_v2_projection_threads t
         INNER JOIN orchestration_v2_projection_runs r ON r.run_id = (
           SELECT latest.run_id FROM orchestration_v2_projection_runs latest
@@ -5700,7 +5710,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND r.status = 'completed' AND r.completed_at >= ${DateTime.formatIso(completedAfter)}
           AND json_extract(r.payload_json, '$.idleCompactionOfRunId') IS NULL
           AND lower(trim(json_extract(m.payload_json, '$.text'), ${javascriptTrimWhitespace})) <> '/compact'
-          AND json_extract(p.payload_json, '$.driver') IN ${sql.in(Object.keys(PROMPT_CACHE_TTL_MS))}
+          AND json_extract(p.payload_json, '$.driver') IN ${sql.in(Object.keys(UNREPORTED_PROMPT_CACHE_TTL_MS))}
           AND COALESCE((
             SELECT json_extract(turn.payload_json, '$.tokenUsage.usedTokens')
             FROM orchestration_v2_projection_provider_turns turn
@@ -5719,12 +5729,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           )
       `.pipe(
         Effect.map((rows) =>
-          rows.map((row) => ({
-            threadId: ThreadId.make(row.thread_id),
-            runId: RunId.make(row.run_id),
-            completedAt: DateTime.makeUnsafe(row.completed_at),
-            driver: row.driver as ProviderDriverKind,
-          })),
+          rows.flatMap((row) => {
+            const promptCacheTtlMs = resolvePromptCacheTtlMs(row.driver, row.prompt_cache_ttl_ms);
+            return promptCacheTtlMs === null
+              ? []
+              : [
+                  {
+                    threadId: ThreadId.make(row.thread_id),
+                    runId: RunId.make(row.run_id),
+                    completedAt: DateTime.makeUnsafe(row.completed_at),
+                    driver: row.driver as ProviderDriverKind,
+                    promptCacheTtlMs,
+                  },
+                ];
+          }),
         ),
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
       );

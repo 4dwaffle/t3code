@@ -53,7 +53,7 @@ export const make = Effect.gen(function* () {
       function* (candidate: (typeof candidates)[number]) {
         const window = idleCompactionWindow(
           candidate.completedAt,
-          candidate.driver,
+          candidate.promptCacheTtlMs,
           config.idleCompactionDelayMs,
         );
         if (nowMs < window.startMs || nowMs >= window.endMs) return;
