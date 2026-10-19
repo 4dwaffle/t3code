@@ -2682,6 +2682,65 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
   describe("Claude settings restrictions", () => {
+    it.effect("resolves cached managed policy from the configured home through the real SDK", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-remote-" });
+        const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-remote-cwd-" });
+        const remoteFile = path.join(home, "remote-settings.json");
+        const sdk = yield* Effect.promise(() =>
+          vi.importActual<typeof ClaudeSdk>("@anthropic-ai/claude-agent-sdk"),
+        );
+        vi.mocked(ClaudeSdk.resolveSettings).mockImplementation(sdk.resolveSettings);
+        const open = Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeWakeHarnessWithOptions({
+              settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: home },
+            });
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make("attempt-cached-managed-policy"),
+                text: "Run git status.",
+                attachments: [],
+                runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  cwd,
+                }),
+              }),
+            );
+            return harness.getOpenedOptions()!;
+          }),
+        );
+        yield* fileSystem.writeFileString(
+          remoteFile,
+          JSON.stringify({
+            permissions: { disableBypassPermissionsMode: "disable" },
+            disableAutoMode: "disable",
+            managedSourcesBehavior: "merge",
+          }),
+        );
+        const restricted = yield* open;
+        assert.equal(restricted.permissionMode, "default");
+        assert.isUndefined(restricted.allowDangerouslySkipPermissions);
+        yield* fileSystem.remove(remoteFile);
+        assert.equal((yield* open).permissionMode, "bypassPermissions");
+        yield* fileSystem.writeFileString(remoteFile, "{ invalid json");
+        assert.equal((yield* open).permissionMode, "auto");
+        yield* fileSystem.remove(remoteFile);
+        yield* fileSystem.makeDirectory(remoteFile);
+        assert.equal((yield* open).permissionMode, "auto");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
     it.effect("asks before restricted Full access tools and follows policy across turns", () =>
       Effect.gen(function* () {
         const resolveSettings = vi
