@@ -1,3 +1,7 @@
+import {
+  getPromptControlledTraits,
+  getTraitSelectChange,
+} from "@t3tools/client-runtime/model-traits";
 import { Toolbar } from "../../components/ui/Toolbar";
 import * as Dialog from "../../components/ui/Dialog";
 import { createV5StackNavigator as createNativeStackNavigator } from "../../native/createV5StackNavigator";
@@ -51,7 +55,10 @@ import {
 import { applyProviderOptionSelection } from "../../lib/providerOptions";
 import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
-import { rememberModelOptions } from "../../state/use-model-option-memory";
+import {
+  rememberModelOptions,
+  withRememberedModelOptions,
+} from "../../state/use-model-option-memory";
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { ChatGptSharingStatus } from "./ChatGptSharingStatus";
@@ -232,6 +239,8 @@ type ThreadSettingsSessionProps = {
   readonly lockedProviderInstanceId?: ProviderInstanceId;
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
   readonly selectedModel: ModelSelection | null;
+  readonly prompt: string;
+  readonly onPromptChange: (prompt: string) => void;
   readonly reportedModelSelection?: ModelSelection | null;
   readonly onSelectModel: (option: ModelOption) => void;
   readonly optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
@@ -295,6 +304,7 @@ type ThreadSettingsSessionValue = {
   readonly runtimeModeChoices: ReturnType<typeof runtimeModeChoicesForSupportedModes>;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
+  readonly promptTraits: ReturnType<typeof getPromptControlledTraits>;
   readonly displayedModelSelection: ModelSelection | null;
   readonly reportedModelSelection: ModelSelection | null;
   readonly providerExpansionOverrides: ReadonlySet<string>;
@@ -470,6 +480,7 @@ function ThreadSettingsSessionProvider(
         })
       : []
     : props.optionDescriptors;
+  const promptTraits = getPromptControlledTraits(displayedDescriptors, props.prompt);
   const displayedModel =
     pendingModel ??
     props.providerGroups.flatMap((group) => group.models).find((option) => isApplied(option)) ??
@@ -501,7 +512,25 @@ function ThreadSettingsSessionProvider(
   };
 
   const applyOptionChange = (id: string, value: string | boolean) => {
-    const next = applyProviderOptionSelection(displayedDescriptors, { id, value });
+    const descriptor = displayedDescriptors.find((entry) => entry.id === id);
+    const change =
+      descriptor?.type === "select" && typeof value === "string"
+        ? getTraitSelectChange(
+            { ...promptTraits, descriptors: displayedDescriptors },
+            descriptor,
+            props.prompt,
+            value,
+          )
+        : null;
+    if (descriptor?.type === "select") {
+      if (!change) return;
+      if (change.prompt !== props.prompt) props.onPromptChange(change.prompt);
+      if (!("modelOptions" in change)) return;
+    }
+    const next =
+      change && "modelOptions" in change
+        ? (change.modelOptions ?? [])
+        : applyProviderOptionSelection(displayedDescriptors, { id, value });
     if (!next) {
       return;
     }
@@ -531,7 +560,7 @@ function ThreadSettingsSessionProvider(
     setPendingModel((current) =>
       pendingModelAfterPress({
         current,
-        pressed: option,
+        pressed: { ...option, selection: withRememberedModelOptions(option.selection) },
         pressedIsApplied: isApplied(option),
       }),
     );
@@ -549,6 +578,7 @@ function ThreadSettingsSessionProvider(
     runtimeModeChoices,
     onUpdateRuntimeMode: props.onUpdateRuntimeMode,
     displayedDescriptors,
+    promptTraits,
     displayedModelSelection: pendingModel?.selection ?? props.selectedModel,
     reportedModelSelection: pendingModel ? null : (props.reportedModelSelection ?? null),
     favoriteKeys,
@@ -795,11 +825,16 @@ function ThreadSettingsOptionsItem(props: {
               >
                 <DisclosureRow
                   label={descriptor.label}
-                  value={getProviderOptionCurrentLabel(
-                    descriptor,
-                    session.displayedModelSelection,
-                    session.reportedModelSelection,
-                  )}
+                  value={
+                    session.promptTraits.ultrathinkPromptControlled &&
+                    descriptor.id === session.promptTraits.primarySelectDescriptor?.id
+                      ? "Ultrathink"
+                      : getProviderOptionCurrentLabel(
+                          descriptor,
+                          session.displayedModelSelection,
+                          session.reportedModelSelection,
+                        )
+                  }
                   onPress={() => props.onOpenSubmenu({ kind: "descriptor", id: descriptor.id })}
                 />
               </Animated.View>
@@ -1039,16 +1074,29 @@ function ThreadSettingsChoiceContent(props: {
             rows: selectableChoices(activeDescriptor).map((choice) => ({
               id: choice.id,
               label: choice.label,
-              description: undefined,
+              description: choice.description,
               selected:
                 choice.id ===
-                getProviderOptionCurrentValue(
-                  activeDescriptor,
-                  session.displayedModelSelection,
-                  session.reportedModelSelection,
-                ),
+                (session.promptTraits.ultrathinkPromptControlled &&
+                activeDescriptor.id === session.promptTraits.primarySelectDescriptor?.id
+                  ? "ultrathink"
+                  : getProviderOptionCurrentValue(
+                      activeDescriptor,
+                      session.displayedModelSelection,
+                      session.reportedModelSelection,
+                    )),
               onPress: () => {
                 void Haptics.selectionAsync();
+                if (
+                  session.promptTraits.ultrathinkInBodyText &&
+                  activeDescriptor.id === session.promptTraits.primarySelectDescriptor?.id
+                ) {
+                  Dialog.alert(
+                    "Reasoning controlled by prompt",
+                    'Your prompt contains "ultrathink" in the text. Remove it to change this option.',
+                  );
+                  return;
+                }
                 session.applyOptionChange(activeDescriptor.id, choice.id);
                 props.onSelected();
               },
@@ -1454,6 +1502,8 @@ export function NewTaskThreadSettingsRouteScreen() {
       {...(flow.selectedModel ? { providerInstanceId: flow.selectedModel.instanceId } : {})}
       providerGroups={flow.providerGroups}
       selectedModel={flow.selectedModel}
+      prompt={flow.prompt}
+      onPromptChange={flow.setPrompt}
       onSelectModel={(option) => flow.setSelectedModelKey(option.key, option.selection.options)}
       optionDescriptors={optionDescriptors}
       onUpdateOptionSelections={flow.setSelectedModelOptions}

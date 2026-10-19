@@ -30,6 +30,7 @@ export function ComposerInlineControl(props: {
   readonly icon?: ComponentProps<typeof SymbolView>["name"];
   readonly renderIcon?: (size: number) => ReactNode;
   readonly label: string;
+  readonly suffix?: ReactNode;
   readonly maxWidth?: ViewStyle["maxWidth"];
   readonly onPress?: () => void;
   readonly selected?: boolean;
@@ -77,6 +78,7 @@ export function ComposerInlineControl(props: {
       >
         {props.label}
       </Text>
+      {props.suffix ? <View className="shrink-0">{props.suffix}</View> : null}
       {props.showChevron === false ? null : (
         <SymbolView
           name={props.chevronDirection === "right" ? "chevron.right" : "chevron.down"}
