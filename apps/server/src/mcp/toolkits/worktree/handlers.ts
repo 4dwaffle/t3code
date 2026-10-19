@@ -2,7 +2,6 @@ import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as GitWorkflow from "../../../git/GitWorkflowService.ts";
 import * as Project from "../../../project/ProjectService.ts";
-import * as Review from "../../../review/ReviewService.ts";
 import { readThread, unavailable } from "../../threadAccess.ts";
 import * as Effect from "effect/Effect";
 
@@ -10,8 +9,6 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
 import { WorktreeToolkit } from "./tools.ts";
-
-const MAX_DIFF_FILES = 500;
 
 const handlers = {
   t3_worktree_list: McpToolAccess.reads((input) =>
@@ -41,56 +38,9 @@ const handlers = {
   ),
   t3_thread_diff: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
-      const {
-        projection: { thread },
-      } = yield* readThread(input.threadId);
-      const projects = yield* Project.ProjectService;
-      const project = yield* projects.getById(thread.projectId).pipe(Effect.mapError(unavailable));
-      if (Option.isNone(project))
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message: "The project was not found.",
-        });
-      const review = yield* Review.ReviewService;
-      const preview = yield* review
-        .getDiffPreview({
-          cwd: thread.worktreePath ?? project.value.workspaceRoot,
-          ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-          ...(input.source === undefined ? {} : { sourceKind: input.source }),
-        })
-        .pipe(
-          Effect.mapError((error) =>
-            error._tag === "VcsRepositoryDetectionError" ||
-            error._tag === "VcsUnsupportedOperationError" ||
-            (error._tag === "GitCommandError" &&
-              input.baseRef !== undefined &&
-              error.operation === "GitVcsDriver.resolveReviewMergeBase" &&
-              error.exitCode !== undefined)
-              ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.detail })
-              : unavailable(),
-          ),
-        );
-      if (preview.sources.length === 0)
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message: "The thread's checkout is not a repository.",
-        });
-      const maxCharacters = input.maxCharacters ?? 20_000;
-      return {
-        threadId: thread.id,
-        cwd: preview.cwd,
-        sources: preview.sources.map((source) => ({
-          kind: source.kind,
-          baseRef: source.baseRef,
-          headRef: source.headRef,
-          files: source.files?.slice(0, MAX_DIFF_FILES) ?? null,
-          diff: source.diff.slice(0, maxCharacters),
-          truncated:
-            source.truncated ||
-            source.diff.length > maxCharacters ||
-            (source.files?.length ?? 0) > MAX_DIFF_FILES,
-        })),
-      };
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* WorktreeMcpService.WorktreeMcpService;
+      return yield* service.getThreadDiff(scope, input);
     }),
   ),
   t3_worktree_handoff: McpToolAccess.actsAsCaller((input) =>

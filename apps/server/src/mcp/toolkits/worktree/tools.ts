@@ -15,7 +15,6 @@ import {
 import * as Schema from "effect/Schema";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
-import * as ReviewService from "../../../review/ReviewService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -117,12 +116,7 @@ const ThreadDiffTool = Tool.make("t3_thread_diff", {
   }),
   failure: OrchestratorMcpFailure,
   failureMode: "return",
-  dependencies: [
-    McpInvocationContext.McpInvocationContext,
-    ThreadManagementService.ThreadManagementService,
-    ProjectService.ProjectService,
-    ReviewService.ReviewService,
-  ],
+  dependencies,
 })
   .annotate(Tool.Title, "Show thread diff")
   .annotate(Tool.Readonly, true)

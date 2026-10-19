@@ -254,8 +254,10 @@ it.effect("reads another thread checkout with selected and bounded diff sources"
             }),
           ),
       }),
-      Layer.mock(WorktreeMcpService.WorktreeMcpService)({}),
       Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+      Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
+      Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+      ServerSettings.layerTest(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment:diff"),
         requestNamespace: "diff-session",
@@ -341,6 +343,7 @@ it.effect("reads another thread checkout with selected and bounded diff sources"
     }).pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(WorktreeHandlers.layer).pipe(
+          Layer.provideMerge(WorktreeMcpService.layer.pipe(Layer.provide(dependencies))),
           Layer.provideMerge(dependencies),
         ),
       ),
