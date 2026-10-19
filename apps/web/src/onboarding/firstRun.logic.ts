@@ -52,12 +52,9 @@ export function isFirstRunWorkspaceProvenanceAuthoritative(input: {
   readonly welcomeReceived: boolean;
   readonly bootstrapStatus: "pending" | "complete" | null;
 }): boolean {
-  // An empty catalog is not final while cwd auto-bootstrap is pending. Older
-  // servers omit bootstrapStatus, so a received welcome with null stays valid.
   return input.welcomeReceived && input.bootstrapStatus !== "pending";
 }
 
-/** Keeps the authenticated app unmounted until workspace evidence settles. */
 export function transitionFirstRunGateState(
   state: FirstRunGateState,
   event: FirstRunGateEvent,
@@ -77,7 +74,6 @@ export function transitionFirstRunGateState(
   return { decision: event.decision, stalled: false };
 }
 
-/** Only a project and thread created by this startup count as a fresh nonempty workspace. */
 export function isFreshFirstRunWorkspace(input: FirstRunWorkspaceInput): boolean {
   if (input.projects.length > 1 || input.threads.length > 1) {
     return false;
@@ -114,7 +110,6 @@ export function isFreshFirstRunWorkspace(input: FirstRunWorkspaceInput): boolean
   );
 }
 
-/** Cached projects may open the app, but only live workspace data may complete onboarding. */
 export function resolveFirstRunDecision(input: FirstRunDecisionInput): {
   readonly decision: FirstRunDecision;
   readonly persistCompletion: boolean;
