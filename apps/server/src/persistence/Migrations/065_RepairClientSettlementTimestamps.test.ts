@@ -74,9 +74,9 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
         // sweep-1 has no activity at all, so it falls back to created_at.
 
         // sweep-2's last activity is the end of a turn, which only the V1
-        // turn events still record. A streaming chunk and a stopped session
-        // after it are not turn activity, and the event after the sweep is
-        // ignored.
+        // turn events still record: the session leaving "running" after a
+        // streamed reply. The later stop of the idle session is a restart,
+        // not activity, and the turn after the sweep is ignored.
         const sweepTwoRequestedAt = "2026-06-01T00:00:00.000Z";
         const sweepTwoCompletedAt = "2026-06-01T00:05:00.000Z";
         const insertActivityEvent = (
@@ -98,24 +98,27 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
         yield* insertActivityEvent(1, "thread.turn-start-requested", sweepTwoRequestedAt, {
           createdAt: sweepTwoRequestedAt,
         });
-        yield* insertActivityEvent(2, "thread.message-sent", sweepTwoCompletedAt, {
+        yield* insertActivityEvent(2, "thread.session-set", "2026-06-01T00:00:01.000Z", {
+          session: {
+            status: "running",
+            activeTurnId: "turn-1",
+            updatedAt: "2026-06-01T00:00:01.000Z",
+          },
+        });
+        yield* insertActivityEvent(3, "thread.message-sent", "2026-06-01T00:01:00.000Z", {
           role: "assistant",
           turnId: "turn-1",
-          streaming: false,
-          createdAt: sweepTwoRequestedAt,
-          updatedAt: sweepTwoCompletedAt,
-        });
-        yield* insertActivityEvent(3, "thread.message-sent", "2026-06-02T00:00:00.000Z", {
-          role: "assistant",
-          turnId: "turn-2",
           streaming: true,
-          createdAt: "2026-06-02T00:00:00.000Z",
-          updatedAt: "2026-06-02T00:00:00.000Z",
+          createdAt: "2026-06-01T00:01:00.000Z",
+          updatedAt: "2026-06-01T00:01:00.000Z",
         });
-        yield* insertActivityEvent(4, "thread.session-set", "2026-06-03T00:00:00.000Z", {
-          session: { status: "stopped", activeTurnId: null },
+        yield* insertActivityEvent(4, "thread.session-set", "2026-06-01T00:05:00.500Z", {
+          session: { status: "ready", activeTurnId: null, updatedAt: sweepTwoCompletedAt },
         });
-        yield* insertActivityEvent(5, "thread.turn-start-requested", "2026-09-10T00:00:00.000Z", {
+        yield* insertActivityEvent(5, "thread.session-set", "2026-06-03T00:00:00.000Z", {
+          session: { status: "stopped", activeTurnId: null, updatedAt: "2026-06-03T00:00:00.000Z" },
+        });
+        yield* insertActivityEvent(6, "thread.turn-start-requested", "2026-09-10T00:00:00.000Z", {
           createdAt: "2026-09-10T00:00:00.000Z",
         });
 
@@ -143,6 +146,38 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
             NULL, ${CREATED_AT}, ${sweepFiveSweptAt}, NULL, NULL, ${sweepFivePayloadBefore}
           )
         `;
+        // The V2 events the import wrote carry the same bad value, and a
+        // projection rebuild replays them. A later V2 settle with its own
+        // time must stay as it is.
+        const sweepFiveResettledAt = "2026-10-01T00:00:00.000Z";
+        const insertV2ThreadEvent = (
+          threadId: string,
+          streamVersion: number,
+          eventType: string,
+          payload: string,
+        ) => sql`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            actor_kind, payload_json, metadata_json, application_event_version
+          )
+          VALUES (
+            ${`v2-${threadId}-${streamVersion}`}, 'thread', ${threadId}, ${streamVersion},
+            ${eventType}, ${CREATED_AT}, 'server', ${payload}, '{}', 2
+          )
+        `;
+        yield* insertV2ThreadEvent("sweep-5", 100, "thread.created", sweepFivePayloadBefore);
+        yield* insertV2ThreadEvent(
+          "sweep-5",
+          101,
+          "thread.metadata-updated",
+          sweepFivePayloadBefore,
+        );
+        yield* insertV2ThreadEvent(
+          "sweep-5",
+          102,
+          "thread.metadata-updated",
+          sweepFivePayloadBefore.replace(sweepFiveSweptAt, sweepFiveResettledAt),
+        );
 
         // -- A genuine manual settle 45s after the sweep's last member: well
         // inside the old "anything within 120s of a qualifying pivot" reach,
@@ -296,9 +331,30 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
           );
         }
 
-        // Only the projections changed; event history is untouched.
+        // V2 events that copied the bad value are repaired, so a rebuild
+        // keeps the fix. Every other event, V1 history included, is untouched.
+        const sweepFiveV2Events = yield* sql<{
+          readonly settledAt: string;
+          readonly title: string;
+        }>`
+          SELECT
+            json_extract(payload_json, '$.settledAt') AS "settledAt",
+            json_extract(payload_json, '$.title') AS "title"
+          FROM orchestration_events
+          WHERE application_event_version = 2 AND stream_id = 'sweep-5'
+          ORDER BY stream_version
+        `;
+        assert.deepStrictEqual(
+          sweepFiveV2Events.map((event) => event.settledAt),
+          [sweepFiveActivityAt, sweepFiveActivityAt, sweepFiveResettledAt],
+        );
+        assert.strictEqual(sweepFiveV2Events[0]!.title, "Imported before the fix");
         const eventsAfter = yield* sql`SELECT * FROM orchestration_events ORDER BY sequence`;
-        assert.deepStrictEqual(eventsAfter, eventsBefore);
+        const unrepairedEventIds = new Set(["v2-sweep-5-100", "v2-sweep-5-101"]);
+        assert.deepStrictEqual(
+          eventsAfter.filter((event) => !unrepairedEventIds.has(String(event.event_id))),
+          eventsBefore.filter((event) => !unrepairedEventIds.has(String(event.event_id))),
+        );
 
         // Idempotent: nothing left to run, and running the repair again is a no-op.
         assert.deepStrictEqual(yield* runMigrations(), []);

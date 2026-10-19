@@ -14,7 +14,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 // manual settle just outside the sweep cannot get chained into it through an
 // overlapping window.
 //
-// Two repair sites, because the V1 -> V2 import can land in between:
+// Three repair sites, because the V1 -> V2 import can land in between:
 // - projection_threads.settled_at is V1's own projection. It is still the
 //   only copy of the truth for a thread that has not been imported into V2
 //   yet, and importedThread() in LegacyV1ThreadImporter reads this column
@@ -27,15 +27,15 @@ import * as SqlClient from "effect/sql/SqlClient";
 //   copy directly, using the same detection and the same last-activity
 //   computation, sourced from V1 user messages (kept for the transcript
 //   import) and V1 turn events, so it does not depend on import status.
-//
-// Both statements update a projection only, matching 046: the engine and
-// projectors bootstrap from projection rows and a resume cursor, never a
-// full replay, so the historical event payloads can stay as recorded.
+// - V2 thread events. The import and every later thread snapshot event carry
+//   the whole thread, bad settledAt included, and a V2 projection rebuild
+//   replays them. They are patched too, as 064 does, so a rebuild keeps the
+//   fix. V1 events stay as recorded: nothing replays them anymore.
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  // Shared burst-detection logic, duplicated across the two statements below
-  // because a WITH clause does not carry over between statements.
+  // Shared burst-detection logic, repeated in each statement below because a
+  // WITH clause does not carry over between statements.
   const detectBurst = sql`
     legacy_settlements AS (
       SELECT
@@ -92,10 +92,26 @@ export default Effect.gen(function* () {
       WHERE burst_clusters.distinct_thread_count >= 10
         AND burst_clusters.span_seconds <= 120
     ),
-    -- Last activity mirrors what the old projection_turns table recorded:
-    -- turn requests, starts, final assistant messages, interrupts and
-    -- checkpoints. 063 dropped that table, so read the V1 events it was
-    -- projected from instead.
+    session_transitions AS (
+      SELECT
+        stream_id AS thread_id,
+        occurred_at,
+        payload_json,
+        json_extract(payload_json, '$.session.status') AS status,
+        LAG(json_extract(payload_json, '$.session.status'))
+          OVER (PARTITION BY stream_id ORDER BY sequence) AS previous_status
+      FROM orchestration_events
+      WHERE aggregate_kind = 'thread'
+        AND application_event_version = 1
+        AND event_type = 'thread.session-set'
+    ),
+    -- Last activity is what the old projection_turns table recorded: turn
+    -- requests, starts, assistant messages, interrupts, checkpoints, and the
+    -- session leaving "running", which is how the projector marked a turn
+    -- complete. 063 dropped that table, so read the V1 events it was
+    -- projected from instead. A session that changes state without leaving
+    -- "running", such as a server restart stopping an idle session, is not
+    -- turn activity.
     activity_timestamps AS (
       SELECT thread_id, created_at AS activity_at
       FROM projection_thread_messages
@@ -103,10 +119,11 @@ export default Effect.gen(function* () {
       UNION ALL
       SELECT
         stream_id,
-        CASE event_type
-          WHEN 'thread.session-set' THEN occurred_at
-          WHEN 'thread.message-sent' THEN json_extract(payload_json, '$.updatedAt')
-          WHEN 'thread.turn-diff-completed' THEN json_extract(payload_json, '$.completedAt')
+        CASE
+          WHEN event_type = 'thread.turn-diff-completed'
+            THEN json_extract(payload_json, '$.completedAt')
+          WHEN event_type = 'thread.message-sent' AND json_type(payload_json, '$.streaming') = 'false'
+            THEN json_extract(payload_json, '$.updatedAt')
           ELSE json_extract(payload_json, '$.createdAt')
         END
       FROM orchestration_events
@@ -119,17 +136,21 @@ export default Effect.gen(function* () {
             AND json_type(payload_json, '$.turnId') = 'text'
           )
           OR (
-            event_type = 'thread.session-set'
-            AND json_extract(payload_json, '$.session.status') = 'running'
-            AND json_type(payload_json, '$.session.activeTurnId') = 'text'
-          )
-          OR (
             event_type = 'thread.message-sent'
             AND json_extract(payload_json, '$.role') = 'assistant'
             AND json_type(payload_json, '$.turnId') = 'text'
-            AND json_type(payload_json, '$.streaming') = 'false'
           )
         )
+      UNION ALL
+      SELECT
+        thread_id,
+        CASE
+          WHEN status = 'running' THEN occurred_at
+          ELSE COALESCE(json_extract(payload_json, '$.session.updatedAt'), occurred_at)
+        END
+      FROM session_transitions
+      WHERE (status = 'running' AND json_type(payload_json, '$.session.activeTurnId') = 'text')
+        OR (status IS NOT 'running' AND previous_status = 'running')
     )
   `;
 
@@ -194,6 +215,43 @@ export default Effect.gen(function* () {
         FROM automatic_settlements AS automatic
         WHERE automatic.thread_id = thread.thread_id
           AND automatic.occurred_at = json_extract(thread.payload_json, '$.settledAt')
+      )
+  `;
+
+  yield* sql`
+    WITH ${detectBurst}
+    UPDATE orchestration_events AS event
+    SET payload_json = json_set(
+      event.payload_json,
+      '$.settledAt',
+      (
+        SELECT COALESCE(
+          (
+            SELECT activity.activity_at
+            FROM activity_timestamps AS activity
+            WHERE activity.thread_id = event.stream_id
+              AND julianday(activity.activity_at) IS NOT NULL
+              AND julianday(activity.activity_at) <= julianday(automatic.occurred_at)
+            ORDER BY julianday(activity.activity_at) DESC
+            LIMIT 1
+          ),
+          json_extract(event.payload_json, '$.createdAt'),
+          json_extract(event.payload_json, '$.settledAt')
+        )
+        FROM automatic_settlements AS automatic
+        WHERE automatic.thread_id = event.stream_id
+          AND automatic.occurred_at = json_extract(event.payload_json, '$.settledAt')
+        LIMIT 1
+      )
+    )
+    WHERE event.aggregate_kind = 'thread'
+      AND event.application_event_version = 2
+      AND event.stream_id IN (SELECT thread_id FROM automatic_settlements)
+      AND EXISTS (
+        SELECT 1
+        FROM automatic_settlements AS automatic
+        WHERE automatic.thread_id = event.stream_id
+          AND automatic.occurred_at = json_extract(event.payload_json, '$.settledAt')
       )
   `;
 });
