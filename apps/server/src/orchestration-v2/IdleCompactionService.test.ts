@@ -282,7 +282,6 @@ describe("idle compaction eligibility", () => {
         type: "command_execution",
         input: "vp run dev",
         output: "",
-        exitCode: null,
       },
     ];
     expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
