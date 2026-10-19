@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import {
   ProviderAdapterDriverCreateError,
@@ -46,11 +47,7 @@ export const ProviderAdapterRegistryV2Error = Schema.Union([
 export type ProviderAdapterRegistryV2Error = typeof ProviderAdapterRegistryV2Error.Type;
 
 export interface ProviderAdapterRegistryV2Shape {
-  /**
-   * Returns the same adapter object until the instance is rebuilt. Live
-   * sessions compare it to notice a settings change, so a wrapper built per
-   * call would restart every session on every turn.
-   */
+  /** Stable identity lets live sessions detect provider instance rebuilds. */
   readonly get: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2["Service"], ProviderAdapterRegistryV2Error>;
@@ -79,9 +76,10 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
   ProviderAdapterRegistryV2,
   Effect.gen(function* () {
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
-    // One wrapper per instance build, so a live session can compare adapters
-    // to tell that a settings change rebuilt its instance.
-    const signInGated = new WeakMap<object, ProviderAdapter.ProviderAdapterV2["Service"]>();
+    const signInGated = new WeakMap<
+      ProviderInstance,
+      ProviderAdapter.ProviderAdapterV2["Service"]
+    >();
     return ProviderAdapterRegistryV2.of({
       get: (instanceId) =>
         instances.getInstance(instanceId).pipe(

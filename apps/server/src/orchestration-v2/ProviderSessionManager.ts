@@ -198,7 +198,6 @@ interface LiveSessionEntry {
    */
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   readonly supportsMultipleProviderThreads: boolean;
-  /** The adapter that opened this session, to notice a settings rebuild. */
   readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -912,6 +911,7 @@ export const layerWithOptions = (
       const removeLiveEntry = (input: {
         readonly providerSessionId: ProviderSessionId;
         readonly onlyIfIdleGeneration?: number;
+        readonly onlyIfAttachedTo?: ThreadId;
       }): Effect.Effect<readonly [Option.Option<LiveSessionEntry>, DateTime.Utc]> =>
         Effect.gen(function* () {
           const key = sessionKey(input.providerSessionId);
@@ -929,6 +929,12 @@ export const layerWithOptions = (
                 input.onlyIfIdleGeneration !== undefined &&
                 (existing.busyTurns.size > 0 ||
                   existing.idleGeneration !== input.onlyIfIdleGeneration)
+              ) {
+                return ["kept", current] as const;
+              }
+              if (
+                input.onlyIfAttachedTo !== undefined &&
+                [...existing.attachedThreadIds].some((id) => id !== input.onlyIfAttachedTo)
               ) {
                 return ["kept", current] as const;
               }
@@ -990,6 +996,7 @@ export const layerWithOptions = (
         readonly detachedThreadId?: ThreadId;
         readonly cancelIdleFiber?: boolean;
         readonly onlyIfIdleGeneration?: number;
+        readonly onlyIfAttachedTo?: ThreadId;
         readonly gracefulSubscribers?: boolean;
       }) =>
         Effect.acquireUseRelease(
@@ -2085,15 +2092,8 @@ export const layerWithOptions = (
               }
               const key = sessionKey(input.providerSessionId);
               const live = (yield* Ref.get(sessions)).get(key);
-              // Editing a provider instance's settings rebuilds its adapter, and
-              // a session keeps the environment (API key, base URL) of the
-              // adapter that opened it. Replace a session from an older adapter
-              // so the next turn uses the current settings, unless a turn or
-              // background work is still running in it. A session shared with
-              // other threads is kept: one of them may have opened it and not
-              // started its turn yet, and closing it would fail that turn.
-              // Effects for one thread run one at a time, so the opener's own
-              // earlier open has already finished.
+              // A peer may hold the runtime between open and startTurn. Only
+              // the sole attached thread can replace it; its effects run serially.
               const outdated =
                 live !== undefined &&
                 live.busyTurns.size === 0 &&
@@ -2106,13 +2106,14 @@ export const layerWithOptions = (
                   Effect.catchCause(() => Effect.succeed(false)),
                 ));
               if (outdated) {
-                // A turn can still start while the checks above yield; the
-                // generation guard keeps the session then.
+                // Registry and background-work checks yield, so revalidate
+                // activity and attachments when removing the entry.
                 yield* releaseEntry({
                   providerSessionId: input.providerSessionId,
                   reason: "manual_shutdown",
                   detail: `Provider instance ${live.runtime.instanceId} settings changed.`,
                   onlyIfIdleGeneration: live.idleGeneration,
+                  onlyIfAttachedTo: input.threadId,
                 });
               }
               const existing = outdated ? (yield* Ref.get(sessions)).get(key) : live;

@@ -1251,7 +1251,18 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
-      const adapter = yield* Ref.make(yield* makeProviderAdapter(state));
+      const probeEntered = yield* Deferred.make<void>();
+      const probeGate = yield* Deferred.make<void>();
+      const attachArmed = yield* Ref.make(false);
+      const attachPaused = yield* Deferred.make<void>();
+      const adapter = yield* Ref.make(
+        yield* makeProviderAdapter(state, {
+          hasPendingBackgroundWork: Deferred.succeed(probeEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(probeGate)),
+            Effect.as(false),
+          ),
+        }),
+      );
       const layerRegistry = Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
         get: () => Ref.get(adapter),
       });
@@ -1275,10 +1286,28 @@ it.effect(
         const open = (threadId: ThreadId) =>
           manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
         const first = yield* open(firstThreadId);
-        assert.strictEqual(yield* open(secondThreadId), first);
-
-        // Either thread may hold this runtime between open and startTurn.
         yield* Ref.set(adapter, yield* makeProviderAdapter(state));
+        const reopen = yield* open(firstThreadId).pipe(Effect.forkScoped);
+        yield* Deferred.await(probeEntered);
+        yield* Ref.set(attachArmed, true);
+        // Attach before activity updates the idle generation.
+        const attaching = yield* first
+          .resumeThread({
+            threadId: secondThreadId,
+            providerThread: makeProviderThread({
+              idAllocator,
+              threadId: secondThreadId,
+              providerSessionId,
+              now,
+            }),
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(attachPaused);
+        yield* Deferred.succeed(probeGate, undefined);
+        assert.strictEqual(yield* Fiber.join(reopen), first);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        yield* Fiber.interrupt(attaching);
+
         assert.strictEqual(yield* open(secondThreadId), first);
         assert.strictEqual(yield* open(firstThreadId), first);
         assert.equal((yield* Ref.get(state)).closeCount, 0);
@@ -1286,7 +1315,14 @@ it.effect(
       });
 
       yield* effect.pipe(
-        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, layerRegistry })),
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            layerRegistry,
+            pauseAttachWrite: { armed: attachArmed, paused: attachPaused },
+          }),
+        ),
       );
     }).pipe(Effect.provide(McpProviderSessions.layer)),
 );
