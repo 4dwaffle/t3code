@@ -2350,14 +2350,41 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       yield* insert("pending:", 1, "pending", null);
       yield* insert("running:", 1, "running", null);
 
-      assert.equal(yield* outbox.pruneSettled, 1_203);
+      const oldRestoreCompletedAt = DateTime.formatIso(DateTime.subtractDuration(now, old));
+      for (const [id, request] of [
+        ["restore-idle", { type: "provider-thread.rollback", expectedIdle: true }],
+        [
+          "restore-fingerprint",
+          { type: "provider-thread.rollback", expectedWorkspaceFingerprint: "accepted" },
+        ],
+        ["restore-state", { type: "provider-thread.rollback", expectedThreadState: "accepted" }],
+        ["rollback-unguarded", { type: "provider-thread.rollback" }],
+      ] as const) {
+        yield* sql`INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          available_at, created_at, updated_at, completed_at
+        ) VALUES (
+          ${id}, 'command:prune-restore', 'thread:prune', 'provider-thread.rollback',
+          ${JSON.stringify(request)}, 'succeeded', ${oldRestoreCompletedAt}, ${oldRestoreCompletedAt},
+          ${oldRestoreCompletedAt}, ${oldRestoreCompletedAt}
+        )`;
+      }
+      assert.equal(yield* outbox.pruneSettled, 1_204);
 
       const remaining = yield* sql<{ readonly effect_id: string }>`
         SELECT effect_id FROM orchestration_v2_effect_outbox ORDER BY effect_id
       `;
       assert.deepEqual(
         remaining.map((row) => row.effect_id),
-        ["failed-old:1", "pending:1", "running:1", "succeeded-recent:1"],
+        [
+          "failed-old:1",
+          "pending:1",
+          "restore-fingerprint",
+          "restore-idle",
+          "restore-state",
+          "running:1",
+          "succeeded-recent:1",
+        ],
       );
       assert.equal(yield* outbox.pruneSettled, 0);
     }).pipe(Effect.provide(layerIsolatedOutbox)),
@@ -2968,6 +2995,45 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           yield* outbox.succeed({ effectId: reclaimed.value.id, workerId: "recovery-worker" });
         }
       }),
+  );
+
+  it.effect.each([true, false])(
+    "never replays an uncertain guarded restore, expectedIdle=%s",
+    (expectedIdle) =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const commandId = CommandId.make("command:guarded-restore-process-loss");
+        const effect = {
+          id: "effect:guarded-restore-process-loss",
+          commandId,
+          threadId: ThreadId.make("thread:guarded-restore-process-loss"),
+          request: {
+            type: "provider-thread.rollback" as const,
+            providerThreadId: ProviderThreadId.make("provider-thread:guarded-restore-process-loss"),
+            checkpointId: CheckpointId.make("checkpoint:guarded-restore-process-loss"),
+            scopeId: CheckpointScopeId.make("scope:guarded-restore-process-loss"),
+            ...(expectedIdle ? { expectedIdle: true as const } : {}),
+            expectedWorkspaceFingerprint: "before-destructive-restore",
+          },
+        };
+        yield* outbox.enqueue([effect]);
+        const claimed = yield* outbox.claimNext({
+          workerId: "lost-worker",
+          leaseDurationMs: 30_000,
+        });
+        assert.equal(Option.getOrThrow(claimed).id, effect.id);
+
+        yield* outbox.reconcileAfterProcessLoss;
+        yield* outbox.reconcileAfterProcessLoss;
+        const settled = Option.getOrThrow(yield* outbox.get(effect.id));
+        assert.equal(settled.status, "failed");
+        assert.include(settled.lastError ?? "", "uncertain");
+        assert.isTrue(
+          Option.isNone(
+            yield* outbox.claimNext({ workerId: "replacement-worker", leaseDurationMs: 30_000 }),
+          ),
+        );
+      }).pipe(Effect.provide(layerIsolatedOutbox)),
   );
 
   it.effect("atomically cancels stale runs and their process-bound effects", () =>

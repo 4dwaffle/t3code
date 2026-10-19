@@ -2912,6 +2912,9 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
+    expectedIdle: Schema.optional(Schema.Literal(true)),
+    expectedWorkspaceFingerprint: Schema.optional(Schema.String),
+    expectedThreadState: Schema.optional(Schema.String),
     restoreFiles: Schema.optional(Schema.Boolean),
     commandId: CommandId,
     threadId: ThreadId,

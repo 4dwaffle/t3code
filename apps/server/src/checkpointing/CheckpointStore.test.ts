@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -134,6 +135,117 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
       expect(yield* checkpointStore.isGitRepository(nested)).toBe(true);
     }),
   );
+  describe("restoreCheckpoint", () => {
+    it.effect("restores tracked, staged and untracked files only inside the workspace", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fs = yield* FileSystem.FileSystem;
+        const cwd = NodePath.join(tmp, "app");
+        yield* fs.makeDirectory(cwd);
+        const tracked = NodePath.join(cwd, "tracked.txt");
+        yield* writeTextFile(tracked, "committed\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "workspace"]);
+        const head = yield* git(tmp, ["rev-parse", "HEAD"]);
+        const store = yield* CheckpointStore.CheckpointStore;
+        const input = {
+          cwd,
+          checkpointRef: checkpointRefForThreadTurn(ThreadId.make("restore-subtree"), 0),
+        };
+        yield* writeTextFile(tracked, "checkpoint\n");
+        yield* writeTextFile(NodePath.join(cwd, "captured.txt"), "captured untracked\n");
+        yield* store.captureCheckpoint(input);
+
+        yield* writeTextFile(tracked, "staged\n");
+        yield* writeTextFile(NodePath.join(cwd, "staged-new.txt"), "staged addition\n");
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "sibling staged\n");
+        yield* git(tmp, ["add", "."]);
+        yield* writeTextFile(tracked, "unstaged\n");
+        yield* fs.remove(NodePath.join(cwd, "captured.txt"));
+        yield* writeTextFile(NodePath.join(cwd, "untracked.txt"), "discard\n");
+        yield* writeTextFile(NodePath.join(tmp, "outside.txt"), "keep\n");
+        const siblingIndex = yield* git(tmp, ["diff", "--cached", "--", "README.md"]);
+
+        expect(yield* store.restoreCheckpoint(input)).toBe(true);
+        expect(yield* fs.readFileString(tracked)).toBe("checkpoint\n");
+        expect(yield* fs.readFileString(NodePath.join(cwd, "captured.txt"))).toBe(
+          "captured untracked\n",
+        );
+        expect(yield* fs.exists(NodePath.join(cwd, "staged-new.txt"))).toBe(false);
+        expect(yield* fs.exists(NodePath.join(cwd, "untracked.txt"))).toBe(false);
+        expect(yield* git(tmp, ["diff", "--cached", "--", "app"])).toBe("");
+        expect(yield* fs.readFileString(NodePath.join(tmp, "outside.txt"))).toBe("keep\n");
+        expect(yield* fs.readFileString(NodePath.join(tmp, "README.md"))).toBe("sibling staged\n");
+        expect(yield* git(tmp, ["diff", "--cached", "--", "README.md"])).toBe(siblingIndex);
+        expect(yield* git(tmp, ["rev-parse", "HEAD"])).toBe(head);
+      }),
+    );
+
+    it.effect("leaves files and the index untouched when the checkpoint ref is missing", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fs = yield* FileSystem.FileSystem;
+        const store = yield* CheckpointStore.CheckpointStore;
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "staged\n");
+        yield* git(tmp, ["add", "README.md"]);
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "unstaged\n");
+        yield* writeTextFile(NodePath.join(tmp, "untracked.txt"), "keep\n");
+        const index = yield* fs.readFile(NodePath.join(tmp, ".git/index"));
+
+        expect(
+          yield* store.restoreCheckpoint({
+            cwd: tmp,
+            checkpointRef: checkpointRefForThreadTurn(ThreadId.make("missing-restore"), 0),
+            fallbackToHead: false,
+          }),
+        ).toBe(false);
+        expect(yield* fs.readFileString(NodePath.join(tmp, "README.md"))).toBe("unstaged\n");
+        expect(yield* fs.readFileString(NodePath.join(tmp, "untracked.txt"))).toBe("keep\n");
+        expect(yield* fs.readFile(NodePath.join(tmp, ".git/index"))).toEqual(index);
+      }),
+    );
+  });
+
+  it.effect("fingerprints all destructive restore inputs without changing the index", () =>
+    Effect.gen(function* () {
+      const tmp = yield* makeTmpDir();
+      yield* initRepoWithCommit(tmp);
+      const store = yield* CheckpointStore.CheckpointStore;
+      const fs = yield* FileSystem.FileSystem;
+      const readme = NodePath.join(tmp, "README.md");
+      const before = yield* store.readWorkspaceFingerprint(tmp);
+      yield* writeTextFile(readme, "staged\n");
+      yield* git(tmp, ["add", "README.md"]);
+      yield* writeTextFile(readme, "# test\n");
+      const index = yield* fs.readFile(NodePath.join(tmp, ".git/index"));
+      const stagedOnly = yield* store.readWorkspaceFingerprint(tmp);
+      expect(stagedOnly).not.toBe(before);
+      yield* writeTextFile(readme, "working tree\n");
+      const tracked = yield* store.readWorkspaceFingerprint(tmp);
+      expect(tracked).not.toBe(stagedOnly);
+      yield* writeTextFile(NodePath.join(tmp, "untracked.txt"), "untracked\n");
+      const untracked = yield* store.readWorkspaceFingerprint(tmp);
+      expect(untracked).not.toBe(tracked);
+      expect(yield* store.readWorkspaceFingerprint(tmp)).toBe(untracked);
+      yield* git(tmp, ["config", "core.autocrlf", "true"]);
+      yield* writeTextFile(readme, "same normalized contents\n");
+      const lf = yield* store.readWorkspaceFingerprint(tmp);
+      yield* writeTextFile(readme, "same normalized contents\r\n");
+      expect(yield* store.readWorkspaceFingerprint(tmp)).not.toBe(lf);
+      if ((yield* HostProcess.Platform) !== "win32") {
+        const link = NodePath.join(tmp, "raw-target-link");
+        yield* Effect.tryPromise(() => NodeFSP.symlink(Buffer.from([0xfe]), link));
+        const firstTarget = yield* store.readWorkspaceFingerprint(tmp);
+        yield* fs.remove(link);
+        yield* Effect.tryPromise(() => NodeFSP.symlink(Buffer.from([0xff]), link));
+        expect(yield* store.readWorkspaceFingerprint(tmp)).not.toBe(firstTarget);
+      }
+      expect(yield* fs.readFile(NodePath.join(tmp, ".git/index"))).toEqual(index);
+    }),
+  );
+
   describe("diffCheckpoints", () => {
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {

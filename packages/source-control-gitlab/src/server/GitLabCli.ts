@@ -134,6 +134,7 @@ export class GitLabCliCommandError extends Schema.TaggedError<GitLabCliCommandEr
     error: VcsError,
   ): GitLabCliError {
     return Match.valueTags(error, {
+      VcsCheckpointWorkspaceReadError: (cause) => new GitLabCliCommandError({ ...context, cause }),
       VcsProcessSpawnError: (cause) => new GitLabCliUnavailableError({ ...context, cause }),
       VcsProcessExitError: (cause) => {
         switch (cause.failureKind) {

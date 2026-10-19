@@ -34,6 +34,7 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
   {
     effectId: Schema.String,
     effectType: Schema.String,
+    failureCode: Schema.optional(EffectOutbox.OrchestrationEffectFailureCodeV2),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
@@ -408,13 +409,29 @@ export const layerExecutor: Layer.Layer<
                 providerThreadId: effect.request.providerThreadId,
                 checkpointId: effect.request.checkpointId,
                 scopeId: effect.request.scopeId,
+                ...(effect.request.expectedIdle === undefined
+                  ? {}
+                  : { expectedIdle: effect.request.expectedIdle }),
+                ...(effect.request.expectedWorkspaceFingerprint === undefined
+                  ? {}
+                  : { expectedWorkspaceFingerprint: effect.request.expectedWorkspaceFingerprint }),
+                ...(effect.request.expectedThreadState === undefined
+                  ? {}
+                  : { expectedThreadState: effect.request.expectedThreadState }),
                 ...(effect.request.restoreFiles === undefined
                   ? {}
                   : { restoreFiles: effect.request.restoreFiles }),
               })
               .pipe(
                 Effect.tapCause((cause) =>
-                  willRetry || Cause.hasInterruptsOnly(cause)
+                  (willRetry &&
+                    !cause.reasons.some(
+                      (reason) =>
+                        reason._tag === "Fail" &&
+                        (reason.error._tag === "CheckpointRollbackPartialError" ||
+                          reason.error.reason !== "unexpected-failure"),
+                    )) ||
+                  Cause.hasInterruptsOnly(cause)
                     ? Effect.void
                     : threads
                         .dispatch({
@@ -422,7 +439,13 @@ export const layerExecutor: Layer.Layer<
                           commandId: CommandId.make(`${effect.commandId}:rollback-failed`),
                           threadId: effect.threadId,
                           requestId: effect.commandId,
-                          message: CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
+                          message: cause.reasons.some(
+                            (reason) =>
+                              reason._tag === "Fail" &&
+                              reason.error._tag === "CheckpointRollbackPartialError",
+                          )
+                            ? CheckpointRollbackService.ROLLBACK_PARTIAL_MESSAGE
+                            : CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
                         })
                         .pipe(
                           Effect.catchCause((recordCause) =>
@@ -439,6 +462,13 @@ export const layerExecutor: Layer.Layer<
                       effectId: effect.id,
                       effectType: effect.request.type,
                       cause,
+                      ...(!EffectOutbox.isGuardedCheckpointRestore(effect.request)
+                        ? {}
+                        : cause._tag === "CheckpointRollbackPartialError"
+                          ? { failureCode: "checkpoint_restore_partial" as const }
+                          : cause.reason === "unexpected-failure"
+                            ? {}
+                            : { failureCode: "checkpoint_restore_rejected" as const }),
                     }),
                 ),
               );
@@ -632,6 +662,9 @@ export const layerWithOptions = (
             effectId: effect.id,
             workerId,
             error: `Worker failed to settle a process-bound effect after execution started: ${Cause.pretty(cause)}`,
+            ...(EffectOutbox.isGuardedCheckpointRestore(effect.request)
+              ? { failureCode: "checkpoint_restore_partial" as const }
+              : {}),
           })
           .pipe(
             Effect.flatMap((failed) =>
@@ -666,7 +699,7 @@ export const layerWithOptions = (
       ) =>
         EffectOutbox.REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS.some(
           (effectType) => effectType === effect.request.type,
-        )
+        ) && !EffectOutbox.isGuardedCheckpointRestore(effect.request)
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
@@ -744,6 +777,7 @@ export const layerWithOptions = (
             }).pipe(Effect.onError((cause) => recoverPostSuccessSettlement(effect, cause)));
           }
 
+          const failureCode = Option.getOrUndefined(Cause.findErrorOption(exit.cause))?.failureCode;
           const error = Cause.pretty(exit.cause);
           const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
@@ -757,9 +791,14 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : failureCode !== undefined || effect.attemptCount >= maxAttempts
               ? yield* outbox
-                  .fail({ effectId: effect.id, workerId, error })
+                  .fail({
+                    effectId: effect.id,
+                    workerId,
+                    error,
+                    ...(failureCode === undefined ? {} : { failureCode }),
+                  })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
               : yield* outbox
                   .retry({

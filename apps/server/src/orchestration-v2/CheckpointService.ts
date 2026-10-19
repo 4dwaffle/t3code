@@ -116,6 +116,12 @@ export type CheckpointServiceV2Error = typeof CheckpointServiceV2Error.Type;
 const isCheckpointRestoreError = Schema.is(CheckpointRestoreError);
 
 export interface CheckpointServiceV2Shape {
+  readonly withRestoreLock: <A, E, R>(
+    cwd: string,
+    use: (
+      operations: Pick<CheckpointServiceV2Shape, "restore" | "deleteStaleRefs">,
+    ) => Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>;
   readonly prepareRootRunScope: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -509,31 +515,28 @@ export const layer: Layer.Layer<
       );
 
     const restore: CheckpointServiceV2Shape["restore"] = (input) =>
-      withWorkspaceLock(
-        input.scope.cwd,
-        Effect.gen(function* () {
-          if (input.checkpoint.status !== "ready") {
-            return yield* new CheckpointRestoreError({
-              scopeId: input.scope.id,
-              checkpointId: input.checkpoint.id,
-              cause: `Checkpoint status is ${input.checkpoint.status}.`,
-            });
-          }
-
-          const restored = yield* checkpointStore.restoreCheckpoint({
-            cwd: input.scope.cwd,
-            checkpointRef: input.checkpoint.ref,
-            fallbackToHead: false,
+      Effect.gen(function* () {
+        if (input.checkpoint.status !== "ready") {
+          return yield* new CheckpointRestoreError({
+            scopeId: input.scope.id,
+            checkpointId: input.checkpoint.id,
+            cause: `Checkpoint status is ${input.checkpoint.status}.`,
           });
-          if (!restored) {
-            return yield* new CheckpointRestoreError({
-              scopeId: input.scope.id,
-              checkpointId: input.checkpoint.id,
-              cause: "Checkpoint ref is unavailable.",
-            });
-          }
-        }),
-      ).pipe(
+        }
+
+        const restored = yield* checkpointStore.restoreCheckpoint({
+          cwd: input.scope.cwd,
+          checkpointRef: input.checkpoint.ref,
+          fallbackToHead: false,
+        });
+        if (!restored) {
+          return yield* new CheckpointRestoreError({
+            scopeId: input.scope.id,
+            checkpointId: input.checkpoint.id,
+            cause: "Checkpoint ref is unavailable.",
+          });
+        }
+      }).pipe(
         Effect.mapError((cause) =>
           isCheckpointRestoreError(cause)
             ? cause
@@ -546,22 +549,21 @@ export const layer: Layer.Layer<
       );
 
     const deleteStaleRefs: CheckpointServiceV2Shape["deleteStaleRefs"] = (input) =>
-      withWorkspaceLock(
-        input.scope.cwd,
-        checkpointStore.deleteCheckpointRefs({
+      checkpointStore
+        .deleteCheckpointRefs({
           cwd: input.scope.cwd,
           checkpointRefs: input.checkpoints.map((checkpoint) => checkpoint.ref),
-        }),
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new CheckpointDeleteStaleRefsError({
-              scopeId: input.scope.id,
-              checkpointIds: input.checkpoints.map((checkpoint) => checkpoint.id),
-              cause,
-            }),
-        ),
-      );
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new CheckpointDeleteStaleRefsError({
+                scopeId: input.scope.id,
+                checkpointIds: input.checkpoints.map((checkpoint) => checkpoint.id),
+                cause,
+              }),
+          ),
+        );
 
     return CheckpointServiceV2.of({
       prepareRootRunScope: (input) =>
@@ -579,8 +581,9 @@ export const layer: Layer.Layer<
       captureBaseline,
       materializeBaselineCheckpoint,
       capture,
-      restore,
-      deleteStaleRefs,
+      withRestoreLock: (cwd, use) => withWorkspaceLock(cwd, use({ restore, deleteStaleRefs })),
+      restore: (input) => withWorkspaceLock(input.scope.cwd, restore(input)),
+      deleteStaleRefs: (input) => withWorkspaceLock(input.scope.cwd, deleteStaleRefs(input)),
     } satisfies CheckpointServiceV2Shape);
   }),
 );

@@ -109,6 +109,15 @@ export class VcsProcessSpawnError extends Schema.TaggedError<VcsProcessSpawnErro
   }
 }
 
+export class VcsCheckpointWorkspaceReadError extends Schema.TaggedError<VcsCheckpointWorkspaceReadError>()(
+  "VcsCheckpointWorkspaceReadError",
+  { operation: Schema.String, cwd: Schema.String, cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Unable to fingerprint the checkpoint workspace.";
+  }
+}
+
 export class VcsProcessExitError extends Schema.TaggedError<VcsProcessExitError>()(
   "VcsProcessExitError",
   {
@@ -273,6 +282,7 @@ export class VcsUnsupportedOperationError extends Schema.TaggedError<VcsUnsuppor
 }
 
 export const VcsError = Schema.Union([
+  VcsCheckpointWorkspaceReadError,
   VcsProcessSpawnError,
   VcsProcessExitError,
   VcsProcessTimeoutError,

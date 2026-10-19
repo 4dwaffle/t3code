@@ -83,6 +83,9 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("provider-thread.rollback"),
+    expectedIdle: Schema.optional(Schema.Literal(true)),
+    expectedWorkspaceFingerprint: Schema.optional(Schema.String),
+    expectedThreadState: Schema.optional(Schema.String),
     restoreFiles: Schema.optional(Schema.Boolean),
     providerThreadId: ProviderThreadId,
     checkpointId: CheckpointId,
@@ -151,9 +154,21 @@ export type OrchestrationEffectStatusV2 = typeof OrchestrationEffectStatusV2.Typ
  * are re-enqueued only around one server restart, so a week is far longer than
  * either and leaves recent history for debugging. Failed rows are kept: storage
  * cleanup keeps a deleted thread's worktree while any of its effects failed.
+ * Guarded restore outcomes also stay: their request keys promise durable results.
  */
 export const SETTLED_EFFECT_RETENTION = Duration.days(7);
 const PRUNE_BATCH_SIZE = 500;
+
+export const OrchestrationEffectFailureCodeV2 = Schema.Literals([
+  "checkpoint_restore_rejected",
+  "checkpoint_restore_partial",
+]);
+export type OrchestrationEffectFailureCodeV2 = typeof OrchestrationEffectFailureCodeV2.Type;
+export const isGuardedCheckpointRestore = (request: OrchestrationEffectRequestV2) =>
+  request.type === "provider-thread.rollback" &&
+  (request.expectedIdle === true ||
+    request.expectedWorkspaceFingerprint !== undefined ||
+    request.expectedThreadState !== undefined);
 
 export interface OrchestrationEffectV2 {
   readonly id: string;
@@ -169,6 +184,7 @@ export interface OrchestrationEffectV2 {
   readonly updatedAt: string;
   readonly completedAt: string | null;
   readonly lastError: string | null;
+  readonly failureCode?: OrchestrationEffectFailureCodeV2;
 }
 
 export interface PendingOrchestrationEffectV2 {
@@ -238,6 +254,7 @@ export interface EffectOutboxV2Shape {
     readonly delayMs: number;
   }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly fail: (input: {
+    readonly failureCode?: OrchestrationEffectFailureCodeV2;
     readonly effectId: string;
     readonly workerId: string;
     readonly error: string;
@@ -271,6 +288,23 @@ const decodeRequest = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationEffectRequestV2),
 );
 
+const StoredEffectFailure = Schema.fromJsonString(
+  Schema.Struct({ code: OrchestrationEffectFailureCodeV2, message: Schema.String }),
+);
+const encodeStoredFailure = Schema.encodeSync(StoredEffectFailure);
+const decodeStoredFailure = Schema.decodeUnknownOption(StoredEffectFailure);
+const FAILURE_PREFIX = "t3-effect-failure:";
+const storedFailure = (message: string, code?: OrchestrationEffectFailureCodeV2) =>
+  code === undefined ? message : FAILURE_PREFIX + encodeStoredFailure({ code, message });
+const readFailure = (value: string | null) => {
+  const decoded = value?.startsWith(FAILURE_PREFIX)
+    ? decodeStoredFailure(value.slice(FAILURE_PREFIX.length))
+    : Option.none();
+  return Option.isSome(decoded)
+    ? { lastError: decoded.value.message, failureCode: decoded.value.code }
+    : { lastError: value };
+};
+
 const rowToEffect = (row: EffectRow) =>
   decodeRequest(row.payload_json).pipe(
     Effect.map((request): OrchestrationEffectV2 => ({
@@ -286,7 +320,7 @@ const rowToEffect = (row: EffectRow) =>
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at,
-      lastError: row.last_error,
+      ...readFailure(row.last_error),
     })),
   );
 
@@ -493,6 +527,19 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         }),
       reconcileAfterProcessLoss: Effect.gen(function* () {
         const now = DateTime.formatIso(yield* DateTime.now);
+        const uncertain = storedFailure(
+          "Restore outcome is uncertain because the server process ended during execution. Inspect files and conversation before retrying.",
+          "checkpoint_restore_partial",
+        );
+        const uncertainRows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox
+          SET status = 'failed', lease_owner = NULL, lease_expires_at = NULL,
+            completed_at = ${now}, updated_at = ${now}, last_error = ${uncertain}
+          WHERE status = 'running' AND effect_type = 'provider-thread.rollback'
+            AND (json_extract(payload_json, '$.expectedIdle') = 1 OR json_extract(payload_json, '$.expectedWorkspaceFingerprint') IS NOT NULL OR json_extract(payload_json, '$.expectedThreadState') IS NOT NULL)
+          RETURNING effect_id
+        `;
+        yield* signalSettled(uncertainRows.map((row) => row.effect_id));
         const cancelledRows = yield* sql<{ readonly effect_id: string }>`
           UPDATE orchestration_v2_effect_outbox
           SET
@@ -643,7 +690,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             (cause) => new EffectOutboxError({ operation: "retry", effectId, cause }),
           ),
         ),
-      fail: ({ effectId, workerId, error }) =>
+      fail: ({ effectId, workerId, error, failureCode }) =>
         Effect.gen(function* () {
           const now = DateTime.formatIso(yield* DateTime.now);
           const rows = yield* sql<{ readonly effect_id: string }>`
@@ -654,7 +701,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               lease_expires_at = NULL,
               completed_at = ${now},
               updated_at = ${now},
-              last_error = ${error}
+              last_error = ${storedFailure(error, failureCode)}
             WHERE effect_id = ${effectId}
               AND status = 'running'
               AND lease_owner = ${workerId}
@@ -682,6 +729,10 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             FROM orchestration_v2_effect_outbox
             WHERE status IN ('succeeded', 'cancelled')
               AND completed_at < ${cutoff}
+              AND NOT (
+                effect_type = 'provider-thread.rollback'
+                AND (COALESCE(json_extract(payload_json, '$.expectedIdle'), 0) = 1 OR json_extract(payload_json, '$.expectedWorkspaceFingerprint') IS NOT NULL OR json_extract(payload_json, '$.expectedThreadState') IS NOT NULL)
+              )
             LIMIT ${PRUNE_BATCH_SIZE}
           )
           RETURNING effect_id

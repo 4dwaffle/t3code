@@ -1,4 +1,13 @@
-import type { OrchestrationV2AppThread, OrchestrationV2CheckpointScope } from "@t3tools/contracts";
+import { CheckpointId, CheckpointScopeId, ThreadId } from "@t3tools/contracts";
+// Synchronous hashing keeps the command decision pure; only the bounded digest is persisted.
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+import * as Schema from "effect/Schema";
+import type {
+  OrchestrationV2AppThread,
+  OrchestrationV2CheckpointScope,
+  OrchestrationV2ThreadProjection,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -95,4 +104,55 @@ export const isCheckpointRestoreIsolated = Effect.fn("orchestrationV2.isCheckpoi
     }
     return !shared;
   },
+);
+
+const encodeRestoreState = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+// Excludes rollback request metadata, which admission itself updates.
+export const checkpointRestoreThreadState = (
+  projection: Pick<
+    OrchestrationV2ThreadProjection,
+    | "thread"
+    | "runs"
+    | "attempts"
+    | "providerTurns"
+    | "providerThreads"
+    | "checkpointScopes"
+    | "checkpoints"
+  >,
+) =>
+  NodeCrypto.createHash("sha256")
+    .update(
+      encodeRestoreState([
+        projection.thread.archivedAt,
+        projection.thread.deletedAt,
+        projection.thread.worktreePath,
+        projection.thread.modelSelection,
+        projection.thread.activeProviderThreadId,
+        projection.runs,
+        projection.attempts,
+        projection.providerTurns,
+        projection.providerThreads,
+        projection.checkpointScopes,
+        projection.checkpoints,
+      ]),
+    )
+    .digest("hex");
+
+export const checkpointRestoreThreadIdle = (
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+) =>
+  projection.thread.archivedAt == null &&
+  projection.thread.deletedAt == null &&
+  !projection.runs.some((run) =>
+    ["preparing", "queued", "starting", "running", "waiting"].includes(run.status),
+  );
+
+export const CheckpointRestoreRejectedRequest = Schema.fromJsonString(
+  Schema.Struct({
+    type: Schema.Literal("checkpoint_restore_rejected"),
+    threadId: ThreadId,
+    scopeId: CheckpointScopeId,
+    checkpointId: CheckpointId,
+  }),
 );

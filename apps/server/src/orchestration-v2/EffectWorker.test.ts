@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  CheckpointId,
+  CheckpointScopeId,
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
@@ -437,62 +439,75 @@ it.effect("terminalizes a process-bound claim when success settlement fails", ()
   }),
 );
 
-it.effect("requeues a replay-safe claim when success settlement fails", () =>
-  Effect.gen(function* () {
-    const now = DateTime.formatIso(yield* DateTime.now);
-    const effectId = "effect:worker-replay-safe-settlement-failure";
-    const workerId = "worker-replay-safe-settlement-failure";
-    const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
-      id: effectId,
-      commandId: CommandId.make("command:worker-replay-safe-settlement-failure"),
-      threadId: ThreadId.make("thread:worker-replay-safe-settlement-failure"),
-      request: { type: "terminal.cleanup" },
-      status: "running",
-      attemptCount: 1,
-      availableAt: now,
-      leaseOwner: workerId,
-      leaseExpiresAt: now,
-      createdAt: now,
-      updatedAt: now,
-      completedAt: null,
-      lastError: null,
-    };
-    const retries = yield* Ref.make(0);
-    const terminalizations = yield* Ref.make(0);
-    const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
-      claimNext: () => Effect.succeed(Option.some(claimedEffect)),
-      get: () => Effect.succeed(Option.some(claimedEffect)),
-      awaitCancellation: () => Effect.never,
-      clearCancellation: () => Effect.void,
-      succeed: () =>
-        Effect.fail(
-          new EffectOutbox.EffectOutboxError({
-            operation: "succeed",
-            effectId,
-            cause: "simulated replay-safe settlement failure",
-          }),
-        ),
-      retry: () => Ref.update(retries, (count) => count + 1).pipe(Effect.as(true)),
-      fail: () => Ref.update(terminalizations, (count) => count + 1).pipe(Effect.as(true)),
-    });
-    const layerExecutor = Layer.succeed(
-      EffectWorker.OrchestrationEffectExecutorV2,
-      EffectWorker.OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
-    );
-    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
-      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
-    );
+it.effect.each([false, true])(
+  "handles success settlement failure with guardedRestore=%s",
+  (guardedRestore) =>
+    Effect.gen(function* () {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const effectId = "effect:worker-replay-safe-settlement-failure";
+      const workerId = "worker-replay-safe-settlement-failure";
+      const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+        id: effectId,
+        commandId: CommandId.make("command:worker-replay-safe-settlement-failure"),
+        threadId: ThreadId.make("thread:worker-replay-safe-settlement-failure"),
+        request: guardedRestore
+          ? {
+              type: "provider-thread.rollback",
+              providerThreadId,
+              checkpointId: CheckpointId.make("checkpoint:settlement"),
+              scopeId: CheckpointScopeId.make("scope:settlement"),
+              expectedWorkspaceFingerprint: "accepted",
+            }
+          : { type: "terminal.cleanup" },
+        status: "running",
+        attemptCount: 1,
+        availableAt: now,
+        leaseOwner: workerId,
+        leaseExpiresAt: now,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+        lastError: null,
+      };
+      const retries = yield* Ref.make(0);
+      const terminalizations = yield* Ref.make(0);
+      const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Effect.succeed(Option.some(claimedEffect)),
+        get: () => Effect.succeed(Option.some(claimedEffect)),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        succeed: () =>
+          Effect.fail(
+            new EffectOutbox.EffectOutboxError({
+              operation: "succeed",
+              effectId,
+              cause: "simulated replay-safe settlement failure",
+            }),
+          ),
+        retry: () => Ref.update(retries, (count) => count + 1).pipe(Effect.as(true)),
+        fail: (input) => {
+          assert.equal(input.failureCode, "checkpoint_restore_partial");
+          return Ref.update(terminalizations, (count) => count + 1).pipe(Effect.as(true));
+        },
+      });
+      const layerExecutor = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
+      );
+      const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
+        Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+      );
 
-    const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
-      Effect.provide(layerWorker),
-      Effect.exit,
-    );
+      const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((worker) => worker.runOnce),
+        Effect.provide(layerWorker),
+        Effect.exit,
+      );
 
-    assert.isTrue(Exit.isFailure(exit));
-    assert.equal(yield* Ref.get(retries), 1);
-    assert.equal(yield* Ref.get(terminalizations), 0);
-  }),
+      assert.isTrue(Exit.isFailure(exit));
+      assert.equal(yield* Ref.get(retries), guardedRestore ? 0 : 1);
+      assert.equal(yield* Ref.get(terminalizations), guardedRestore ? 1 : 0);
+    }),
 );
 
 it.effect("keeps a process-bound executor failure retryable when retry settlement fails", () =>

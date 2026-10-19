@@ -1,3 +1,4 @@
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -106,6 +107,7 @@ it.effect.each([
     const layerTest = CheckpointRollbackService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(CheckpointStore.CheckpointStore)({}),
           NodeServices.layer,
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
           ServerSettings.layerTest(),
@@ -192,7 +194,7 @@ it.effect.each([
       const error = yield* service
         .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles })
         .pipe(Effect.flip);
-      assert.equal(error.reason, "shared-workspace");
+      assert.equal("reason" in error ? error.reason : undefined, "shared-workspace");
       assert.deepEqual(calls, []);
       assert.equal(yield* fs.readFileString(otherFile), "other thread's uncommitted work");
     } else {

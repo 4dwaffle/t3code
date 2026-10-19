@@ -1,3 +1,8 @@
+// FileSystem.stat follows symlinks; raw checkpoint fingerprints need lstat and streaming hashes.
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import * as Stream from "effect/Stream";
 import * as NodeBuffer from "node:buffer";
 
 import * as Context from "effect/Context";
@@ -13,6 +18,8 @@ import { ChildProcessSpawner } from "effect/process";
 import {
   GitCommandError,
   VcsProcessExitError,
+  VcsCheckpointWorkspaceReadError,
+  VcsUnsupportedOperationError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
   type VcsCreateRefInput,
@@ -793,6 +800,89 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   ] as const;
 
   const checkpoints: VcsDriver.VcsCheckpointOps = {
+    readWorkspaceFingerprint: Effect.fn("GitVcsDriver.checkpoints.readWorkspaceFingerprint")(
+      function* (cwd) {
+        const operation = "GitVcsDriver.checkpoints.readWorkspaceFingerprint";
+        const head = yield* resolveHeadCommit(cwd);
+        const staged = yield* execute({
+          operation,
+          cwd,
+          args: ["ls-files", "--stage", "-z", "--", "."],
+          outputMode: "error",
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        const paths = yield* execute({
+          operation,
+          cwd,
+          args: ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
+          outputMode: "error",
+          maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
+        });
+        if (
+          staged.stdoutTruncated ||
+          paths.stdoutTruncated ||
+          staged.stdoutInvalidUtf8 ||
+          paths.stdoutInvalidUtf8
+        )
+          return yield* new VcsProcessExitError({
+            operation,
+            command: "git ls-files",
+            cwd,
+            exitCode: 0,
+            detail: "Workspace fingerprint output is incomplete.",
+          });
+        // Hash raw bytes: Git clean filters can map distinct edits to the same tree.
+        const hash = NodeCrypto.createHash("sha256")
+          .update(head ?? "")
+          .update("\0")
+          .update(staged.stdout);
+        yield* Effect.gen(function* () {
+          for (const file of [...new Set(paths.stdout.split("\0").filter(Boolean))].sort()) {
+            const absolute = path.resolve(cwd, file);
+            hash.update("\0path\0").update(file).update("\0");
+            const stat = yield* Effect.tryPromise(() => NodeFSP.lstat(absolute)).pipe(
+              Effect.catchIf(
+                (error) =>
+                  error.cause instanceof Error &&
+                  "code" in error.cause &&
+                  error.cause.code === "ENOENT",
+                () => Effect.succeed(null),
+              ),
+            );
+            if (stat === null) {
+              hash.update("missing");
+              continue;
+            }
+            hash.update(String(stat.mode)).update("\0");
+            if (stat.isSymbolicLink())
+              hash.update(
+                yield* Effect.tryPromise(() => NodeFSP.readlink(absolute, { encoding: "buffer" })),
+              );
+            else if (stat.isFile()) {
+              const content = NodeCrypto.createHash("sha256");
+              yield* fileSystem.stream(absolute).pipe(
+                Stream.runForEach((chunk) =>
+                  Effect.sync(() => {
+                    content.update(chunk);
+                  }),
+                ),
+              );
+              hash.update(content.digest());
+            } else if (!stat.isDirectory())
+              return yield* new VcsUnsupportedOperationError({
+                operation,
+                kind: "git",
+                detail: "Unsupported workspace file type.",
+              });
+          }
+        }).pipe(
+          Effect.mapError(
+            (cause) => new VcsCheckpointWorkspaceReadError({ operation, cwd, cause }),
+          ),
+        );
+        return hash.digest("hex");
+      },
+    ),
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
       const operation = VcsProcess.CHECKPOINT_CAPTURE_OPERATION;
       // core.splitIndex governs every index Git writes, so an unguarded write to the

@@ -1,11 +1,13 @@
 import {
   CheckpointId,
+  checkpointRollbackAppRunOrdinal,
   CheckpointScopeId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   ProviderThreadId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -22,6 +24,8 @@ import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   isCheckpointRestoreIsolated,
+  checkpointRestoreThreadState,
+  checkpointRestoreThreadIdle,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
@@ -46,6 +50,9 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
       "provider-turn-unavailable",
       "unexpected-failure",
       "shared-workspace",
+      "thread-not-idle",
+      "provider-rollback-unsupported",
+      "restore-precondition-changed",
     ]),
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
@@ -61,6 +68,12 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
         return `Active provider changed before rollback target ${this.checkpointId} could execute on thread ${this.threadId}.`;
       case "provider-turn-unavailable":
         return `Provider turn for rollback target ${this.checkpointId} is unavailable on provider thread ${this.providerThreadId}.`;
+      case "provider-rollback-unsupported":
+        return "The current provider does not support restoring this conversation.";
+      case "thread-not-idle":
+        return "Checkpoint restore requires an idle, unarchived thread with no queued work.";
+      case "restore-precondition-changed":
+        return "Checkpoint restore was rejected because the workspace or thread changed.";
       case "shared-workspace":
         return SHARED_WORKSPACE_RESTORE_MESSAGE;
       case "unexpected-failure":
@@ -69,7 +82,24 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
   }
 }
 
-const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
+export const ROLLBACK_PARTIAL_MESSAGE =
+  "Checkpoint restore has an uncertain or partial outcome. Inspect the files and conversation before taking further action.";
+
+export class CheckpointRollbackPartialError extends Schema.TaggedError<CheckpointRollbackPartialError>()(
+  "CheckpointRollbackPartialError",
+  {
+    threadId: ThreadId,
+    checkpointId: CheckpointId,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return ROLLBACK_PARTIAL_MESSAGE;
+  }
+}
+const isCheckpointRollbackError = Schema.is(
+  Schema.Union([CheckpointRollbackExecutionError, CheckpointRollbackPartialError]),
+);
 
 export interface CheckpointRollbackServiceV2Shape {
   readonly execute: (input: {
@@ -78,7 +108,10 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly checkpointId: CheckpointId;
     readonly scopeId: CheckpointScopeId;
     readonly restoreFiles?: boolean;
-  }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
+    readonly expectedIdle?: true;
+    readonly expectedWorkspaceFingerprint?: string;
+    readonly expectedThreadState?: string;
+  }) => Effect.Effect<void, CheckpointRollbackExecutionError | CheckpointRollbackPartialError>;
 }
 
 export class CheckpointRollbackServiceV2 extends Context.Service<
@@ -90,6 +123,7 @@ export const layer: Layer.Layer<
   CheckpointRollbackServiceV2,
   never,
   | CheckpointServiceV2
+  | CheckpointStore.CheckpointStore
   | GitWorkflowService.GitWorkflowService
   | EventSinkV2
   | IdAllocator.IdAllocatorV2
@@ -106,6 +140,7 @@ export const layer: Layer.Layer<
   CheckpointRollbackServiceV2,
   Effect.gen(function* () {
     const checkpoints = yield* CheckpointServiceV2;
+    const checkpointStore = yield* CheckpointStore.CheckpointStore;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const eventSink = yield* EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
@@ -124,7 +159,21 @@ export const layer: Layer.Layer<
       readonly checkpointId: CheckpointId;
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
+      readonly expectedIdle?: true;
+      readonly expectedWorkspaceFingerprint?: string;
+      readonly expectedThreadState?: string;
     }) {
+      const guarded =
+        input.expectedIdle === true ||
+        input.expectedWorkspaceFingerprint !== undefined ||
+        input.expectedThreadState !== undefined;
+      const reject = (reason: CheckpointRollbackExecutionError["reason"]) =>
+        new CheckpointRollbackExecutionError({
+          reason,
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+        });
       const projection = yield* projections.getThreadRecords(input.threadId, [
         "providerThreads",
         "providerSessions",
@@ -169,7 +218,24 @@ export const layer: Layer.Layer<
         });
       }
 
-      const targetOrdinal = checkpoint.appRunOrdinal ?? 0;
+      if (guarded && !checkpointRestoreThreadIdle(projection))
+        return yield* reject("thread-not-idle");
+      if (
+        input.expectedThreadState !== undefined &&
+        input.expectedThreadState !== checkpointRestoreThreadState(projection)
+      )
+        return yield* reject("restore-precondition-changed");
+      if (
+        guarded &&
+        scope.providerThreadId !== null &&
+        scope.providerThreadId !== undefined &&
+        scope.providerThreadId !== providerThread.id
+      )
+        return yield* reject("active-provider-changed");
+      const targetOrdinal = guarded
+        ? checkpointRollbackAppRunOrdinal(checkpoint, scope)
+        : (checkpoint.appRunOrdinal ?? 0);
+      if (targetOrdinal === null) return yield* reject("rollback-target-invalid");
       const rollbackTarget: ProviderAdapter.ProviderAdapterV2RollbackTarget =
         targetOrdinal === 0
           ? {
@@ -237,149 +303,211 @@ export const layer: Layer.Layer<
         });
       }
 
-      const modelSelection = projection.thread.modelSelection;
-      const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
-        thread: projection.thread,
-        modelSelection,
-      });
-      const existingSession = projection.providerSessions.find(
-        (candidate) => candidate.id === providerThread.providerSessionId,
-      );
-      const session = yield* sessions.open({
-        threadId: input.threadId,
-        providerSessionId: providerThread.providerSessionId,
-        modelSelection,
-        runtimePolicy: resolvedRuntimePolicy,
-        ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),
-        ...(providerThread.nativeThreadRef?.nativeId == null
-          ? {}
-          : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-        ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-          ? {}
-          : {
-              initialProviderItemIdentityVersion: providerThread.nativeMetadata.itemIdentityVersion,
-            }),
-      });
-
-      const runsToRollback = projection.runs.filter(
-        (run) =>
-          run.ordinal > targetOrdinal &&
-          (run.status === "completed" ||
-            run.status === "interrupted" ||
-            run.status === "failed" ||
-            run.status === "cancelled"),
-      );
-      // Rolled-back turns stay in the audit history, but no longer exist in
-      // the provider conversation and must not be counted by a later rewind.
-      const rolledBackRunIds = new Set(
-        projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
-      );
-      const rolledBackAttemptIds = new Set(
-        projection.attempts
-          .filter((attempt) => rolledBackRunIds.has(attempt.runId))
-          .map((attempt) => attempt.id),
-      );
-      const providerThreadTurns = projection.providerTurns.filter(
-        (turn) =>
-          turn.providerThreadId === providerThread.id &&
-          (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
-      );
-
-      const snapshot =
-        runsToRollback.length === 0
-          ? { providerThread }
-          : yield* session.rollbackThread({
-              providerThread,
-              target: rollbackTarget,
-              providerThreadTurns,
-            });
-      if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
-      const staleCheckpoints = projection.checkpoints.filter(
-        (candidate) =>
-          candidate.scopeId === scope.id &&
-          candidate.appRunOrdinal !== null &&
-          candidate.appRunOrdinal > targetOrdinal &&
-          candidate.status === "ready",
-      );
-      if (staleCheckpoints.length > 0) {
-        yield* checkpoints.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
-      }
-
-      // Thread commands write full provider thread rows under this lock. Without
-      // it, a message sent during the rollback can plan against the old native
-      // session and commit after this, undoing the provider's fork.
-      yield* threadCommands.withLock(
-        input.threadId,
+      const providerSessionId = providerThread.providerSessionId;
+      let mutationStarted = false;
+      const run = (
+        operations: Pick<CheckpointServiceV2["Service"], "restore" | "deleteStaleRefs">,
+      ) =>
         Effect.gen(function* () {
-          const now = yield* DateTime.now;
-          const makeEvent = <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
-            Effect.map(
-              ids.allocate.event({ threadId: event.threadId }),
-              (id) =>
-                ({
-                  ...event,
-                  id,
-                }) as Event,
-            );
-          const events: Array<OrchestrationV2DomainEvent> = [];
-          events.push(
-            yield* makeEvent({
-              type: "provider-thread.updated",
-              threadId: input.threadId,
-              driver: providerThread.driver,
-              providerInstanceId: providerThread.providerInstanceId,
-              occurredAt: now,
-              payload: {
-                ...snapshot.providerThread,
-                lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
-                updatedAt: now,
-              },
-            }),
-          );
-          for (const staleCheckpoint of staleCheckpoints) {
-            events.push(
-              yield* makeEvent({
-                type: "checkpoint.captured",
-                threadId: input.threadId,
-                ...(staleCheckpoint.runId === null ? {} : { runId: staleCheckpoint.runId }),
-                nodeId: staleCheckpoint.nodeId,
-                providerInstanceId: providerThread.providerInstanceId,
-                occurredAt: now,
-                payload: { ...staleCheckpoint, status: "stale" },
-              }),
-            );
+          if (guarded) {
+            if (
+              !(yield* checkpointStore.hasCheckpointRef({
+                cwd: scope.cwd,
+                checkpointRef: checkpoint.ref,
+              }))
+            )
+              return yield* reject("rollback-target-invalid");
+            if (
+              input.expectedWorkspaceFingerprint !== undefined &&
+              (yield* checkpointStore.readWorkspaceFingerprint(scope.cwd)) !==
+                input.expectedWorkspaceFingerprint
+            )
+              return yield* reject("restore-precondition-changed");
           }
-          for (const run of runsToRollback) {
-            const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
-            events.push(
-              yield* makeEvent({
-                type: "run.updated",
-                threadId: input.threadId,
-                runId: run.id,
-                ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
-                providerInstanceId: run.providerInstanceId,
-                occurredAt: now,
-                payload: { ...run, status: "rolled_back", completedAt: now },
-              }),
-            );
-            if (rootNode !== undefined) {
+          const modelSelection = projection.thread.modelSelection;
+          const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
+            thread: projection.thread,
+            modelSelection,
+          });
+          const existingSession = projection.providerSessions.find(
+            (candidate) => candidate.id === providerSessionId,
+          );
+          const session = yield* sessions.open({
+            threadId: input.threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy: resolvedRuntimePolicy,
+            ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),
+            ...(providerThread.nativeThreadRef?.nativeId == null
+              ? {}
+              : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+            ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+              ? {}
+              : {
+                  initialProviderItemIdentityVersion:
+                    providerThread.nativeMetadata.itemIdentityVersion,
+                }),
+          });
+
+          if (
+            guarded &&
+            (!session.providerSession.capabilities.threads.canRollbackThread ||
+              !session.providerSession.capabilities.checkpointing.providerCanRollbackConversation ||
+              !session.providerSession.capabilities.checkpointing.providerRollbackReturnsSnapshot)
+          )
+            return yield* reject("provider-rollback-unsupported");
+
+          const runsToRollback = projection.runs.filter(
+            (run) =>
+              run.ordinal > targetOrdinal &&
+              (run.status === "completed" ||
+                run.status === "interrupted" ||
+                run.status === "failed" ||
+                run.status === "cancelled"),
+          );
+          // Rolled-back turns stay in the audit history, but no longer exist in
+          // the provider conversation and must not be counted by a later rewind.
+          const rolledBackRunIds = new Set(
+            projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
+          );
+          const rolledBackAttemptIds = new Set(
+            projection.attempts
+              .filter((attempt) => rolledBackRunIds.has(attempt.runId))
+              .map((attempt) => attempt.id),
+          );
+          const providerThreadTurns = projection.providerTurns.filter(
+            (turn) =>
+              turn.providerThreadId === providerThread.id &&
+              (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
+          );
+
+          mutationStarted = runsToRollback.length > 0 || input.restoreFiles !== false;
+          const snapshot =
+            runsToRollback.length === 0
+              ? { providerThread }
+              : yield* session.rollbackThread({
+                  providerThread,
+                  target: rollbackTarget,
+                  providerThreadTurns,
+                });
+          if (input.restoreFiles !== false) yield* operations.restore({ scope, checkpoint });
+          const staleCheckpoints = projection.checkpoints.filter(
+            (candidate) =>
+              candidate.scopeId === scope.id &&
+              candidate.appRunOrdinal !== null &&
+              candidate.appRunOrdinal > targetOrdinal &&
+              candidate.status === "ready",
+          );
+          if (staleCheckpoints.length > 0) {
+            yield* operations.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
+          }
+
+          // Thread commands write full provider thread rows under this lock. Without
+          // it, a message sent during the rollback can plan against the old native
+          // session and commit after this, undoing the provider's fork.
+          yield* (
+            guarded
+              ? (effect: Effect.Effect<void, unknown>) => effect
+              : (effect: Effect.Effect<void, unknown>) =>
+                  threadCommands.withLock(input.threadId, effect)
+          )(
+            Effect.gen(function* () {
+              const now = yield* DateTime.now;
+              const makeEvent = <Event extends OrchestrationV2DomainEvent>(
+                event: Omit<Event, "id">,
+              ) =>
+                Effect.map(
+                  ids.allocate.event({ threadId: event.threadId }),
+                  (id) =>
+                    ({
+                      ...event,
+                      id,
+                    }) as Event,
+                );
+              const events: Array<OrchestrationV2DomainEvent> = [];
               events.push(
                 yield* makeEvent({
-                  type: "node.updated",
+                  type: "provider-thread.updated",
                   threadId: input.threadId,
-                  runId: run.id,
-                  nodeId: rootNode.id,
-                  providerInstanceId: run.providerInstanceId,
+                  driver: providerThread.driver,
+                  providerInstanceId: providerThread.providerInstanceId,
                   occurredAt: now,
-                  payload: { ...rootNode, status: "rolled_back", completedAt: now },
+                  payload: {
+                    ...snapshot.providerThread,
+                    lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
+                    updatedAt: now,
+                  },
                 }),
               );
-            }
-          }
-          yield* eventSink.write({ events });
-        }),
-      );
+              for (const staleCheckpoint of staleCheckpoints) {
+                events.push(
+                  yield* makeEvent({
+                    type: "checkpoint.captured",
+                    threadId: input.threadId,
+                    ...(staleCheckpoint.runId === null ? {} : { runId: staleCheckpoint.runId }),
+                    nodeId: staleCheckpoint.nodeId,
+                    providerInstanceId: providerThread.providerInstanceId,
+                    occurredAt: now,
+                    payload: { ...staleCheckpoint, status: "stale" },
+                  }),
+                );
+              }
+              for (const run of runsToRollback) {
+                const rootNode = projection.nodes.find(
+                  (candidate) => candidate.id === run.rootNodeId,
+                );
+                events.push(
+                  yield* makeEvent({
+                    type: "run.updated",
+                    threadId: input.threadId,
+                    runId: run.id,
+                    ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
+                    providerInstanceId: run.providerInstanceId,
+                    occurredAt: now,
+                    payload: { ...run, status: "rolled_back", completedAt: now },
+                  }),
+                );
+                if (rootNode !== undefined) {
+                  events.push(
+                    yield* makeEvent({
+                      type: "node.updated",
+                      threadId: input.threadId,
+                      runId: run.id,
+                      nodeId: rootNode.id,
+                      providerInstanceId: run.providerInstanceId,
+                      occurredAt: now,
+                      payload: { ...rootNode, status: "rolled_back", completedAt: now },
+                    }),
+                  );
+                }
+              }
+              yield* eventSink.write({ events });
+            }),
+          );
+        }).pipe(
+          Effect.catchCause((cause) => {
+            if (mutationStarted)
+              return Effect.fail(
+                new CheckpointRollbackPartialError({
+                  threadId: input.threadId,
+                  checkpointId: input.checkpointId,
+                  cause: cause.reasons.find((reason) => reason._tag === "Fail")?.error ?? cause,
+                }),
+              );
+            return Effect.failCause(cause);
+          }),
+        );
+      yield* guarded ? checkpoints.withRestoreLock(scope.cwd, run) : run(checkpoints);
     });
+
+    const guardedExecute = (
+      input: Parameters<CheckpointRollbackServiceV2["Service"]["execute"]>[0],
+    ) =>
+      input.expectedIdle === true ||
+      input.expectedWorkspaceFingerprint !== undefined ||
+      input.expectedThreadState !== undefined
+        ? threadCommands.withLock(input.threadId, execute(input))
+        : execute(input);
 
     return CheckpointRollbackServiceV2.of({
       execute: (input) =>
@@ -387,11 +515,11 @@ export const layer: Layer.Layer<
           // Storage cleanup removes worktrees under the same lease.
           const { thread } = yield* projections.getThreadRecords(input.threadId, []);
           yield* thread.worktreePath === null
-            ? execute(input)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));
+            ? guardedExecute(input)
+            : withWorkspaceLease(path.resolve(thread.worktreePath), guardedExecute(input));
         }).pipe(
           Effect.mapError((cause) =>
-            isCheckpointRollbackExecutionError(cause)
+            isCheckpointRollbackError(cause)
               ? cause
               : new CheckpointRollbackExecutionError({
                   reason: "unexpected-failure",

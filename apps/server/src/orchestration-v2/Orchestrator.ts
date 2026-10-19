@@ -51,6 +51,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   latestProviderTurnForAttempt,
+  checkpointRollbackAppRunOrdinal,
   orchestrationV2RunWorkStartedAt,
   ProviderInstanceId,
   ProviderInteractionMode,
@@ -82,6 +83,9 @@ import * as Stream from "effect/Stream";
 import * as ProjectStore from "./ProjectStore.ts";
 import {
   isCheckpointRestoreIsolated,
+  checkpointRestoreThreadIdle,
+  checkpointRestoreThreadState,
+  CheckpointRestoreRejectedRequest,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
@@ -237,6 +241,17 @@ export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<Or
   }
 }
 
+const encodeRejectedRestore = Schema.encodeSync(CheckpointRestoreRejectedRequest);
+
+export class CheckpointRollbackAdmissionError extends Schema.TaggedError<CheckpointRollbackAdmissionError>()(
+  "CheckpointRollbackAdmissionError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return "Checkpoint restore requires an unchanged, idle, unarchived thread with no queued work.";
+  }
+}
+
 export class OrchestratorCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestratorCommandPreviouslyRejectedError>()(
   "OrchestratorCommandPreviouslyRejectedError",
   {
@@ -278,6 +293,7 @@ export function canReplayCommandReceipt(
 }
 
 export const OrchestratorV2Error = Schema.Union([
+  CheckpointRollbackAdmissionError,
   OrchestratorDispatchError,
   OrchestratorThreadAlreadyExistsError,
   OrchestratorCommandRejectedError,
@@ -9790,6 +9806,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ["providerThreads", "checkpoints", "checkpointScopes", "runs", "providerTurns", "attempts"],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
+      if (
+        (command.expectedIdle === true && !checkpointRestoreThreadIdle(projection)) ||
+        (command.expectedThreadState !== undefined &&
+          command.expectedThreadState !== checkpointRestoreThreadState(projection))
+      ) {
+        return yield* new CheckpointRollbackAdmissionError({
+          commandId: command.commandId,
+          threadId: command.threadId,
+        });
+      }
       const providerThread = projection.providerThreads.find(
         (candidate) => candidate.id === projection.thread.activeProviderThreadId,
       );
@@ -9887,7 +9913,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
       }
 
-      const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
+      const guarded =
+        command.expectedIdle === true ||
+        command.expectedWorkspaceFingerprint !== undefined ||
+        command.expectedThreadState !== undefined;
+      const targetOrdinal = guarded
+        ? checkpointRollbackAppRunOrdinal(targetCheckpoint, targetScope)
+        : (targetCheckpoint.appRunOrdinal ?? 0);
+      if (
+        targetOrdinal === null ||
+        (guarded &&
+          (providerThread.providerInstanceId !== projection.thread.modelSelection.instanceId ||
+            (targetScope.providerThreadId !== null &&
+              targetScope.providerThreadId !== providerThread.id)))
+      )
+        return yield* new CheckpointRollbackAdmissionError({
+          commandId: command.commandId,
+          threadId: command.threadId,
+        });
       if (targetOrdinal > 0) {
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const targetProviderTurn =
@@ -9946,6 +9989,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: command.threadId,
           request: {
             type: "provider-thread.rollback",
+            ...(command.expectedIdle === undefined ? {} : { expectedIdle: command.expectedIdle }),
+            ...(command.expectedWorkspaceFingerprint === undefined
+              ? {}
+              : { expectedWorkspaceFingerprint: command.expectedWorkspaceFingerprint }),
+            ...(command.expectedThreadState === undefined
+              ? {}
+              : { expectedThreadState: command.expectedThreadState }),
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
@@ -11324,7 +11374,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               threadId: commandThreadId(command),
               commandType: command.type,
               rejectedAt,
-              error: cause instanceof Error ? cause.message : String(cause),
+              error:
+                command.type === "checkpoint.rollback" &&
+                (command.expectedIdle === true ||
+                  command.expectedWorkspaceFingerprint !== undefined ||
+                  command.expectedThreadState !== undefined)
+                  ? encodeRejectedRestore({
+                      type: "checkpoint_restore_rejected",
+                      threadId: command.threadId,
+                      scopeId: command.scopeId,
+                      checkpointId: command.checkpointId,
+                    })
+                  : cause instanceof Error
+                    ? cause.message
+                    : String(cause),
             })
             .pipe(
               Effect.mapError(

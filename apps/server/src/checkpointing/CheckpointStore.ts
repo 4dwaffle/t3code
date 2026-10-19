@@ -44,6 +44,7 @@ export interface DeleteCheckpointRefsInput {
 export class CheckpointStore extends Context.Service<
   CheckpointStore,
   {
+    readonly readWorkspaceFingerprint: (cwd: string) => Effect.Effect<string, CheckpointStoreError>;
     readonly isGitRepository: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
 
     readonly captureCheckpoint: (
@@ -146,6 +147,10 @@ export const make = Effect.gen(function* () {
   });
 
   return CheckpointStore.of({
+    readWorkspaceFingerprint: (cwd) =>
+      resolveCheckpoints("CheckpointStore.readWorkspaceFingerprint", cwd).pipe(
+        Effect.flatMap((ops) => ops.readWorkspaceFingerprint(cwd)),
+      ),
     isGitRepository,
     captureCheckpoint,
     hasCheckpointRef,

@@ -1,3 +1,4 @@
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -45,6 +46,10 @@ const layerCheckpointRollbackService = CheckpointRollbackService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       NodeServices.layer,
+      Layer.mock(CheckpointStore.CheckpointStore)({
+        hasCheckpointRef: () => Effect.succeed(true),
+        readWorkspaceFingerprint: () => Effect.succeed("workspace-before"),
+      }),
       Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
       ServerSettings.layerTest(),
       Layer.mock(GitWorkflow.GitWorkflowService)({}),
@@ -150,7 +155,7 @@ it.effect.each(["initial", "waiting"])(
       assert.equal(getThreadRecords.mock.calls.length, 2);
       assert.deepEqual(getThreadRecords.mock.calls[0]?.[1], []);
       assert.equal(getThreadRecords.mock.calls[1]?.[1].includes("checkpoints"), true);
-      assert.equal(error.reason, "rollback-target-invalid");
+      assert.equal("reason" in error ? error.reason : undefined, "rollback-target-invalid");
       assert.equal(
         error.message,
         `Rollback target ${checkpointId} for provider thread ${providerThreadId} on thread ${threadId} is incomplete or invalid.`,
@@ -230,7 +235,7 @@ it.effect("rejects a rollback when another provider thread became active", () =>
       })
       .pipe(Effect.flip);
 
-    assert.equal(error.reason, "active-provider-changed");
+    assert.equal("reason" in error ? error.reason : undefined, "active-provider-changed");
     assert.equal(
       error.message,
       `Active provider changed before rollback target ${checkpointId} could execute on thread ${threadId}.`,
@@ -311,7 +316,7 @@ it.effect("rejects a rollback when provider selection changed before execution",
       })
       .pipe(Effect.flip);
 
-    assert.equal(error.reason, "active-provider-changed");
+    assert.equal("reason" in error ? error.reason : undefined, "active-provider-changed");
     assert.equal(
       error.message,
       `Active provider changed before rollback target ${checkpointId} could execute on thread ${threadId}.`,
@@ -384,7 +389,7 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
       .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles: false })
       .pipe(Effect.flip);
     assert.equal(open.mock.calls.length, 0);
-    assert.equal(error.reason, "provider-turn-unavailable");
+    assert.equal("reason" in error ? error.reason : undefined, "provider-turn-unavailable");
     assert.equal(
       error.message,
       `Provider turn for rollback target ${checkpointId} is unavailable on provider thread ${providerThreadId}.`,
@@ -449,6 +454,7 @@ it.effect.each([
         Layer.mergeAll(
           ThreadCommandExecutor.layer,
           NodeServices.layer,
+          Layer.mock(CheckpointStore.CheckpointStore)({}),
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as never),
           ServerSettings.layerTest(),
           Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -581,9 +587,19 @@ it.effect.each([
   { restoreFiles: true, shared: "historical" },
   { restoreFiles: false, shared: "none", targetOrdinal: 1 },
   { restoreFiles: false, shared: "none", targetOrdinal: 1, multipleTurns: true },
+  { restoreFiles: true, shared: "none", guarded: true, queued: true },
+  { restoreFiles: true, shared: "none", guarded: true, persistFails: true },
 ])(
   "rewinds safely with %s",
-  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false }) => {
+  ({
+    restoreFiles,
+    shared,
+    targetOrdinal = 0,
+    multipleTurns = false,
+    guarded = false,
+    queued = false,
+    persistFails = false,
+  }) => {
     const threadId = ThreadId.make("rewind-files");
     const providerThreadId = ProviderThreadId.make("rewind-provider");
     const providerSessionId = ProviderSessionId.make("rewind-session");
@@ -591,6 +607,10 @@ it.effect.each([
     const checkpointId = CheckpointId.make("rewind-start");
     const scopeId = CheckpointScopeId.make("rewind-scope");
     const calls: string[] = [];
+    const persistenceError = new EventSink.EventSinkWriteError({
+      eventCount: 3,
+      cause: "storage unavailable after restore",
+    });
     let lockedThreads = Effect.succeed<ReadonlyArray<ThreadId>>([]);
     const layerThreadCommands = Layer.effect(
       ThreadCommandExecutor.ThreadCommandExecutor,
@@ -636,13 +656,19 @@ it.effect.each([
       nodes: [],
       attempts: [1, 2, 3].map((ordinal) => ({ id: `attempt-${ordinal}`, runId: `run-${ordinal}` })),
       checkpoints: [
-        { id: checkpointId, scopeId, status: "ready", appRunOrdinal: targetOrdinal || null },
+        {
+          id: checkpointId,
+          scopeId,
+          status: "ready",
+          appRunOrdinal: guarded ? targetOrdinal : targetOrdinal || null,
+          ordinalWithinScope: 0,
+        },
       ],
       checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
-      runs: [1, 2, 3].map((ordinal) => ({
+      runs: [1, 2, 3, ...(queued ? [4] : [])].map((ordinal) => ({
         id: `run-${ordinal}`,
         ordinal,
-        status: ordinal === 3 ? "rolled_back" : "completed",
+        status: ordinal === 4 ? "queued" : ordinal === 3 ? "rolled_back" : "completed",
         rootNodeId: null,
         activeAttemptId: `attempt-${ordinal}`,
       })),
@@ -652,6 +678,14 @@ it.effect.each([
         Layer.mergeAll(
           layerThreadCommands,
           Layer.mock(CheckpointService.CheckpointServiceV2)({
+            withRestoreLock: (_cwd, use) =>
+              use({
+                restore: () =>
+                  Effect.sync(() => {
+                    calls.push("files");
+                  }),
+                deleteStaleRefs: () => Effect.void,
+              }),
             restore: () =>
               Effect.sync(() => {
                 calls.push("files");
@@ -659,7 +693,7 @@ it.effect.each([
           }),
           Layer.mock(EventSink.EventSinkV2)({
             write: ({ events }) =>
-              Effect.map(lockedThreads, (locked) => {
+              Effect.flatMap(lockedThreads, (locked) => {
                 assert.include(locked, threadId);
                 assert.ok(
                   events.some(
@@ -668,7 +702,7 @@ it.effect.each([
                   ),
                 );
                 calls.push("projection");
-                return [];
+                return persistFails ? Effect.fail(persistenceError) : Effect.succeed([]);
               }),
           }),
           IdAllocator.layer,
@@ -701,6 +735,15 @@ it.effect.each([
           Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
             open: () =>
               Effect.succeed({
+                providerSession: {
+                  capabilities: {
+                    threads: { canRollbackThread: true },
+                    checkpointing: {
+                      providerCanRollbackConversation: true,
+                      providerRollbackReturnsSnapshot: true,
+                    },
+                  },
+                },
                 rollbackThread: (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
                   Effect.gen(function* () {
                     const count = yield* resolveCodexRollbackTurnCount(input);
@@ -720,11 +763,41 @@ it.effect.each([
         const error = yield* Effect.flip(
           service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles }),
         );
-        assert.equal(error.reason, "shared-workspace");
+        assert.equal("reason" in error ? error.reason : undefined, "shared-workspace");
         assert.deepEqual(calls, []);
         return;
       }
-      yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
+      const request = {
+        threadId,
+        providerThreadId,
+        checkpointId,
+        scopeId,
+        restoreFiles,
+        ...(guarded
+          ? { expectedIdle: true as const, expectedWorkspaceFingerprint: "workspace-before" }
+          : {}),
+      };
+      if (queued) {
+        const error = yield* service
+          .execute(request)
+          .pipe(Effect.match({ onFailure: (cause) => cause, onSuccess: () => null }));
+        assert.deepEqual(calls, []);
+        assert.equal(
+          error !== null && "reason" in error ? error.reason : undefined,
+          "thread-not-idle",
+        );
+        return;
+      }
+      if (persistFails) {
+        const error = yield* service.execute(request).pipe(Effect.flip);
+        assert.equal(error._tag, "CheckpointRollbackPartialError");
+        assert.strictEqual(error.cause, persistenceError);
+        assert.include(calls, "provider");
+        assert.include(calls, "files");
+        assert.equal(calls.filter((call) => call === "provider").length, 1);
+        return;
+      }
+      yield* service.execute(request);
       assert.deepEqual(
         calls,
         restoreFiles ? ["provider", "files", "projection"] : ["provider", "projection"],
