@@ -1,5 +1,8 @@
+import { vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  type AuthSessionState,
   CommandId,
   RuntimeRequestId,
   EnvironmentId,
@@ -18,12 +21,19 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
+
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
+}));
+const sessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make<AsyncResult.AsyncResult<AuthSessionState, string>>(AsyncResult.initial()),
+);
 
 const ENVIRONMENT_ID = EnvironmentId.make("remote");
 const THREAD_ID = ThreadId.make("thread");
@@ -125,6 +135,34 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
 });
 
 describe("remote thread lifecycle commands", () => {
+  it.effect("offers background stop only while the destination grants thread operations", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const permission = h.commands.interruptTurn.permissionAtom(ENVIRONMENT_ID);
+      expect(h.registry.get(permission)).toBe(false);
+      const session: AuthSessionState = {
+        authenticated: true,
+        auth: {
+          policy: "remote-reachable",
+          bootstrapMethods: [],
+          sessionMethods: [],
+          sessionCookieName: "test",
+        },
+        scopes: [AuthOrchestrationOperateScope],
+        permissions: [AuthOrchestrationOperateScope],
+      };
+      h.registry.set(sessions(ENVIRONMENT_ID), AsyncResult.success(session));
+      expect(h.registry.get(permission)).toBe(true);
+      expect(
+        h.registry.get(h.commands.interruptTurn.permissionAtom(EnvironmentId.make("other"))),
+      ).toBe(false);
+      h.registry.set(
+        sessions(ENVIRONMENT_ID),
+        AsyncResult.success({ ...session, scopes: [], permissions: [] }),
+      );
+      expect(h.registry.get(permission)).toBe(false);
+    }),
+  );
   const actions = [
     ["settle", {}, { settledOverride: "settled", pinnedAt: null, snoozedUntil: null }],
     ["unsettle", { reason: "user" }, { settledOverride: "active", settledAt: null }],

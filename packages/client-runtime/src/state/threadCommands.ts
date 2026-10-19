@@ -2,9 +2,12 @@ import type { ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
+import { createEnvironmentSessionAtoms } from "./session.ts";
 import {
   WS_METHODS,
+  AuthOrchestrationOperateScope,
+  sessionGrantsScope,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
@@ -143,6 +146,19 @@ export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
   snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
 ) {
+  const sessions = createEnvironmentSessionAtoms(runtime);
+  const interruptPermissionAtom = Atom.family((environmentId: EnvironmentId | null) =>
+    Atom.make((get) => {
+      if (environmentId === null) return false;
+      const result = get(sessions.sessionStateAtom(environmentId));
+      const session = Option.getOrNull(AsyncResult.value(result));
+      return (
+        result._tag !== "Failure" &&
+        session !== null &&
+        sessionGrantsScope(session, AuthOrchestrationOperateScope)
+      );
+    }),
+  );
   const scheduler = createAtomCommandScheduler();
   const concurrency = {
     mode: "serial" as const,
@@ -409,6 +425,7 @@ export function createThreadEnvironmentAtoms<R, E>(
   return {
     ...commands,
     snapshotAtom: optimistic.snapshotAtom,
+    interruptTurn: { ...commands.interruptTurn, permissionAtom: interruptPermissionAtom },
     settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>
       !accepted &&
       (thread.pendingRuntimeRequest !== null ||
