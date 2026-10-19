@@ -478,6 +478,84 @@ describe("title regeneration on thread shells", () => {
     }
   });
 
+  it("observes a failure after reconnect and releases disconnected requests at their deadline", async () => {
+    vi.useFakeTimers();
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const unmountSnapshot = registry.mount(snapshotAtom(environmentId));
+    const controller = new AbortController();
+    const statusAtom = Atom.make<"live" | "cached" | "empty">("live");
+    const atom = Atom.make((get) => {
+      const status = get(statusAtom);
+      return status === "cached" || status === "empty"
+        ? undefined
+        : get(threads.threadShellAtom({ environmentId, threadId: v2ThreadShell.id }));
+    });
+    const set = (thread: OrchestrationV2ThreadShell) =>
+      registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [thread] });
+    const stop = vi.fn();
+    const subscribe = registry.subscribe.bind(registry);
+    const subscribeSpy = vi.spyOn(registry, "subscribe");
+    const watch = () => {
+      const ready = Promise.withResolvers<void>();
+      subscribeSpy.mockImplementationOnce((...args) => {
+        const unsubscribe = subscribe(...args);
+        ready.resolve();
+        return () => {
+          stop();
+          unsubscribe();
+        };
+      });
+      const result = waitForTitleRegenerationFailure({
+        registry,
+        atom,
+        requestId,
+        timeoutMs: 5 * 60_000,
+        signal: controller.signal,
+      });
+      return { result, ready: ready.promise };
+    };
+    const inFlight = { ...v2ThreadShell, titleRegeneration: { requestId, startedAt: v2Now } };
+    try {
+      set(inFlight);
+      const reconnect = watch();
+      await reconnect.ready;
+      const settled = vi.fn();
+      void reconnect.result.then(settled);
+      registry.set(statusAtom, "cached");
+      set({ ...v2ThreadShell, titleRegenerationFailure: { requestId, message } });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(settled).not.toHaveBeenCalled();
+      registry.set(statusAtom, "live");
+      await expect(reconnect.result).resolves.toBe(message);
+      expect(stop).toHaveBeenCalledTimes(1);
+
+      set(inFlight);
+      const disconnected = watch();
+      await disconnected.ready;
+      registry.set(statusAtom, "empty");
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await expect(disconnected.result).resolves.toBeNull();
+      expect(stop).toHaveBeenCalledTimes(2);
+
+      registry.set(statusAtom, "live");
+      const overdue = watch();
+      await overdue.ready;
+      settled.mockClear();
+      void overdue.result.then(settled);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(settled).not.toHaveBeenCalled();
+      registry.set(statusAtom, "cached");
+      await expect(overdue.result).resolves.toBeNull();
+      expect(stop).toHaveBeenCalledTimes(3);
+    } finally {
+      controller.abort();
+      unmountSnapshot();
+      registry.dispose();
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
   it("releases the shell subscription on command rejection or an unobserved request timeout", async () => {
     vi.useFakeTimers();
     const { registry, threads } = makeHarness();

@@ -3049,7 +3049,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   titleRegenerationFailure: null,
                 }
               : command.regenerateTitle === false || command.title !== undefined
-                ? { titleRegeneration: null }
+                ? { titleRegeneration: null, titleRegenerationFailure: null }
                 : {}),
             updatedAt: now,
           };

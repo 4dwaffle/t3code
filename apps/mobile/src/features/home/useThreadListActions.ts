@@ -472,7 +472,7 @@ export function useThreadListActions(): {
         atom: Atom.make((get) => {
           const status = get(environmentShell.statusAtom(thread.environmentId));
           return status === "cached" || status === "empty"
-            ? null
+            ? undefined
             : get(
                 environmentThreadShells.threadShellAtom(
                   scopeThreadRef(thread.environmentId, thread.id),

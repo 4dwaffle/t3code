@@ -4,19 +4,24 @@ import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
 
-/** Arm before sending the command; abort when it is rejected. A null shell
-    cancels observation, including when the caller loses its live connection. */
+/** Call before sending the command; abort when it is rejected. Null cancels
+    observation; undefined allows a disconnected client to reconnect until the deadline. */
 export function waitForTitleRegenerationFailure(input: {
   readonly registry: AtomRegistry.AtomRegistry;
-  readonly atom: Atom.Atom<EnvironmentThreadShell | null>;
+  readonly atom: Atom.Atom<EnvironmentThreadShell | null | undefined>;
   readonly requestId: string;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
 }): Promise<string | null> {
   let unsubscribe: (() => void) | undefined;
+  let deadlineElapsed = false;
   const observation = Effect.callback<string | null>((resume) => {
     let sawInFlight = false;
-    const inspect = (thread: EnvironmentThreadShell | null) => {
+    const inspect = (thread: EnvironmentThreadShell | null | undefined) => {
+      if (thread === undefined) {
+        if (deadlineElapsed) resume(Effect.succeed(null));
+        return;
+      }
       if (thread === null) return resume(Effect.succeed(null));
       if (thread.titleRegenerationFailure?.requestId === input.requestId) {
         return resume(Effect.succeed(thread.titleRegenerationFailure.message));
@@ -30,14 +35,15 @@ export function waitForTitleRegenerationFailure(input: {
     unsubscribe = input.registry.subscribe(input.atom, inspect);
     inspect(input.registry.get(input.atom));
   }).pipe(Effect.ensuring(Effect.sync(() => unsubscribe?.())));
-  // A queued generation may outlast this deadline. Only abandon requests that
-  // never started (or whose successful completion arrived without its start).
+  // Live queued generations may outlast the deadline, but disconnected clients
+  // must release their subscriptions even when a cached marker is still in flight.
   const unobserved = Effect.sleep(input.timeoutMs).pipe(
-    Effect.andThen(() =>
-      input.registry.get(input.atom)?.titleRegeneration?.requestId === input.requestId
+    Effect.andThen(() => {
+      deadlineElapsed = true;
+      return input.registry.get(input.atom)?.titleRegeneration?.requestId === input.requestId
         ? Effect.never
-        : Effect.succeed(null),
-    ),
+        : Effect.succeed(null);
+    }),
   );
   return Effect.runPromiseExit(Effect.raceFirst(observation, unobserved), {
     signal: input.signal,

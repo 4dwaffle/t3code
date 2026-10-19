@@ -46,7 +46,7 @@ export function createTitleRegenerationReporter() {
         atom: Atom.make((get) => {
           const status = get(environmentShell.statusAtom(threadRef.environmentId));
           return status === "cached" || status === "empty"
-            ? null
+            ? undefined
             : get(environmentThreadShells.threadShellAtom(threadRef));
         }),
         requestId,

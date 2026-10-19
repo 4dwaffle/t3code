@@ -625,6 +625,20 @@ describe("orchestration V2 contracts", () => {
     expect(event.payload.id).toBe(RunId.make("run-1"));
   });
 
+  it("accepts only the fixed safe title generation failure in completion commands", () => {
+    const command = {
+      type: "thread.title.regeneration.complete",
+      commandId: "command-1",
+      threadId: "thread-1",
+      requestId: "title-request-1",
+      failure: "The thread title could not be generated.",
+    };
+    expect(decodeOrchestrationV2Command(command)).toEqual(command);
+    expect(() =>
+      decodeOrchestrationV2Command({ ...command, failure: "CLI stderr: private output" }),
+    ).toThrow();
+  });
+
   it("decodes app-owned delegated task commands", () => {
     const command = decodeOrchestrationV2Command({
       type: "delegated_task.request",

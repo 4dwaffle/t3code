@@ -503,6 +503,18 @@ describe("ThreadTitleRegenerationService", () => {
             current?.titleRegenerationFailure,
           );
 
+          yield* threads.dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make("command:title:reason:rename"),
+            threadId,
+            title: "Chosen title",
+          });
+          const renamed = yield* threads.getThreadProjection(threadId);
+          assert.equal(renamed.thread.title, "Chosen title");
+          assert.isNotOk(renamed.thread.titleRegeneration);
+          assert.isNotOk(renamed.thread.titleRegenerationFailure);
+          assert.isUndefined((yield* threads.getThreadShell(threadId))?.titleRegenerationFailure);
+
           for (const failure of [
             shell?.titleRegenerationFailure,
             current?.titleRegenerationFailure,

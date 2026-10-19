@@ -1,6 +1,7 @@
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  TITLE_GENERATION_FAILED_MESSAGE,
   type ChatAttachment,
   type MessageId,
   type ServerSettingsError,
@@ -22,10 +23,13 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
 export { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
 
-const TITLE_GENERATION_FAILED_MESSAGE = "The thread title could not be generated.";
 type TitleOutcome =
   | { readonly type: "stale" }
-  | { readonly type: "complete"; readonly title?: string; readonly failure?: string };
+  | {
+      readonly type: "complete";
+      readonly title?: string;
+      readonly failure?: typeof TITLE_GENERATION_FAILED_MESSAGE;
+    };
 
 export class ThreadTitleRegenerationService extends Context.Service<
   ThreadTitleRegenerationService,
@@ -56,7 +60,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly requestId: CommandId;
     readonly title?: string;
-    readonly failure?: string;
+    readonly failure?: typeof TITLE_GENERATION_FAILED_MESSAGE;
   }) =>
     threads
       .dispatch({
@@ -141,10 +145,10 @@ const make = Effect.gen(function* () {
               cause,
             }).pipe(
               Effect.as({
-                type: "complete" as const,
+                type: "complete",
                 // CLI output belongs in the logged cause, never the durable failure.
                 failure: TITLE_GENERATION_FAILED_MESSAGE,
-              }),
+              } as const),
             ),
       ),
     );

@@ -2,6 +2,8 @@ import * as Schema from "effect/Schema";
 
 import { CommandId, IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
+export const TITLE_GENERATION_FAILED_MESSAGE = "The thread title could not be generated.";
+
 export const ThreadTitleRegeneration = Schema.Struct({
   requestId: CommandId,
   startedAt: IsoDateTime,
