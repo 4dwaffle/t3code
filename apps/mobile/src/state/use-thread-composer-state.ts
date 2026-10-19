@@ -626,8 +626,17 @@ export function useThreadComposerState() {
 
     if (beforeDispatch !== undefined) {
       if (!(await beforeDispatch())) return null;
-      // A context paste that started while approvals were declined isn't in this draft yet.
+      // A context paste still landing, or any draft change while approvals were declined,
+      // means this snapshot is no longer what the user sent.
       if (appAtomRegistry.get(composerContextImportsAtom)[threadKey]) return null;
+      const current = getComposerDraftSnapshot(threadKey);
+      if (
+        current.text !== draft.text ||
+        JSON.stringify(current.context) !== JSON.stringify(draft.context) ||
+        current.attachments.length !== attachments.length ||
+        current.attachments.some((attachment, index) => attachment.id !== attachments[index]?.id)
+      )
+        return null;
     }
 
     // Resolved here rather than at drain time: the outbox can deliver minutes
