@@ -53,6 +53,7 @@ export function useScopedSettingSource(keys: readonly (keyof ServerSettings)[]) 
 }
 
 function useRunScopedPlan() {
+  const environments = useOptionalSettingsScope()?.connectedEnvironments;
   const persistServer = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
   return (plan: ReturnType<typeof planScopedSettingsPatch>) => {
     if (plan.unavailableReason) {
@@ -66,9 +67,11 @@ function useRunScopedPlan() {
     void persistScopedSettingsPatch(
       plan,
       async (request) => {
-        const missing = requiredScopesForServerSettingsPatch(request.input.patch).find(
-          (scope) => !readEnvironmentScope(request.environmentId, scope),
-        );
+        const missing = requiredScopesForServerSettingsPatch(
+          request.input.patch,
+          environments?.find((environment) => environment.environmentId === request.environmentId)
+            ?.serverConfig?.settings,
+        ).find((scope) => !readEnvironmentScope(request.environmentId, scope));
         if (missing)
           return AsyncResult.failure(
             Cause.fail(
