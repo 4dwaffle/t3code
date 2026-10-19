@@ -6520,8 +6520,10 @@ export default function ChatView(props: ChatViewProps) {
     }
     // A message sent while approvals are pending redirects the agent. They are declined only
     // here, after everything above has accepted the send, so local commands and rejected
-    // drafts leave them alone.
-    const approvalsToDecline = pendingApprovalsRef.current;
+    // drafts leave them alone. After navigating away during an upload, the shown approvals
+    // are another thread's, so this send leaves them alone too.
+    const approvalsToDecline =
+      currentRouteThreadKeyRef.current === routeThreadKey ? pendingApprovalsRef.current : [];
     if (approvalsToDecline.length > 0) {
       const draftBeforeDecline = useComposerDraftStore
         .getState()

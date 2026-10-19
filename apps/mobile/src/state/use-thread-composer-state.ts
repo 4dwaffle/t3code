@@ -621,7 +621,11 @@ export function useThreadComposerState() {
       return null;
     }
 
-    if (beforeDispatch !== undefined && !(await beforeDispatch())) return null;
+    if (beforeDispatch !== undefined) {
+      if (!(await beforeDispatch())) return null;
+      // A context paste that started while approvals were declined isn't in this draft yet.
+      if (appAtomRegistry.get(composerContextImportsAtom)[threadKey]) return null;
+    }
 
     // Resolved here rather than at drain time: the outbox can deliver minutes
     // later, and the choice belongs to the moment the user pressed send.
