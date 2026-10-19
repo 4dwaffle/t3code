@@ -13,6 +13,7 @@ import {
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as DateTime from "effect/DateTime";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -950,7 +951,7 @@ describe("AcpRegistryAdapterV2", () => {
     { kind: "question", stopReason: "error", status: "failed" },
   ] as const)("continues Claude's background $kind and preserves $status idle", (testCase) =>
     Effect.gen(function* () {
-      const gate = makeProviderReplayGate(["wake", "stop-request"]);
+      const gate = makeProviderReplayGate(["wake", "stop-request", "refused-response"]);
       const method =
         testCase.kind === "approval" ? "session/request_permission" : "elicitation/create";
       const params =
@@ -999,7 +1000,17 @@ describe("AcpRegistryAdapterV2", () => {
             messageId: "wake-user",
             content: [{ type: "text", text: "Continue the review." }],
           }),
+          claudeFrames.closeRequest,
           { type: "emit_inbound", frame: { kind: "request", method, params } },
+          {
+            type: "emit_inbound",
+            label: "refused-response",
+            frame: {
+              kind: "response",
+              method: "session/close",
+              error: { code: -32603, message: "Close refused" },
+            },
+          },
           {
             type: "expect_outbound",
             frame: {
@@ -1052,6 +1063,20 @@ describe("AcpRegistryAdapterV2", () => {
       assert.isDefined(offer.dispatchIfCurrent);
       yield* offer.dispatchIfCurrent!(Effect.void);
       yield* session.runtime.startTurn(session.turnInput(2, { continuation: true }));
+      const started = yield* session.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const running = started.at(-1)!;
+      if (running.type !== "provider_turn.updated") throw new Error("Missing active continuation");
+      const closing = yield* session.runtime
+        .interruptTurn({
+          providerThread: session.providerThread,
+          providerTurnId: running.providerTurn.id,
+          requestRuntimeRestart: true,
+        })
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* Effect.addFinalizer(() => Effect.sync(() => gate.releaseAll()));
       const seen = yield* session.until(
         (event) =>
           event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
@@ -1071,6 +1096,10 @@ describe("AcpRegistryAdapterV2", () => {
             event.node.runId === session.turnInput(2).runId,
         ),
       );
+      yield* Effect.promise(() => gate.waitForReached("refused-response"));
+      gate.release("refused-response");
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(closing)));
+      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
       yield* session.runtime.respondToRuntimeRequest({
         requestId: request.runtimeRequest.id,
         ...(testCase.kind === "approval"
@@ -1429,35 +1458,66 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect("keeps Claude background work after a refused Stop and closes it on retry", () =>
+  it.effect("keeps Claude activity after a refused Stop and closes it on retry", () =>
     Effect.gen(function* () {
-      const session = yield* openClaudeReplaySession([
-        ...claudeFrames.open,
-        ...claudeFrames.prompt(1),
-        ...claudeChild,
-        claudeFrames.idle("end_turn"),
-        claudeFrames.closeRequest,
-        {
-          type: "emit_inbound",
-          frame: {
-            kind: "response",
-            method: "session/close",
-            error: { code: -32603, message: "Close refused" },
+      const gate = makeProviderReplayGate(["close-response"]);
+      const session = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          ...claudeFrames.prompt(1),
+          ...claudeChild,
+          claudeMarker("before Stop"),
+          claudeFrames.closeRequest,
+          claudeFrames.update("child-1", {
+            sessionUpdate: "agent_message_chunk",
+            messageId: "closing-reply",
+            content: { type: "text", text: "Finished during close." },
+          }),
+          claudeFrames.childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+          claudeFrames.idle("end_turn"),
+          claudeMarker("idle during close"),
+          {
+            type: "emit_inbound",
+            label: "close-response",
+            frame: {
+              kind: "response",
+              method: "session/close",
+              error: { code: -32603, message: "Close refused" },
+            },
           },
-        },
-        claudeFrames.closeRequest,
-        claudeFrames.closed,
-      ]);
+          claudeFrames.closeRequest,
+          claudeFrames.closed,
+        ],
+        gate,
+      );
       yield* session.runtime.startTurn(session.turnInput(1));
-      const ended = yield* session.terminal;
+      const started = yield* session.throughMarker("before Stop");
+      const running = started.findLast((event) => event.type === "provider_turn.updated");
+      if (running?.type !== "provider_turn.updated") throw new Error("Missing active turn");
       const stop = {
         providerThread: session.providerThread,
-        providerTurnId: ended.providerTurnId,
+        providerTurnId: running.providerTurn.id,
         requestRuntimeRestart: true,
       };
-      const refused = yield* session.runtime.interruptTurn(stop).pipe(Effect.exit);
+      const closing = yield* session.runtime
+        .interruptTurn(stop)
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* Effect.addFinalizer(() => Effect.sync(() => gate.releaseAll()));
+      const idle = yield* session.throughMarker("idle during close");
+      gate.release("close-response");
+      const refused = yield* Fiber.join(closing);
       assert.isTrue(Exit.isFailure(refused), "a refused close must not report a successful Stop");
-      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+      const terminal = idle.findLast((event) => event.type === "turn.terminal");
+      assert.equal(
+        terminal?.type === "turn.terminal" ? terminal.status : null,
+        "completed",
+        "idle during a refused close must settle the foreground turn",
+      );
+      const result = idle.findLast((event) => event.type === "subagent.updated");
+      if (result?.type !== "subagent.updated") throw new Error("Missing child close-time result");
+      assert.equal(result.subagent.status, "completed");
+      assert.equal(result.subagent.result, "Finished during close.");
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
       yield* session.runtime.interruptTurn(stop);
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
