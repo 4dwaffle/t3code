@@ -838,7 +838,7 @@ describe("MessagesTimeline history and thread links", () => {
     expect(onOpenThread).toHaveBeenCalledWith("thread-parent");
   });
 
-  it("opens a thread at its newest message after an empty pane", async () => {
+  it("opens a thread at its newest message after an empty pane and restores it on return", async () => {
     const props = baseProps();
     const entries = Array.from({ length: 12 }, (_, index) =>
       message(
@@ -860,6 +860,43 @@ describe("MessagesTimeline history and thread links", () => {
     const viewport = props.listRef.current!.getScrollableNode();
     await vi.waitFor(() => {
       expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
+      expect(text()).toContain("Paragraph 11.59");
+      expect(
+        viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+      ).toBeLessThanOrEqual(1);
+    });
+
+    const otherThreadKey = `${props.routeThreadKey}-other`;
+    await act(async () =>
+      roots
+        .at(-1)!
+        .render(
+          <MessagesTimeline
+            {...props}
+            routeThreadKey={otherThreadKey}
+            timelineEntries={entries}
+            liveFollowEnabled={false}
+          />,
+        ),
+    );
+    await vi.waitFor(() =>
+      expect(
+        viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
+      ).toBeLessThanOrEqual(1),
+    );
+    // Move beyond LegendList's one-viewport follow threshold so it cannot mask restoration.
+    await userEvent.wheel(viewport, { delta: { y: -2000 } });
+    await vi.waitFor(() => {
+      expect(readTimelinePosition(otherThreadKey)?.atEnd).toBe(false);
+      expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeGreaterThan(
+        viewport.clientHeight,
+      );
+    });
+
+    await act(async () =>
+      roots.at(-1)!.render(<MessagesTimeline {...props} timelineEntries={entries} />),
+    );
+    await vi.waitFor(() => {
       expect(text()).toContain("Paragraph 11.59");
       expect(
         viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop,
