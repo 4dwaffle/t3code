@@ -1460,7 +1460,7 @@ describe("AcpRegistryAdapterV2", () => {
 
   it.effect("keeps Claude activity after a refused Stop and closes it on retry", () =>
     Effect.gen(function* () {
-      const gate = makeProviderReplayGate(["close-response"]);
+      const gate = makeProviderReplayGate(["close-response", "queued-close-response"]);
       const session = yield* openClaudeReplaySession(
         [
           ...claudeFrames.open,
@@ -1532,6 +1532,47 @@ describe("AcpRegistryAdapterV2", () => {
       });
       assert.equal((yield* session.terminal).status, "interrupted");
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+
+      const queued = yield* openClaudeReplaySession(
+        [
+          ...claudeFrames.open,
+          {
+            type: "expect_outbound",
+            frame: { kind: "request", method: "session/prompt", params: "<any>" },
+          },
+          claudeMarker("before queued Stop"),
+          claudeFrames.closeRequest,
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/prompt",
+              error: { code: -32800, message: "Request cancelled" },
+            },
+          },
+          { ...claudeFrames.closed, label: "queued-close-response" },
+        ],
+        gate,
+      );
+      yield* queued.runtime.startTurn(queued.turnInput(3));
+      const pending = yield* queued.throughMarker("before queued Stop");
+      const queuedRunning = pending.findLast((event) => event.type === "provider_turn.updated");
+      if (queuedRunning?.type !== "provider_turn.updated")
+        throw new Error("Missing queued provider turn");
+      const queuedClosing = yield* queued.runtime
+        .interruptTurn({
+          providerThread: queued.providerThread,
+          providerTurnId: queuedRunning.providerTurn.id,
+          requestRuntimeRestart: true,
+        })
+        .pipe(Effect.forkScoped);
+      const queuedTerminal = yield* queued.terminal;
+      gate.release("queued-close-response");
+      yield* Fiber.join(queuedClosing);
+      assert.equal(queuedTerminal.providerTurnId, queuedRunning.providerTurn.id);
+      assert.equal(queuedTerminal.status, "interrupted");
+      assert.isNull(queuedTerminal.failure);
+      assert.isFalse(yield* queued.runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
