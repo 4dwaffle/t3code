@@ -68,8 +68,43 @@ export class RunFinalizationRefreshError extends Schema.TaggedError<RunFinalizat
   { cwd: Schema.String, cause: Schema.Defect() },
 ) {}
 
-export class RunFinalizationObserver extends Context.Reference<{
+/**
+ * The project-wide PR refresh RunExecutionService runs when a turn ends. Kept
+ * apart from RunFinalizationObserver because that observer dispatches through
+ * ThreadManagementService, which builds the orchestrator and so
+ * RunExecutionService itself: a reference RunExecutionService reads at
+ * construction must not depend on it, or it captures the no-op default.
+ */
+export class RunTurnObserver extends Context.Reference<{
   readonly refreshAfterTurn: (projectId: ProjectId) => Effect.Effect<void>;
+}>("t3/orchestration-v2/RunTurnObserver", {
+  defaultValue: () => ({ refreshAfterTurn: () => Effect.void }),
+}) {}
+
+export const layerTurnObserver = Layer.effect(
+  RunTurnObserver,
+  Effect.gen(function* () {
+    const pullRequests = yield* PullRequestService.PullRequestService;
+    return { refreshAfterTurn: pullRequests.refreshAfterTurn };
+  }),
+);
+
+export class RunFinalizationFollowError extends Schema.TaggedError<RunFinalizationFollowError>()(
+  "RunFinalizationFollowError",
+  {
+    threadId: ThreadId,
+    projectId: Schema.optional(ProjectId),
+    operation: Schema.Literals([
+      "read-thread",
+      "read-provider-context",
+      "read-session-sharing",
+      "read-project",
+    ]),
+    cause: Schema.Defect(),
+  },
+) {}
+
+export class RunFinalizationObserver extends Context.Reference<{
   readonly refresh: (input: {
     readonly cwd: string;
     readonly threadId: ThreadId;
@@ -84,11 +119,10 @@ export class RunFinalizationObserver extends Context.Reference<{
   readonly followWorktreeMove: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
-  }) => Effect.Effect<void, RunFinalizationRefreshError>;
+  }) => Effect.Effect<void, RunFinalizationFollowError>;
 }>("t3/orchestration-v2/RunFinalizationObserver", {
   defaultValue: () => ({
     refresh: () => Effect.void,
-    refreshAfterTurn: () => Effect.void,
     followWorktreeMove: () => Effect.void,
   }),
 }) {}
@@ -140,14 +174,16 @@ const make = Effect.gen(function* () {
       );
     const cwd = projection.checkpointScopes.find((scope) => scope.id === input.scopeId)?.cwd;
     if (cwd !== undefined) {
-      yield* observer
-        .refresh({ cwd, threadId: input.threadId, runId: input.runId })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new RunFinalizationError({ ...input, operation: "refresh-workspace", cause }),
-          ),
-        );
+      // Retrying a display refresh after the checkpoint is durable blocks the next turn.
+      yield* observer.refresh({ cwd, threadId: input.threadId, runId: input.runId }).pipe(
+        Effect.catchTags({
+          RunFinalizationRefreshError: (cause) =>
+            Effect.logWarning("Failed to refresh workspace after checkpoint capture", {
+              ...input,
+              cause,
+            }),
+        }),
+      );
     }
   });
   return RunFinalizationService.of({ finalize });
@@ -224,95 +260,106 @@ export const layerObserver = Layer.effect(
     // worktreePath itself is always worth tracking here, so it commits even
     // into a shared worktree; only the branch adoption is conditional, via
     // the same exclusivity check (requireExclusiveWorktree).
-    const followWorktreeMove = ({
+    const followWorktreeMove = Effect.fn("RunFinalizationService.followWorktreeMove")(function* ({
       threadId,
       runId,
     }: {
       readonly threadId: ThreadId;
       readonly runId: RunId;
-    }) =>
-      Effect.gen(function* () {
-        const thread = yield* projections.getThreadShell(threadId);
-        if (!thread) return;
-        if (thread.activeRunId !== null && thread.activeRunId !== runId) return;
-        if (thread.activeProviderThreadId === null) return;
-        // The session this thread's own provider thread runs on, not just any
-        // session bound to the thread: a thread can stay bound to sessions
-        // opened elsewhere, whose cwd says nothing about where this agent is.
-        const providerContext = yield* projections.getThreadProviderContext(
-          threadId,
-          thread.providerInstanceId,
-        );
-        const providerSessionId = providerContext.providerThreads.find(
-          (providerThread) => providerThread.id === thread.activeProviderThreadId,
-        )?.providerSessionId;
-        if (providerSessionId == null) return;
-        const liveCwd = providerContext.providerSessions.find(
-          (session) => session.id === providerSessionId,
-        )?.cwd;
-        if (liveCwd === undefined) return;
-        // A shared session has one cwd for every thread on it, so a move may
-        // have been another thread's. Leave the location alone rather than
-        // guess.
-        if (yield* projections.isProviderSessionShared(threadId, providerSessionId)) return;
-        const project = yield* projects.getById(thread.projectId);
-        if (Option.isNone(project)) return;
-        const recordedCwd = thread.worktreePath ?? project.value.workspaceRoot;
-        if (liveCwd === recordedCwd) return;
+    }) {
+      const failedTo =
+        (operation: RunFinalizationFollowError["operation"], projectId?: ProjectId) =>
+        (cause: unknown) =>
+          new RunFinalizationFollowError({
+            threadId,
+            operation,
+            cause,
+            ...(projectId !== undefined ? { projectId } : {}),
+          });
+      const thread = yield* projections
+        .getThreadShell(threadId)
+        .pipe(Effect.mapError(failedTo("read-thread")));
+      if (!thread) return;
+      if (thread.activeRunId !== null && thread.activeRunId !== runId) return;
+      if (thread.activeProviderThreadId === null) return;
+      // The session this thread's own provider thread runs on, not just any
+      // session bound to the thread: a thread can stay bound to sessions
+      // opened elsewhere, whose cwd says nothing about where this agent is.
+      const providerContext = yield* projections
+        .getThreadProviderContext(threadId, thread.providerInstanceId)
+        .pipe(Effect.mapError(failedTo("read-provider-context")));
+      const providerSessionId = providerContext.providerThreads.find(
+        (providerThread) => providerThread.id === thread.activeProviderThreadId,
+      )?.providerSessionId;
+      if (providerSessionId == null) return;
+      const liveCwd = providerContext.providerSessions.find(
+        (session) => session.id === providerSessionId,
+      )?.cwd;
+      if (liveCwd === undefined) return;
+      // A shared session has one cwd for every thread on it, so a move may
+      // have been another thread's. Leave the location alone rather than
+      // guess.
+      const shared = yield* projections
+        .isProviderSessionShared(threadId, providerSessionId)
+        .pipe(Effect.mapError(failedTo("read-session-sharing")));
+      if (shared) return;
+      const project = yield* projects
+        .getById(thread.projectId)
+        .pipe(Effect.mapError(failedTo("read-project", thread.projectId)));
+      if (Option.isNone(project)) return;
+      const recordedCwd = thread.worktreePath ?? project.value.workspaceRoot;
+      if (liveCwd === recordedCwd) return;
 
-        const newWorktreePath = liveCwd === project.value.workspaceRoot ? null : liveCwd;
-        const local = yield* vcsStatus.refreshLocalStatus(liveCwd).pipe(
+      const newWorktreePath = liveCwd === project.value.workspaceRoot ? null : liveCwd;
+      const local = yield* vcsStatus.refreshLocalStatus(liveCwd).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to read git status after a worktree move", {
+            threadId,
+            cwd: liveCwd,
+            category: failureCategory(error),
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      // A detached HEAD or the still-in-flight first-turn placeholder
+      // branch has nothing adoptable; a non-dedicated location (back to
+      // the main checkout) never adopts a branch either.
+      const checkedOutBranch =
+        newWorktreePath !== null &&
+        local !== null &&
+        local.refName !== null &&
+        !isTemporaryWorktreeBranch(local.refName)
+          ? local.refName
+          : null;
+
+      yield* threads
+        .dispatch({
+          type: "thread.metadata.update",
+          // Keyed by the run being finalized: a retry of the same
+          // at-least-once effect must reuse this id, but a later run
+          // moving again is a fresh occurrence, not a duplicate.
+          commandId: CommandId.make(`command:effect:worktree-location-follow:${runId}`),
+          threadId,
+          worktreePath: newWorktreePath,
+          expectedWorktreePath: thread.worktreePath,
+          branch: checkedOutBranch,
+          // The session itself moved and is already working from the new
+          // location; detaching it (the default for an explicit worktree
+          // handoff) would kill useful, in-progress work.
+          preserveProviderSession: true,
+          ...(checkedOutBranch !== null ? { requireExclusiveWorktree: true } : {}),
+        })
+        .pipe(
           Effect.catch((error) =>
-            Effect.logWarning("failed to read git status after a worktree move", {
+            Effect.logWarning("failed to follow the provider session into its new worktree", {
               threadId,
-              cwd: liveCwd,
+              worktreePath: newWorktreePath,
               category: failureCategory(error),
-            }).pipe(Effect.as(null)),
+            }),
           ),
         );
-        // A detached HEAD or the still-in-flight first-turn placeholder
-        // branch has nothing adoptable; a non-dedicated location (back to
-        // the main checkout) never adopts a branch either.
-        const checkedOutBranch =
-          newWorktreePath !== null &&
-          local !== null &&
-          local.refName !== null &&
-          !isTemporaryWorktreeBranch(local.refName)
-            ? local.refName
-            : null;
-
-        yield* threads
-          .dispatch({
-            type: "thread.metadata.update",
-            // Keyed by the run being finalized: a retry of the same
-            // at-least-once effect must reuse this id, but a later run
-            // moving again is a fresh occurrence, not a duplicate.
-            commandId: CommandId.make(`command:effect:worktree-location-follow:${runId}`),
-            threadId,
-            worktreePath: newWorktreePath,
-            expectedWorktreePath: thread.worktreePath,
-            branch: checkedOutBranch,
-            // The session itself moved and is already working from the new
-            // location; detaching it (the default for an explicit worktree
-            // handoff) would kill useful, in-progress work.
-            preserveProviderSession: true,
-            ...(checkedOutBranch !== null ? { requireExclusiveWorktree: true } : {}),
-          })
-          .pipe(
-            Effect.catch((error) =>
-              Effect.logWarning("failed to follow the provider session into its new worktree", {
-                threadId,
-                worktreePath: newWorktreePath,
-                category: failureCategory(error),
-              }),
-            ),
-          );
-      }).pipe(
-        Effect.mapError((cause) => new RunFinalizationRefreshError({ cwd: "<session>", cause })),
-      );
+    });
 
     return {
-      refreshAfterTurn: pullRequests.refreshAfterTurn,
       followWorktreeMove,
       refresh: ({ cwd, threadId, runId }) =>
         Effect.gen(function* () {
