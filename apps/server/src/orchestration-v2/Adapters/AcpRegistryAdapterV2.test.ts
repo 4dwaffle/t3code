@@ -1485,7 +1485,10 @@ describe("AcpRegistryAdapterV2", () => {
               error: { code: -32603, message: "Close refused" },
             },
           },
+          ...claudeFrames.prompt(2),
+          claudeMarker("before retry"),
           claudeFrames.closeRequest,
+          claudeFrames.idle("cancelled"),
           claudeFrames.closed,
         ],
         gate,
@@ -1518,7 +1521,16 @@ describe("AcpRegistryAdapterV2", () => {
       assert.equal(result.subagent.status, "completed");
       assert.equal(result.subagent.result, "Finished during close.");
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
-      yield* session.runtime.interruptTurn(stop);
+      yield* session.runtime.startTurn(session.turnInput(2));
+      const retry = yield* session.throughMarker("before retry");
+      const retryRunning = retry.findLast((event) => event.type === "provider_turn.updated");
+      if (retryRunning?.type !== "provider_turn.updated")
+        throw new Error("Missing active retry turn");
+      yield* session.runtime.interruptTurn({
+        ...stop,
+        providerTurnId: retryRunning.providerTurn.id,
+      });
+      assert.equal((yield* session.terminal).status, "interrupted");
       assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
