@@ -2675,16 +2675,38 @@ it.effect("ProviderSessionManagerV2 starts turns and releases at the cwd it last
       const subscription = yield* runtime.subscribeEvents!;
       const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
       assert.isDefined(adapterQueue);
-      // A session that moved itself, like Claude's EnterWorktree.
       yield* Queue.offer(adapterQueue!, {
         type: "provider_session.updated",
         driver: CODEX_DRIVER,
         providerSession: { ...runtime.providerSession, cwd: "/workspace/moved", updatedAt: now },
       });
-      // Subscribers hear an update only after the pump persisted it.
       yield* subscription.events.pipe(Stream.take(1), Stream.runDrain);
-      // What the next turn start publishes as the session.
+      const providerThread = makeProviderThread({ idAllocator, threadId, providerSessionId, now });
+      const runId = idAllocator.derive.run({ threadId, ordinal: 2 });
+      yield* runtime.startTurn({
+        appThread: (yield* projectionStore.getThreadProjection(threadId)).thread,
+        threadId,
+        runId,
+        runOrdinal: 2,
+        providerTurnOrdinal: 2,
+        attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+        rootNodeId: idAllocator.derive.rootNode({ runId }),
+        providerThread,
+        message: {
+          createdBy: "user",
+          creationSource: "web",
+          messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 2 }),
+          text: "Continue in the worktree.",
+          attachments: [],
+        },
+        modelSelection,
+        runtimePolicy: { ...runtimePolicy, cwd: "/workspace/moved" },
+      });
       assert.equal(runtime.providerSession.cwd, "/workspace/moved");
+      assert.equal(
+        (yield* projectionStore.getThreadProjection(threadId)).providerSessions.at(-1)?.cwd,
+        "/workspace/moved",
+      );
 
       yield* manager.close(providerSessionId);
 

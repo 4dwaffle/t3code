@@ -2557,11 +2557,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} branch changed before the metadata update could be applied.`,
       });
     }
-    // Resolved below, against the live projection at decision time rather
-    // than by the caller before dispatch: a sibling thread can start sharing
-    // this worktree between that earlier read and this command's turn to
-    // commit, and a stale read would miss it. `undefined`
-    // means "no override, use command.branch as given" further down.
+    if (command.type === "thread.metadata.update" && command.expectedActiveRunId !== undefined) {
+      const current = yield* projectionStore
+        .getThreadShell(command.threadId)
+        .pipe(mapDispatchError(command));
+      let pendingSuccessor = false;
+      if (command.finalizedRunId !== undefined) {
+        const { runs } = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runs"])
+          .pipe(mapDispatchError(command));
+        const active = runs.find((run) => run.id === current?.activeRunId);
+        const finalized = runs.find((run) => run.id === command.finalizedRunId);
+        // The capture effect still owns the thread's effect lane. Promotion can
+        // commit, but its provider-start effect cannot execute until capture returns.
+        pendingSuccessor =
+          active?.status === "starting" &&
+          active.startedAt === null &&
+          finalized?.checkpointId != null &&
+          (finalized.status === "completed" ||
+            finalized.status === "interrupted" ||
+            finalized.status === "cancelled") &&
+          latestExecutedRun(runs.filter((run) => run.status !== "starting"))?.id === finalized.id;
+      }
+      if (
+        (current?.activeRunId !== command.expectedActiveRunId ||
+          (command.finalizedRunId !== undefined &&
+            current?.activeRunId !== null &&
+            current?.activeRunId !== command.finalizedRunId)) &&
+        !pendingSuccessor
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} active run changed before the metadata update could be applied.`,
+        });
+      }
+    }
     let metadataBranchOverride: string | null | undefined = undefined;
     if (command.type === "thread.metadata.update" && command.requireExclusiveWorktree === true) {
       const targetWorktreePath =
@@ -2577,12 +2608,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           .pipe(mapDispatchError(command)));
       if (!exclusive) {
         if (command.worktreePath !== undefined) {
-          // The session's location is still worth tracking even though its
-          // branch isn't: commit the worktreePath move, but drop the branch.
           metadataBranchOverride = null;
         } else {
-          // No location change in this command; a rejected branch adoption
-          // leaves nothing else worth keeping.
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
@@ -3384,6 +3411,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: updatedThread,
     });
+
+    if (
+      command.type === "thread.metadata.update" &&
+      command.finalizedRunId !== undefined &&
+      command.worktreePath !== undefined &&
+      command.worktreePath !== thread.worktreePath
+    ) {
+      const { checkpointScopes } = yield* projectionStore
+        .getThreadRecords(command.threadId, ["checkpointScopes"])
+        .pipe(mapDispatchError(command));
+      const scope = checkpointScopes.find((candidate) => candidate.kind === "root_run");
+      if (scope !== undefined) {
+        const resolved = yield* runtimePolicy
+          .resolve({ thread: updatedThread, modelSelection: updatedThread.modelSelection })
+          .pipe(mapDispatchError(command));
+        // Capture is durable before location-follow. Refresh the shared root
+        // scope now so an already-promoted successor uses the destination.
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "checkpoint-scope.created",
+          threadId: command.threadId,
+          providerInstanceId: updatedThread.providerInstanceId,
+          occurredAt: now,
+          payload: { ...scope, cwd: resolved.cwd ?? command.worktreePath ?? process.cwd() },
+        });
+      }
+    }
 
     if (command.type === "thread.metadata.update" && command.regenerateTitle === true) {
       yield* Ref.update(effects, (existing) => [

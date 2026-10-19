@@ -490,28 +490,6 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
   Layer.provide(layerGitWorkflow),
   Layer.provide(ResourceCleanupService.layer),
   Layer.provide(
-    RunFinalizationService.layerObserver.pipe(
-      Layer.provide(ProjectionStoreV2.layer),
-      Layer.provide(layerPullRequestService),
-      Layer.provide(RuntimeLayer.layerProjectService),
-      // layerThreadManagementProvided is the same orchestrator instance
-      // RuntimeLayer.layerProduction runs; its own remaining requirements
-      // (satisfied for that instance above) must be repeated here too, since a
-      // dependency's open requirements are not inherited from a sibling
-      // `Layer.provide` step. Layer memoization still builds each of these once
-      // and shares it, so this is one orchestrator, not two.
-      Layer.provide(
-        RuntimeLayer.layerThreadManagementProvided.pipe(
-          Layer.provide(ProviderEventIngestor.layerAnalytics),
-          Layer.provide(layerCheckpointStore),
-          Layer.provide(layerGitWorkflow),
-        ),
-      ),
-    ),
-  ),
-  // Provided last so it is in context before the observer above builds the
-  // orchestrator, and with it RunExecutionService, which reads it once.
-  Layer.provide(
     RunFinalizationService.layerTurnObserver.pipe(
       Layer.provide(layerPullRequestService),
       Layer.provide(RuntimeLayer.layerProjectService),

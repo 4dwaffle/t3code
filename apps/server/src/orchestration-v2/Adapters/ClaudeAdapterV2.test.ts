@@ -1120,11 +1120,6 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
   );
 });
 
-// #11078: Claude's EnterWorktree/ExitWorktree move the session's own cwd
-// without any T3 command. A PostToolUse hook on those two tools reports the
-// SDK's own post-tool cwd (the same signal V1's adapter used), which the
-// adapter turns into a provider_session.updated event so the orchestration
-// layer can follow the move at turn end (RunFinalizationService).
 describe("ClaudeAdapterV2 worktree location follow", () => {
   it.effect("reports EnterWorktree/ExitWorktree cwd moves as provider_session.updated", () =>
     Effect.scoped(
@@ -1220,6 +1215,10 @@ describe("ClaudeAdapterV2 worktree location follow", () => {
             Stream.runHead,
           );
           assert.isTrue(Option.isSome(event));
+          assert.equal(
+            Option.isSome(event) ? event.value.providerSession.cwdChangeSource : undefined,
+            originalCwd,
+          );
           return Option.isSome(event) ? event.value.providerSession.cwd : null;
         });
 
@@ -1227,15 +1226,11 @@ describe("ClaudeAdapterV2 worktree location follow", () => {
         yield* fireHook({ cwd: worktreeCwd, toolName: "EnterWorktree" });
         assert.equal(yield* nextSessionUpdate, worktreeCwd);
 
-        // A subagent's own EnterWorktree (agent_id set) is its own isolated
-        // concern, not this (root) session's: it must leave the tracked cwd
-        // at worktreeCwd, so the next root-level report below (to the SAME
-        // subagentCwd) is still a real change and still emits.
-        const subagentCwd = `${originalCwd}/.claude/worktrees/subagent-only`;
-        yield* fireHook({ cwd: subagentCwd, toolName: "EnterWorktree", agentId: "agent-1" });
-        yield* fireHook({ cwd: subagentCwd, toolName: "EnterWorktree" });
-        assert.equal(yield* nextSessionUpdate, subagentCwd);
-
+        yield* fireHook({
+          cwd: `${originalCwd}/.claude/worktrees/subagent-only`,
+          toolName: "EnterWorktree",
+          agentId: "agent-1",
+        });
         yield* fireHook({ cwd: originalCwd, toolName: "ExitWorktree" });
         assert.equal(yield* nextSessionUpdate, originalCwd);
       }).pipe(
@@ -15302,10 +15297,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const NESTED_TOOL_USE_ID = "toolu-steer-nested";
           const FINISHED_TOOL_USE_ID = "toolu-steer-finished";
           const calls: Array<string> = [];
+          const backgroundRequested = yield* Deferred.make<void>();
           let beforeAnswer: Effect.Effect<void> = Effect.void;
           const harness = yield* makeWakeHarnessWithOptions({
             backgroundTasks: (toolUseId) =>
               Effect.sync(() => calls.push(toolUseId)).pipe(
+                Effect.andThen(Deferred.succeed(backgroundRequested, undefined)),
                 Effect.andThen(
                   backgrounding === "answers after the turn ended" ||
                     backgrounding === "answers after the subagent ran again"
@@ -15478,7 +15475,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             backgrounding === "never answers" ||
             backgrounding === "answers after the steer went out"
           ) {
-            yield* awaitUntil(() => calls.length === 1, "background request");
+            yield* Deferred.await(backgroundRequested);
             assert.equal(harness.offeredMessages.length, offered);
             yield* TestClock.adjust("5 seconds");
           }

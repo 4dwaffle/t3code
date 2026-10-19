@@ -247,10 +247,7 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
   ),
 );
 
-// Exported (not just a local composition step) so the worktree-branch-drift
-// follow (#11078) can dispatch commands back into this same orchestrator
-// instance from outside this module, without building a second one.
-export const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
+const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(
     Layer.mergeAll(
       layerOrchestratorProvided,
@@ -374,4 +371,14 @@ export const layerProduction = Layer.mergeAll(
   layerProviderContinuationWorkerProvided,
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
-).pipe(Layer.provide(Scheduler.layer), Layer.provideMerge(layerEventInfrastructure));
+).pipe(
+  Layer.provide(
+    RunFinalizationService.layerObserver.pipe(
+      Layer.provide(
+        Layer.mergeAll(ProjectionStore.layer, layerProjectService, layerThreadManagementProvided),
+      ),
+    ),
+  ),
+  Layer.provide(Scheduler.layer),
+  Layer.provideMerge(layerEventInfrastructure),
+);

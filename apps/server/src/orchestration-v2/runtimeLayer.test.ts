@@ -1,13 +1,29 @@
+import * as FileSystem from "effect/FileSystem";
+import * as CheckpointService from "./CheckpointService.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as RunFinalization from "./RunFinalizationService.ts";
+import * as RunExecution from "./RunExecutionService.ts";
+import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import * as CheckpointCapture from "./CheckpointCaptureService.ts";
+import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
+import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
+import { dispatchCommand } from "./ThreadMessageIntake.ts";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import {
   type ApplicationStoredEvent,
   CheckpointId,
+  CheckpointScopeId,
+  type Project,
   CheckpointRef,
   CommandId,
   ContextTransferId,
@@ -25,6 +41,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderSessionId,
   ProviderTurnId,
   RunId,
   ThreadId,
@@ -72,8 +89,10 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { ClaudeProviderCapabilitiesV2 } from "./Adapters/ClaudeAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -147,16 +166,45 @@ const alternateProviderInstance = {
   },
 } satisfies ProviderInstance;
 
+const claudeProviderInstance = {
+  ...providerInstance,
+  instanceId: ProviderInstanceId.make("claudeAgent"),
+  displayName: "Claude test",
+  driverKind: ProviderDriverKind.make("claudeAgent"),
+  continuationIdentity: {
+    driverKind: ProviderDriverKind.make("claudeAgent"),
+    continuationKey: "claude:test",
+  },
+  orchestrationAdapter: {
+    ...orchestrationAdapter,
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
+  },
+} satisfies ProviderInstance;
+const alternateClaudeProviderInstance = {
+  ...claudeProviderInstance,
+  instanceId: ProviderInstanceId.make("claude_alternate"),
+  orchestrationAdapter: {
+    ...claudeProviderInstance.orchestrationAdapter,
+    instanceId: ProviderInstanceId.make("claude_alternate"),
+  },
+} satisfies ProviderInstance;
+
 const layerTestProviderInstanceRegistry = Layer.succeed(
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   {
     getInstance: (instanceId) =>
       Effect.succeed(
-        [providerInstance, alternateProviderInstance].find(
+        [providerInstance, alternateProviderInstance, claudeProviderInstance].find(
           (instance) => instanceId === instance.instanceId,
         ),
       ),
-    listInstances: Effect.succeed([providerInstance, alternateProviderInstance]),
+    listInstances: Effect.succeed([
+      providerInstance,
+      alternateProviderInstance,
+      claudeProviderInstance,
+    ]),
     listUnavailable: Effect.succeed([]),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.never,
@@ -1955,138 +2003,461 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
-  // #11078: the worktree-branch-drift follow (RunFinalizationService)
-  // persists a thread's live checked-out branch through this same command.
-  // These guards are decided here, against the live projection, rather than
-  // by the caller before dispatch, so a race between that read and this
-  // command's turn to commit cannot adopt a stale branch or a worktree that
-  // started being shared in between.
-  it.effect("rejects a thread.metadata.update whose branch or worktree exclusivity is stale", () =>
+  it.effect(
+    "follows the root session through worktree moves while preserving explicit handoff",
+    () =>
+      Effect.forEach(["root", "subdirectory"] as const, (projectLayout) =>
+        Effect.gen(function* () {
+          const modelSelection = {
+            instanceId: claudeProviderInstance.instanceId,
+            model: "claude-sonnet-4-6",
+          };
+          const driver = claudeProviderInstance.driverKind;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const eventSink = yield* EventSink.EventSinkV2;
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const projectId = ProjectId.make("follow-project");
+          const threadId = ThreadId.make("follow-thread");
+          const siblingId = ThreadId.make("follow-sibling");
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped();
+          const projectRoot = projectLayout === "root" ? root : `${root}/src`;
+          const worktree = `${root}/.claude/worktrees/feature`;
+          const shared = `${root}/shared`;
+          const vcsProcess = yield* VcsProcess.VcsProcess;
+          const git = (args: ReadonlyArray<string>) =>
+            vcsProcess.run({ operation: "test.fixture", command: "git", args, cwd: root });
+          yield* git(["init", "-b", "main"]);
+          yield* git([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+          ]);
+          yield* git(["worktree", "add", "-b", "feature", worktree]);
+          yield* git(["worktree", "add", "-b", "sibling-branch", shared]);
+          for (const cwd of [root, projectRoot, worktree, shared]) {
+            yield* fs.makeDirectory(`${cwd}/src`, { recursive: true });
+          }
+          const now = yield* DateTime.now;
+          yield* seedProject({
+            projectId,
+            title: "Follow",
+            workspaceRoot: projectRoot,
+            defaultModelSelection: null,
+            createdAt: "2026-09-07T00:00:00.000Z",
+          });
+          let ordinal = 0;
+          const nextId = () => `follow-${++ordinal}`;
+          const create = (id: ThreadId, worktreePath: string | null) =>
+            orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(nextId()),
+              threadId: id,
+              projectId,
+              createdBy: "user",
+              creationSource: "web",
+              title: "Follow worktree",
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath,
+            });
+          yield* create(threadId, null);
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(nextId()),
+            threadId,
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make(nextId()),
+            text: "Move worktree",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+          });
+          const initial = yield* orchestrator.getThreadProjection(threadId);
+          const run = initial.runs[0]!;
+          const providerThread = initial.providerThreads[0]!;
+          yield* TestClock.adjust("1 millis");
+          const observedAt = yield* DateTime.now;
+          const session = {
+            id: providerThread.providerSessionId!,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            status: "ready" as const,
+            cwd: worktree,
+            model: modelSelection.model,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            createdAt: now,
+            updatedAt: observedAt,
+            cwdChangeSource: projectRoot,
+            lastError: null,
+          };
+          const reportCwd = (cwd: string) =>
+            Effect.gen(function* () {
+              yield* TestClock.adjust("1 millis");
+              const updatedAt = yield* DateTime.now;
+              yield* eventSink.write({
+                events: [
+                  {
+                    id: EventId.make(nextId()),
+                    type: "provider-session.updated",
+                    threadId,
+                    occurredAt: updatedAt,
+                    payload: {
+                      ...session,
+                      cwd,
+                      updatedAt,
+                      cwdChangeSource:
+                        (yield* orchestrator.getThreadProjection(threadId)).thread.worktreePath ??
+                        projectRoot,
+                    },
+                  },
+                ],
+              });
+            });
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(nextId()),
+                type: "provider-session.attached",
+                threadId,
+                occurredAt: observedAt,
+                payload: session,
+              },
+              {
+                id: EventId.make(nextId()),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: observedAt,
+                payload: { ...run, status: "completed", startedAt: now, completedAt: observedAt },
+              },
+            ],
+          });
+          const otherSession = {
+            ...session,
+            id: ProviderSessionId.make("follow-other-session"),
+            cwd: `${root}/unrelated`,
+          };
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(nextId()),
+                type: "provider-session.attached",
+                threadId,
+                occurredAt: now,
+                payload: otherSession,
+              },
+            ],
+          });
+          const refs = new Map<string, string | null>([
+            [root, "main"],
+            [worktree, "feature"],
+          ]);
+          const refreshed: string[] = [];
+          const observerLayer = RunFinalization.layerObserver.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                layerVcsDriverRegistryTest,
+                Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),
+                Layer.mock(PullRequestService.PullRequestService)({
+                  refreshAfterTurn: () => Effect.void,
+                }),
+                Layer.mock(ProjectService.ProjectService)({
+                  getById: () =>
+                    Effect.succeed(
+                      Option.some({
+                        id: projectId,
+                        workspaceRoot: projectRoot,
+                      } as Project),
+                    ),
+                }),
+                Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
+                  refreshLocalStatus: (cwd) =>
+                    Effect.succeed({
+                      isRepo: true,
+                      hasPrimaryRemote: true,
+                      isDefaultRef:
+                        refs.get(cwd.endsWith("/src") ? cwd.slice(0, -4) : cwd) === "main",
+                      refName: refs.get(cwd.endsWith("/src") ? cwd.slice(0, -4) : cwd) ?? null,
+                      hasWorkingTreeChanges: false,
+                      workingTree: { files: [], insertions: 0, deletions: 0 },
+                    }),
+                  refreshPullRequestStatus: (cwd) =>
+                    Effect.sync(() => {
+                      refreshed.push(cwd);
+                      return null;
+                    }),
+                }),
+              ),
+            ),
+          );
+          const scopeId = CheckpointScopeId.make("follow-scope");
+          let checkpointCwd = projectRoot;
+          const finalizationLayer = RunFinalization.layer.pipe(
+            Layer.provide(observerLayer),
+            Layer.provide(
+              Layer.mock(CheckpointCapture.CheckpointCaptureServiceV2)({
+                execute: () => Effect.void,
+              }),
+            ),
+            Layer.provide(
+              Layer.succeed(ProjectionStore.ProjectionStoreV2, {
+                ...projections,
+                getCheckpointContext: () =>
+                  Effect.succeed({
+                    runs: [],
+                    checkpoints: [],
+                    checkpointScopes: [
+                      {
+                        id: scopeId,
+                        runId: run.id,
+                        kind: "root_run",
+                        cwd: checkpointCwd,
+                      },
+                    ],
+                  } as never),
+              }),
+            ),
+          );
+          yield* Effect.gen(function* () {
+            const finalization = yield* RunFinalization.RunFinalizationService;
+            const finish = () =>
+              Effect.gen(function* () {
+                const runId = RunId.make(nextId());
+                const completedAt = yield* DateTime.now;
+                yield* eventSink.write({
+                  events: [
+                    {
+                      id: EventId.make(nextId()),
+                      type: "run.updated",
+                      threadId,
+                      runId,
+                      occurredAt: completedAt,
+                      payload: {
+                        ...run,
+                        id: runId,
+                        ordinal,
+                        status: "completed",
+                        startedAt: now,
+                        completedAt,
+                      },
+                    },
+                  ],
+                });
+                yield* finalization.finalize({ threadId, runId, scopeId });
+              });
+            const location = Effect.map(
+              orchestrator.getThreadProjection(threadId),
+              (projection) => ({
+                worktreePath: projection.thread.worktreePath,
+                branch: projection.thread.branch,
+                sessions: projection.providerSessions.map((value) => value.id),
+              }),
+            );
+            yield* finish();
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(nextId()),
+                  type: "provider-session.detached",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    providerSessionId: otherSession.id,
+                    detachedAt: now,
+                    reason: "Other session closed.",
+                  },
+                },
+              ],
+            });
+            expect.soft(yield* location, projectLayout).toEqual({
+              worktreePath: worktree,
+              branch: "feature",
+              sessions: [session.id],
+            });
+
+            checkpointCwd = worktree;
+            refs.set(worktree, "main");
+            yield* finish();
+            assert.equal((yield* location).branch, "main");
+            assert.deepEqual(refreshed, [worktree]);
+
+            yield* create(siblingId, null);
+            yield* reportCwd(`${projectRoot}/src`);
+            yield* finish();
+            expect.soft(yield* location, projectLayout).toEqual({
+              worktreePath: null,
+              branch: null,
+              sessions: [session.id],
+            });
+
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).providerSessions[0]?.cwd,
+              `${projectRoot}/src`,
+            );
+
+            expect
+              .soft(
+                (yield* orchestrator.getThreadProjection(threadId)).checkpointScopes.find(
+                  (scope) => scope.kind === "root_run",
+                )?.cwd,
+                projectLayout,
+              )
+              .toBe(projectRoot);
+
+            checkpointCwd = projectRoot;
+            refs.set(worktree, null);
+            yield* reportCwd(worktree);
+            yield* finish();
+            assert.isNull((yield* location).branch);
+            checkpointCwd = worktree;
+            refs.set(worktree, "t3code/0a1b2c3d");
+            yield* finish();
+            assert.isNull((yield* location).branch);
+            refs.set(worktree, "feature-again");
+            yield* finish();
+            assert.equal((yield* location).branch, "feature-again");
+
+            yield* dispatchCommand({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(nextId()),
+              threadId: siblingId,
+              worktreePath: shared,
+            });
+            refs.set(shared, "sibling-branch");
+            yield* reportCwd(`${shared}/src`);
+            yield* finish();
+            expect.soft(yield* location, projectLayout).toEqual({
+              worktreePath: shared,
+              branch: null,
+              sessions: [session.id],
+            });
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).providerSessions[0]?.cwd,
+              `${shared}/src`,
+            );
+            checkpointCwd = shared;
+            yield* finish();
+            expect.soft((yield* location).branch, projectLayout).toBeNull();
+
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(nextId()),
+                  type: "provider-session.attached",
+                  threadId: siblingId,
+                  occurredAt: now,
+                  payload: { ...session, cwd: worktree, cwdChangeSource: shared },
+                },
+              ],
+            });
+            yield* finish();
+            expect.soft((yield* location).worktreePath, projectLayout).toBe(shared);
+
+            yield* dispatchCommand({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(nextId()),
+              threadId: siblingId,
+              worktreePath: null,
+            });
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(nextId()),
+              threadId,
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make(nextId()),
+              text: "Next turn",
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* finish();
+            expect.soft((yield* location).worktreePath, projectLayout).toBe(shared);
+
+            const handoff = {
+              type: "thread.metadata.update" as const,
+              commandId: CommandId.make(nextId()),
+              threadId,
+              worktreePath: `${root}/handoff`,
+              preserveProviderSession: true,
+              expectedActiveRunId: RunId.make("forged-run"),
+              finalizedRunId: RunId.make("forged-finalized-run"),
+            };
+            yield* dispatchCommand(handoff);
+            expect.soft(yield* location, projectLayout).toEqual({
+              worktreePath: `${root}/handoff`,
+              branch: null,
+              sessions: [],
+            });
+          }).pipe(Effect.provide(Layer.fresh(finalizationLayer)));
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(Layer.fresh(layerTest), VcsProcess.layer).pipe(
+              Layer.provideMerge(layerServerConfig.pipe(Layer.provideMerge(layerPlatformTest))),
+            ),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("rejects stale branch observations and worktrees that become shared", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const projectId = ProjectId.make("runtime-layer-drift-guard-project");
-      const threadId = ThreadId.make("runtime-layer-drift-guard-thread");
-      const siblingId = ThreadId.make("runtime-layer-drift-guard-sibling");
-      const worktreePath = "/tmp/runtime-layer-drift-guard-worktree";
-      yield* seedProject({
-        projectId,
-        title: "Drift guard project",
-        workspaceRoot: "/workspace/drift-guard",
-        defaultModelSelection: null,
-        createdAt: "2026-09-07T00:00:00.000Z",
-      });
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        createdBy: "user",
-        creationSource: "web",
-        commandId: CommandId.make("runtime-layer-drift-guard-create"),
-        threadId,
-        projectId,
-        title: "Drift guard thread",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: "feature",
-        worktreePath,
-      });
-
-      // expectedBranch is a compare-and-swap, same as the existing
-      // expectedWorktreePath: a stale read of the branch must not commit.
-      const staleBranch = yield* orchestrator
-        .dispatch({
-          type: "thread.metadata.update",
-          commandId: CommandId.make("runtime-layer-drift-guard-stale-branch"),
-          threadId,
-          branch: "other",
-          expectedBranch: "not-the-current-branch",
-        })
-        .pipe(Effect.flip);
-      assert.instanceOf(staleBranch, Orchestrator.OrchestratorDispatchError);
-      assert.equal((yield* orchestrator.getThreadProjection(threadId)).thread.branch, "feature");
-
-      // requireExclusiveWorktree succeeds while this thread is the
-      // worktree's only owner.
-      yield* orchestrator.dispatch({
-        type: "thread.metadata.update",
-        commandId: CommandId.make("runtime-layer-drift-guard-exclusive-ok"),
-        threadId,
-        branch: "feature-renamed",
-        expectedBranch: "feature",
-        expectedWorktreePath: worktreePath,
-        requireExclusiveWorktree: true,
-      });
-      assert.equal(
-        (yield* orchestrator.getThreadProjection(threadId)).thread.branch,
-        "feature-renamed",
-      );
-
-      // A sibling thread starts sharing the same worktree.
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        createdBy: "user",
-        creationSource: "web",
-        commandId: CommandId.make("runtime-layer-drift-guard-sibling-create"),
-        threadId: siblingId,
-        projectId,
-        title: "Drift guard sibling",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: "feature",
-        worktreePath,
-      });
-
-      // The same requireExclusiveWorktree update now rejects: this is
-      // rechecked against the live projection (which now shows the
-      // sibling), not against a read taken before the sibling existed.
-      const sharedWorktree = yield* orchestrator
-        .dispatch({
-          type: "thread.metadata.update",
-          commandId: CommandId.make("runtime-layer-drift-guard-exclusive-shared"),
-          threadId,
-          branch: "feature-renamed-again",
-          expectedBranch: "feature-renamed",
-          expectedWorktreePath: worktreePath,
-          requireExclusiveWorktree: true,
-        })
-        .pipe(Effect.flip);
-      assert.instanceOf(sharedWorktree, Orchestrator.OrchestratorDispatchError);
-      assert.equal(
-        (yield* orchestrator.getThreadProjection(threadId)).thread.branch,
-        "feature-renamed",
-      );
-
-      // A move into a worktree another thread already uses still commits the
-      // location, but leaves the branch unset instead of claiming the other
-      // thread's branch (followWorktreeMove after Claude's EnterWorktree).
-      const movedId = ThreadId.make("runtime-layer-drift-guard-moved");
-      yield* orchestrator.dispatch({
-        type: "thread.create",
-        createdBy: "user",
-        creationSource: "web",
-        commandId: CommandId.make("runtime-layer-drift-guard-moved-create"),
-        threadId: movedId,
-        projectId,
-        title: "Drift guard moved thread",
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: "main",
-        worktreePath: null,
-      });
-      yield* orchestrator.dispatch({
-        type: "thread.metadata.update",
-        commandId: CommandId.make("runtime-layer-drift-guard-moved-follow"),
-        threadId: movedId,
-        worktreePath,
-        expectedWorktreePath: null,
-        branch: "feature-renamed",
-        preserveProviderSession: true,
-        requireExclusiveWorktree: true,
-      });
-      const moved = (yield* orchestrator.getThreadProjection(movedId)).thread;
-      assert.equal(moved.worktreePath, worktreePath);
-      assert.isNull(moved.branch);
+      const projectId = ProjectId.make("follow-guards-project");
+      const threadId = ThreadId.make("follow-guards-thread");
+      const worktreePath = "/repo/guards";
+      for (const id of [threadId, ThreadId.make("follow-guards-sibling")]) {
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${id}`),
+          threadId: id,
+          projectId,
+          createdBy: "user",
+          creationSource: "web",
+          title: "Guard",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "feature",
+          worktreePath,
+        });
+        const failure = yield* orchestrator
+          .dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make(`update-${id}`),
+            threadId,
+            branch: "stale",
+            expectedBranch: id === threadId ? "old" : "feature",
+            expectedWorktreePath: worktreePath,
+            requireExclusiveWorktree: true,
+          })
+          .pipe(Effect.match({ onFailure: (error) => error, onSuccess: () => null }));
+        assert.instanceOf(failure, Orchestrator.OrchestratorDispatchError);
+        assert.equal((yield* orchestrator.getThreadProjection(threadId)).thread.branch, "feature");
+      }
+      for (const observation of [
+        { expectedActiveRunId: RunId.make("superseded-run") },
+        { expectedWorktreePath: "/repo/previous-worktree" },
+      ]) {
+        const staleRun = yield* orchestrator
+          .dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make(`stale-finalization-${Object.keys(observation)[0]}`),
+            threadId,
+            branch: "stale",
+            ...observation,
+          })
+          .pipe(Effect.match({ onFailure: (error) => error, onSuccess: () => null }));
+        assert.instanceOf(staleRun, Orchestrator.OrchestratorDispatchError);
+        assert.equal((yield* orchestrator.getThreadProjection(threadId)).thread.branch, "feature");
+      }
     }),
   );
 
@@ -6518,3 +6889,955 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
     );
   },
 );
+
+const queueWorktreeInstances = [
+  claudeProviderInstance,
+  alternateClaudeProviderInstance,
+  providerInstance,
+] satisfies ProviderInstance[];
+const layerQueueWorktreeTest = Layer.mergeAll(
+  RunExecution.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        McpAppModelContext.layerEmpty,
+        CheckpointService.layer.pipe(Layer.provide(IdAllocator.layer)),
+        RuntimeLayer.layerEventSink,
+        IdAllocator.layer,
+        TurnItemPositionStore.layer,
+        ProviderEventIngestor.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              RuntimeLayer.layerEventSink,
+              IdAllocator.layer,
+              ProjectionStore.layer,
+              ThreadCommandExecutor.layer,
+              GitVcsDriver.layer,
+            ),
+          ),
+        ),
+      ),
+    ),
+  ),
+  RuntimeLayer.layer.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
+  RuntimeLayer.layerProjectService,
+  RuntimeLayer.layerEventSink,
+  ProjectStore.layer,
+  ProjectionStore.layer,
+  EffectOutbox.layer,
+  ThreadCommandExecutor.layer,
+  RuntimePolicy.layerFromProjectStore.pipe(Layer.provide(ProjectStore.layer)),
+).pipe(
+  Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(McpProviderSessions.layer),
+  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provide(layerCheckpointStoreTest),
+  Layer.provide(layerServerConfig),
+  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(
+    Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+      getInstance: (instanceId) =>
+        Effect.succeed(
+          queueWorktreeInstances.find((instance) => instance.instanceId === instanceId),
+        ),
+      listInstances: Effect.succeed(queueWorktreeInstances),
+      listUnavailable: Effect.succeed([]),
+      streamChanges: Stream.empty,
+      subscribeChanges: Effect.never,
+    }),
+  ),
+  Layer.provide(layerGitWorkflowTest),
+  Layer.provide(WorkspacePaths.layer),
+  Layer.provide(
+    Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({
+      getAvailable: () =>
+        Effect.succeed({
+          repositoryIdentity: null,
+          faviconPath: null,
+          repositoryIdentityResolved: false,
+        }),
+      invalidate: () => Effect.void,
+    }),
+  ),
+  Layer.provide(layerPlatformTest),
+);
+const queueWorktreeVariants = (move: "enter" | "exit-remove") => [
+  ...(["waiting", "interrupted"] as const).flatMap((terminalStatus) =>
+    queueWorktreeInstances.map((instance) => ({ terminalStatus, instance, move })),
+  ),
+  ...(move === "enter"
+    ? [
+        {
+          move,
+          terminalStatus: "waiting" as const,
+          instance: claudeProviderInstance,
+          afterFailure: true,
+        },
+        ...(["root-repoint", "root-repoint-non-git", "root-repoint-linked"] as const).map(
+          (move) => ({
+            move,
+            terminalStatus: "waiting" as const,
+            instance: claudeProviderInstance,
+          }),
+        ),
+        {
+          move: "multiplex-project" as const,
+          terminalStatus: "waiting" as const,
+          instance: providerInstance,
+        },
+        {
+          move: "multiplex-worktree" as const,
+          terminalStatus: "waiting" as const,
+          instance: providerInstance,
+        },
+        {
+          move: "branch-switch" as const,
+          terminalStatus: "waiting" as const,
+          instance: providerInstance,
+        },
+        ...queueWorktreeInstances.slice(0, 2).map((instance) => ({
+          move: "handoff" as const,
+          terminalStatus: "waiting" as const,
+          instance,
+        })),
+      ]
+    : []),
+];
+
+it.layer(Layer.fresh(layerQueueWorktreeTest))("worktree moves with queued messages", (it) => {
+  it.effect.each(["enter", "exit-remove"] as const)(
+    "starts the queued successor at the destination after %s",
+    (direction) =>
+      Effect.forEach(queueWorktreeVariants(direction), (variant) =>
+        Effect.gen(function* () {
+          const { move, terminalStatus, instance } = variant;
+          const afterFailure = "afterFailure" in variant;
+          const rootRepoint =
+            move === "root-repoint" ||
+            move === "root-repoint-non-git" ||
+            move === "root-repoint-linked";
+          const multiplex = move === "multiplex-project" || move === "multiplex-worktree";
+          const sourceInstance =
+            multiplex || move === "branch-switch" ? providerInstance : claudeProviderInstance;
+          const modelSelection = {
+            instanceId: sourceInstance.instanceId,
+            model: sourceInstance === providerInstance ? "gpt-5.4" : "claude-sonnet-4-6",
+          };
+          const driver = sourceInstance.driverKind;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const eventSink = yield* EventSink.EventSinkV2;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const projects = yield* ProjectService.ProjectService;
+          const fs = yield* FileSystem.FileSystem;
+          const root = yield* fs.makeTempDirectoryScoped();
+          const worktree = `${root}/.claude/worktrees/feature`;
+          const vcsProcess = yield* VcsProcess.VcsProcess;
+          const git = (args: ReadonlyArray<string>, allowNonZeroExit = false) =>
+            vcsProcess.run({
+              operation: "test.fixture",
+              command: "git",
+              args,
+              cwd: root,
+              allowNonZeroExit,
+            });
+          yield* git(["init", "-b", "main"]);
+          yield* git([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+          ]);
+          yield* git(["worktree", "add", "-b", "feature", worktree]);
+          const source =
+            move === "exit-remove" ||
+            move === "branch-switch" ||
+            move === "multiplex-worktree" ||
+            move === "root-repoint-linked"
+              ? worktree
+              : root;
+          const destination =
+            multiplex || rootRepoint ? source : move === "exit-remove" ? root : worktree;
+          const openerCwd =
+            move === "multiplex-project" || (rootRepoint && move !== "root-repoint-linked")
+              ? yield* fs.makeTempDirectoryScoped()
+              : root;
+          if (move === "multiplex-project" || move === "root-repoint")
+            yield* git(["-C", openerCwd, "init", "-b", "opener-branch"]);
+          const threadId = ThreadId.make(`queue-worktree-${move}`);
+          const projectId = ProjectId.make(`queue-worktree-project-${move}`);
+          const now = yield* DateTime.now;
+          let ordinal = 0;
+          const nextId = () => `${threadId}:${++ordinal}`;
+          yield* seedProject({
+            projectId,
+            title: "Queued worktree move",
+            workspaceRoot: rootRepoint ? openerCwd : root,
+            defaultModelSelection: null,
+            createdAt: DateTime.formatIso(now),
+          });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(nextId()),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Queued worktree move",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: rootRepoint || source === root ? null : "feature",
+            worktreePath: rootRepoint || source === root ? null : worktree,
+          });
+          const send = (text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(nextId()),
+              threadId,
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make(nextId()),
+              text,
+              ...(text === "Queued successor"
+                ? {
+                    modelSelection: {
+                      instanceId: instance.instanceId,
+                      model:
+                        instance.driverKind === claudeProviderInstance.driverKind
+                          ? "claude-sonnet-4-6"
+                          : "gpt-5.4",
+                    },
+                  }
+                : {}),
+              attachments: [],
+              dispatchMode: { type: "queue_after_active" },
+            });
+          if (rootRepoint) {
+            yield* send("Open retained session");
+            const opened = yield* orchestrator.getThreadProjection(threadId);
+            const openerRun = opened.runs[0]!;
+            const openerThread = opened.providerThreads[0]!;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(nextId()),
+                  type: "provider-session.attached",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    id: openerThread.providerSessionId!,
+                    driver,
+                    providerInstanceId: modelSelection.instanceId,
+                    status: "ready",
+                    cwd: openerCwd,
+                    ...(move === "root-repoint-linked" ? { cwdChangeSource: openerCwd } : {}),
+                    model: modelSelection.model,
+                    capabilities: yield* sourceInstance.orchestrationAdapter.getCapabilities(),
+                    createdAt: now,
+                    updatedAt: now,
+                    lastError: null,
+                  },
+                },
+                {
+                  id: EventId.make(nextId()),
+                  type: "run.updated",
+                  threadId,
+                  runId: openerRun.id,
+                  occurredAt: now,
+                  payload: { ...openerRun, status: "completed", startedAt: now, completedAt: now },
+                },
+              ],
+            });
+            yield* TestClock.adjust("1 millis");
+            const updated = yield* projects.update({
+              projectId,
+              commandId: CommandId.make(nextId()),
+              workspaceRoot: source,
+            });
+            assert.equal(updated.workspaceRoot, source);
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).providerSessions[0]?.cwd,
+              openerCwd,
+            );
+          }
+          let failedMoveAt: DateTime.Utc | undefined;
+          if (afterFailure) {
+            yield* send("Move then fail");
+            const opening = yield* orchestrator.getThreadProjection(threadId);
+            const run = { ...opening.runs[0]!, status: "running" as const, startedAt: now };
+            const providerThread = {
+              ...opening.providerThreads[0]!,
+              nativeThreadRef: {
+                driver,
+                nativeId: `${threadId}:native`,
+                strength: "strong" as const,
+              },
+            };
+            const node = opening.nodes.find((value) => value.id === run.rootNodeId)!;
+            const scope = opening.checkpointScopes.find(
+              (value) => value.id === node.checkpointScopeId,
+            )!;
+            const attempt = {
+              ...opening.attempts.find((value) => value.id === run.activeAttemptId)!,
+              providerTurnId: ProviderTurnId.make(nextId()),
+              startedAt: now,
+            };
+            yield* TestClock.adjust("1 millis");
+            failedMoveAt = yield* DateTime.now;
+            const session = {
+              id: providerThread.providerSessionId!,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "ready" as const,
+              cwd: destination,
+              cwdChangeSource: source,
+              model: modelSelection.model,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: failedMoveAt,
+              lastError: null,
+            };
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(nextId()),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: run,
+                },
+                {
+                  id: EventId.make(nextId()),
+                  type: "provider-session.attached",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    ...session,
+                    cwd: source,
+                    cwdChangeSource: undefined,
+                    updatedAt: now,
+                  },
+                },
+              ],
+            });
+            const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+            const closed = yield* Deferred.make<void>();
+            const execution = yield* RunExecution.RunExecutionServiceV2;
+            yield* execution.startRootRun({
+              commandId: CommandId.make(nextId()),
+              appThread: opening.thread,
+              providerSessionId: session.id,
+              run,
+              rootNode: node,
+              checkpointScope: scope,
+              providerThread,
+              attempt,
+              attemptId: attempt.id,
+              providerTurnOrdinal: 1,
+              modelSelection,
+              runtimePolicy: yield* runtimePolicy.resolve({
+                thread: opening.thread,
+                modelSelection,
+              }),
+              message: {
+                messageId: opening.messages[0]!.id,
+                createdBy: "user",
+                creationSource: "web",
+                text: "Move then fail",
+                attachments: [],
+              },
+              session: {
+                instanceId: modelSelection.instanceId,
+                driver,
+                providerSessionId: session.id,
+                providerSession: session,
+                events: Stream.fromQueue(events),
+                subscribeEvents: Effect.succeed({
+                  events: Stream.fromQueue(events),
+                  close: Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+                }),
+                ensureThread: () => Effect.succeed(providerThread),
+                resumeThread: () => Effect.succeed(providerThread),
+                startTurn: () =>
+                  Effect.gen(function* () {
+                    // The manager persists native cwd before delivering the terminal to the run.
+                    yield* eventSink
+                      .write({
+                        events: [
+                          {
+                            id: EventId.make(nextId()),
+                            type: "provider-session.updated",
+                            threadId,
+                            occurredAt: session.updatedAt,
+                            payload: session,
+                          },
+                        ],
+                      })
+                      .pipe(Effect.orDie);
+                    yield* Queue.offer(events, {
+                      type: "turn.terminal",
+                      driver,
+                      providerThreadId: providerThread.id,
+                      providerTurnId: attempt.providerTurnId,
+                      runOrdinal: run.ordinal,
+                      failureItemOrdinal: 101,
+                      status: "failed",
+                      failure: makeProviderFailure({ class: "provider_error" }),
+                      threadDisposition: "reusable",
+                    });
+                  }),
+                steerTurn: () => Effect.die("unused steer"),
+                interruptTurn: () => Effect.die("unused interrupt"),
+                respondToRuntimeRequest: () => Effect.die("unused request"),
+                readThreadSnapshot: () => Effect.die("unused snapshot"),
+                rollbackThread: () => Effect.die("unused rollback"),
+                forkThread: () => Effect.die("unused fork"),
+              },
+            });
+            yield* Deferred.await(closed);
+            const failed = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(failed.runs[0]?.status, "failed");
+            assert.equal(failed.providerThreads[0]?.status, "idle");
+            assert.equal(failed.providerSessions[0]?.id, session.id);
+            assert.isEmpty(
+              yield* outbox.listByCommandId(
+                CommandId.make(`command:effect:checkpoint.capture:${run.id}`),
+              ),
+            );
+            assert.isFalse(failed.checkpoints.some((checkpoint) => checkpoint.runId === run.id));
+            assert.equal(failed.thread.worktreePath, opening.thread.worktreePath);
+          }
+          yield* TestClock.adjust("1 millis");
+          const startedAt = yield* DateTime.now;
+          yield* send("Move worktree");
+          if (move !== "handoff") yield* send("Queued successor");
+          const before = yield* orchestrator.getThreadProjection(threadId);
+          const run = before.runs[rootRepoint || afterFailure ? 1 : 0]!;
+          const node = before.nodes.find((value) => value.id === run.rootNodeId)!;
+          const providerThread = before.providerThreads.find(
+            (value) => value.id === run.providerThreadId,
+          )!;
+          const scope = before.checkpointScopes.find(
+            (value) => value.id === node.checkpointScopeId,
+          )!;
+          assert.equal(scope.cwd, source);
+          yield* TestClock.adjust("1 millis");
+          const observedAt = yield* DateTime.now;
+          const sessionEvent = {
+            id: EventId.make(nextId()),
+            type: "provider-session.attached" as const,
+            threadId,
+            occurredAt: observedAt,
+            payload: {
+              id: providerThread.providerSessionId!,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "ready" as const,
+              cwd: multiplex || rootRepoint ? openerCwd : move === "handoff" ? source : destination,
+              model: modelSelection.model,
+              capabilities: yield* sourceInstance.orchestrationAdapter.getCapabilities(),
+              createdAt: now,
+              // Only native movement refreshes the adapter session observation.
+              updatedAt:
+                failedMoveAt ?? (rootRepoint || multiplex || move === "handoff" ? now : observedAt),
+              ...(move === "root-repoint-linked"
+                ? { cwdChangeSource: openerCwd }
+                : rootRepoint || multiplex || move === "handoff"
+                  ? {}
+                  : { cwdChangeSource: source }),
+              lastError: null,
+            },
+          };
+          if (multiplex) {
+            const openerProjectId = ProjectId.make(`${threadId}:opener-project`);
+            const openerThreadId = ThreadId.make(`${threadId}:opener`);
+            yield* seedProject({
+              projectId: openerProjectId,
+              title: "First session opener",
+              workspaceRoot: openerCwd,
+              defaultModelSelection: null,
+              createdAt: DateTime.formatIso(now),
+            });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(nextId()),
+              threadId: openerThreadId,
+              projectId: openerProjectId,
+              createdBy: "user",
+              creationSource: "web",
+              title: "First session opener",
+              modelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            });
+            // The instance-wide session keeps its original cwd after the opener detaches.
+            yield* eventSink.write({
+              events: [
+                { ...sessionEvent, id: EventId.make(nextId()), threadId: openerThreadId },
+                {
+                  id: EventId.make(nextId()),
+                  type: "provider-session.detached",
+                  threadId: openerThreadId,
+                  occurredAt: now,
+                  payload: {
+                    providerSessionId: providerThread.providerSessionId!,
+                    detachedAt: now,
+                    reason: "First thread settled.",
+                  },
+                },
+              ],
+            });
+            assert.isEmpty(
+              (yield* orchestrator.getThreadProjection(openerThreadId)).providerSessions,
+            );
+          }
+          if (move === "handoff") {
+            yield* eventSink.write({
+              events: [
+                sessionEvent,
+                {
+                  id: EventId.make(nextId()),
+                  type: "run.updated",
+                  threadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: { ...run, status: "running", startedAt },
+                },
+              ],
+            });
+            yield* dispatchCommand({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(nextId()),
+              threadId,
+              worktreePath: worktree,
+              branch: "feature",
+              expectedWorktreePath: null,
+            });
+            const handedOff = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(handedOff.thread.worktreePath, worktree);
+            assert.equal(handedOff.runs.find((value) => value.id === run.id)?.status, "running");
+            assert.isEmpty(handedOff.providerSessions);
+            yield* send("Queued successor");
+          }
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs[
+            rootRepoint || afterFailure ? 2 : 1
+          ]!;
+          assert.equal(queued.status, "queued");
+          yield* outbox.cancelUnsettled({
+            threadId,
+            effectTypes: ["provider-turn.start"],
+            reason: "The fixture supplies the first provider turn's terminal events.",
+          });
+          if (move === "exit-remove") yield* git(["worktree", "remove", worktree]);
+          if (move === "branch-switch") {
+            yield* git(["-C", worktree, "switch", "-c", "feature-2"]);
+          }
+          const promoted = yield* Deferred.make<void>();
+          const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
+          yield* eventSink.stream({ threadId, afterSequence }).pipe(
+            Stream.runForEach((stored) =>
+              stored.event.type === "run.updated" &&
+              stored.event.payload.id === queued.id &&
+              stored.event.payload.status === "starting"
+                ? Deferred.succeed(promoted, undefined)
+                : Effect.void,
+            ),
+            Effect.forkScoped,
+          );
+          yield* eventSink.writeWithEffects({
+            events: [
+              ...(afterFailure
+                ? []
+                : move === "handoff" || rootRepoint
+                  ? [
+                      {
+                        ...sessionEvent,
+                        id: EventId.make(nextId()),
+                        type: "provider-session.updated" as const,
+                      },
+                    ]
+                  : [sessionEvent]),
+              {
+                id: EventId.make(nextId()),
+                type: "provider-thread.updated",
+                threadId,
+                occurredAt: observedAt,
+                payload: {
+                  ...providerThread,
+                  nativeThreadRef: { driver, nativeId: `${threadId}:native`, strength: "strong" },
+                  status: "idle",
+                },
+              },
+              {
+                id: EventId.make(nextId()),
+                type: "run-attempt.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: observedAt,
+                payload: {
+                  ...before.attempts.find((value) => value.id === run.activeAttemptId)!,
+                  nativeThreadId: `${threadId}:native`,
+                  startedAt,
+                  status: terminalStatus === "waiting" ? "completed" : "interrupted",
+                  completedAt: observedAt,
+                },
+              },
+              {
+                id: EventId.make(nextId()),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: observedAt,
+                payload: {
+                  ...run,
+                  status: terminalStatus,
+                  startedAt,
+                  ...(terminalStatus === "interrupted" ? { completedAt: observedAt } : {}),
+                },
+              },
+              {
+                id: EventId.make(nextId()),
+                type: "node.updated",
+                threadId,
+                runId: run.id,
+                occurredAt: observedAt,
+                payload: { ...node, status: terminalStatus },
+              },
+            ],
+            effects: [
+              {
+                id: `effect:checkpoint.capture:${run.id}`,
+                commandId: CommandId.make(`command:effect:checkpoint.capture:${run.id}`),
+                threadId,
+                request: { type: "checkpoint.capture", runId: run.id, scopeId: scope.id },
+              },
+            ],
+          });
+          const checkpointCwds: string[] = [];
+          const captureLayer = CheckpointCapture.layer.pipe(
+            Layer.provide(
+              CheckpointService.layer.pipe(
+                Layer.provide(
+                  Layer.mock(CheckpointStore.CheckpointStore)({
+                    isGitRepository: (cwd) =>
+                      Effect.sync(() => checkpointCwds.push(cwd)).pipe(
+                        Effect.andThen(fs.exists(cwd)),
+                        Effect.orDie,
+                      ),
+                    hasCheckpointRef: () => Effect.succeed(false),
+                    captureCheckpoint: () => Effect.void,
+                  }),
+                ),
+              ),
+            ),
+            Layer.provide(IdAllocator.layer),
+          );
+          const pullRequestRefreshes: Array<{
+            cwd: string;
+            refName: string;
+            branch: string | null;
+          }> = [];
+          const finalizationLayer = RunFinalization.layer.pipe(
+            Layer.provide(
+              Layer.effect(
+                CheckpointCapture.CheckpointCaptureServiceV2,
+                Effect.gen(function* () {
+                  const capture = yield* CheckpointCapture.CheckpointCaptureServiceV2;
+                  return CheckpointCapture.CheckpointCaptureServiceV2.of({
+                    // Let the real promotion commit before capture returns to its caller.
+                    execute: (input) =>
+                      capture.execute(input).pipe(Effect.andThen(Deferred.await(promoted))),
+                  });
+                }),
+              ).pipe(Layer.provide(captureLayer)),
+            ),
+            Layer.provide(
+              RunFinalization.layerObserver.pipe(
+                Layer.provide(
+                  Layer.mergeAll(
+                    layerVcsDriverRegistryTest,
+                    Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),
+                    Layer.mock(PullRequestService.PullRequestService)({
+                      refreshAfterTurn: () => Effect.void,
+                    }),
+                    Layer.succeed(ProjectService.ProjectService, projects),
+                    Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
+                      refreshLocalStatus: (cwd) =>
+                        Effect.gen(function* () {
+                          const ref = yield* git(
+                            ["-C", cwd, "symbolic-ref", "--short", "HEAD"],
+                            true,
+                          );
+                          return {
+                            isRepo: ref.exitCode === 0,
+                            hasPrimaryRemote: true,
+                            isDefaultRef: ref.stdout.trim() === "main",
+                            refName: ref.exitCode === 0 ? ref.stdout.trim() : null,
+                            hasWorkingTreeChanges: false,
+                            workingTree: { files: [], insertions: 0, deletions: 0 },
+                          };
+                        }).pipe(Effect.orDie),
+                      refreshPullRequestStatus: (cwd) =>
+                        Effect.gen(function* () {
+                          const ref = yield* git(["-C", cwd, "symbolic-ref", "--short", "HEAD"]);
+                          const projection = yield* orchestrator.getThreadProjection(threadId);
+                          pullRequestRefreshes.push({
+                            cwd,
+                            refName: ref.stdout.trim(),
+                            branch: projection.thread.branch,
+                          });
+                          return null;
+                        }).pipe(Effect.orDie),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+          yield* Effect.gen(function* () {
+            const finalization = yield* RunFinalization.RunFinalizationService;
+            const starts: Array<{
+              worktreePath: string | null;
+              branch: string | null;
+              checkpointCwd: string | undefined;
+              startCwd: string | null | undefined;
+            }> = [];
+            const executor = Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+              execute: (effect) =>
+                Effect.gen(function* () {
+                  if (effect.request.type === "checkpoint.capture") {
+                    if (multiplex || rootRepoint || afterFailure) {
+                      const projection = yield* orchestrator.getThreadProjection(threadId);
+                      assert.equal(projection.providerSessions.length, 1);
+                      assert.equal(
+                        projection.providerSessions[0]?.cwd,
+                        afterFailure ? destination : openerCwd,
+                      );
+                      if (afterFailure || move === "root-repoint-linked") {
+                        assert.equal(
+                          providerThread.providerSessionId,
+                          before.providerSessions[0]?.id,
+                        );
+                        assert.equal(run.providerThreadId, before.runs[0]?.providerThreadId);
+                      }
+                      if (rootRepoint) {
+                        assert.equal(
+                          DateTime.toEpochMillis(projection.providerSessions[0]!.updatedAt),
+                          DateTime.toEpochMillis(now),
+                        );
+                        assert.isBelow(
+                          DateTime.toEpochMillis(projection.providerSessions[0]!.updatedAt),
+                          DateTime.toEpochMillis(
+                            projection.runs.find((value) => value.id === run.id)!.startedAt!,
+                          ),
+                        );
+                        assert.equal(
+                          projection.providerSessions[0]?.id,
+                          before.providerSessions[0]?.id,
+                        );
+                        assert.isFalse(
+                          projection.providerSessions[0]!.capabilities.sessions
+                            .supportsMultipleProviderThreadsPerSession,
+                        );
+                      }
+                      assert.isFalse(
+                        yield* projections.isProviderSessionShared(
+                          threadId,
+                          providerThread.providerSessionId!,
+                        ),
+                      );
+                      assert.equal(
+                        (yield* runtimePolicy.resolve({
+                          thread: projection.thread,
+                          modelSelection,
+                        })).cwd,
+                        source,
+                      );
+                    }
+                    yield* finalization.finalize({ threadId, ...effect.request });
+                  } else if (effect.request.type === "provider-turn.start") {
+                    assert.equal(effect.request.runId, queued.id);
+                    const projection = yield* orchestrator.getThreadProjection(threadId);
+                    if (move === "branch-switch") {
+                      assert.equal(
+                        (yield* git([
+                          "-C",
+                          worktree,
+                          "symbolic-ref",
+                          "--short",
+                          "HEAD",
+                        ])).stdout.trim(),
+                        "feature-2",
+                      );
+                      expect
+                        .soft(pullRequestRefreshes, "PR refresh before successor start")
+                        .toEqual([{ cwd: worktree, refName: "feature-2", branch: "feature-2" }]);
+                    }
+                    const queuedNode = projection.nodes.find(
+                      (value) => value.id === queued.rootNodeId,
+                    )!;
+                    const policy = yield* runtimePolicy.resolve({
+                      thread: projection.thread,
+                      modelSelection: queued.modelSelection,
+                    });
+                    starts.push({
+                      startCwd: policy.cwd,
+                      worktreePath: projection.thread.worktreePath,
+                      branch: projection.thread.branch,
+                      checkpointCwd: projection.checkpointScopes.find(
+                        (value) => value.id === queuedNode.checkpointScopeId,
+                      )?.cwd,
+                    });
+                  } else if (effect.request.type === "provider-session.detach") {
+                    assert.equal(
+                      effect.request.providerSessionId,
+                      providerThread.providerSessionId,
+                    );
+                    if (move === "handoff") {
+                      // The provider completed before the queued release effect executed.
+                      const projection = yield* orchestrator.getThreadProjection(threadId);
+                      assert.equal(
+                        projection.attempts.find((value) => value.id === run.activeAttemptId)
+                          ?.status,
+                        "completed",
+                      );
+                    }
+                  } else {
+                    return yield* Effect.die(`Unexpected effect: ${effect.request.type}`);
+                  }
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new EffectWorker.OrchestrationEffectExecutionError({
+                        effectId: effect.id,
+                        effectType: effect.request.type,
+                        cause,
+                      }),
+                  ),
+                ),
+            });
+            yield* Effect.gen(function* () {
+              const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+              yield* worker.drain();
+            }).pipe(Effect.provide(EffectWorker.layer.pipe(Layer.provide(executor))));
+            const after = yield* orchestrator.getThreadProjection(threadId);
+            if (terminalStatus === "waiting") {
+              assert.equal(after.runs.find((value) => value.id === run.id)?.status, "completed");
+            } else {
+              assert.equal(after.runs.find((value) => value.id === run.id)?.status, "interrupted");
+            }
+            assert.equal(
+              after.checkpoints.find((value) => value.runId === run.id)?.status,
+              move === "exit-remove" ? "missing" : "ready",
+            );
+            assert.isTrue(
+              checkpointCwds.length > 0 &&
+                checkpointCwds.every((cwd) => cwd === (move === "handoff" ? destination : source)),
+            );
+            assert.equal(after.thread.providerInstanceId, instance.instanceId);
+            if (instance.instanceId !== modelSelection.instanceId) {
+              assert.notEqual(queued.providerThreadId, providerThread.id);
+              assert.equal(
+                after.providerThreads.find((value) => value.id === run.providerThreadId)
+                  ?.providerSessionId,
+                providerThread.providerSessionId,
+              );
+              assert.notInclude(
+                after.providerSessions.map((value) => value.id),
+                providerThread.providerSessionId,
+              );
+              const successor = after.providerThreads.find(
+                (value) => value.id === queued.providerThreadId,
+              )!;
+              assert.equal(
+                successor.nativeThreadRef?.nativeId ?? null,
+                instance.driverKind === driver ? `${threadId}:native` : null,
+              );
+            }
+            expect
+              .soft(
+                starts,
+                `${move}/${terminalStatus}/${instance.instanceId}${afterFailure ? "/after-failure" : ""}`,
+              )
+              .toEqual([
+                {
+                  worktreePath:
+                    move === "exit-remove" || move === "multiplex-project" || rootRepoint
+                      ? null
+                      : worktree,
+                  branch:
+                    move === "exit-remove" || move === "multiplex-project" || rootRepoint
+                      ? null
+                      : move === "branch-switch"
+                        ? "feature-2"
+                        : "feature",
+                  checkpointCwd: destination,
+                  startCwd: destination,
+                },
+              ]);
+            const staleFollow = yield* orchestrator
+              .dispatch({
+                type: "thread.metadata.update",
+                commandId: CommandId.make(nextId()),
+                threadId,
+                worktreePath: source,
+                expectedActiveRunId: queued.id,
+                finalizedRunId: RunId.make("superseded-finalization"),
+              })
+              .pipe(Effect.result);
+            assert.equal(staleFollow._tag, "Failure");
+            if (move === "branch-switch") {
+              yield* eventSink.write({
+                events: [
+                  {
+                    id: EventId.make(nextId()),
+                    type: "run.updated",
+                    threadId,
+                    runId: queued.id,
+                    occurredAt: now,
+                    payload: {
+                      ...after.runs.find((value) => value.id === queued.id)!,
+                      status: "running",
+                      startedAt: now,
+                    },
+                  },
+                ],
+              });
+              const lateFollow = yield* orchestrator
+                .dispatch({
+                  type: "thread.metadata.update",
+                  commandId: CommandId.make(nextId()),
+                  threadId,
+                  branch: "stale",
+                  expectedBranch: after.thread.branch,
+                  expectedWorktreePath: worktree,
+                  expectedActiveRunId: queued.id,
+                  finalizedRunId: run.id,
+                  requireExclusiveWorktree: true,
+                })
+                .pipe(Effect.result);
+              assert.equal(lateFollow._tag, "Failure");
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(threadId)).thread.branch,
+                after.thread.branch,
+              );
+            }
+          }).pipe(Effect.provide(finalizationLayer));
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(Layer.fresh(layerQueueWorktreeTest), VcsProcess.layer).pipe(
+              Layer.provideMerge(layerServerConfig.pipe(Layer.provideMerge(layerPlatformTest))),
+            ),
+          ),
+        ),
+      ),
+  );
+});

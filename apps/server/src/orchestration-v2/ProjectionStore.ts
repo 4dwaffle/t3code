@@ -375,27 +375,6 @@ export interface ProjectionStoreV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
-  /**
-   * Whether another active (non-deleted, non-archived) thread in the same
-   * project records the same worktreePath. Backs the worktree-branch-drift
-   * follow's exclusivity guard (#11078): two threads sharing one worktree
-   * make "whose branch is it" ambiguous, so a drifted checkout is only
-   * adopted while a thread is its sole owner.
-   *
-   * This read is not part of the same atomic commit as the write it gates:
-   * the orchestrator serializes commands per thread
-   * (KeyedSerialExecutor keyed by threadId), not globally, so two different
-   * threads' commands can run this read and their own commit concurrently.
-   * If both are the first to move into the same previously-unrecorded
-   * worktree, both can see "not shared" and both adopt a branch there. This
-   * is judged acceptable rather than worth a second, worktreePath-keyed lock
-   * (which would need careful ordering against the existing per-thread one
-   * to add zero deadlock risk, for a narrow race): the bad outcome is
-   * cosmetic, not data loss, and self-corrects the next time either
-   * thread's branch or location actually changes again, since that
-   * re-evaluates this same check against the (by then) genuinely shared
-   * worktree and drops the branch.
-   */
   readonly hasSiblingThreadWithWorktreePath: (input: {
     readonly threadId: ThreadId;
     readonly projectId: ProjectId;
@@ -521,7 +500,13 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     targetInstanceId?: ProviderInstanceId,
   ) => Effect.Effect<ProjectionThreadProviderContext, ProjectionStoreV2Error>;
-  /** Whether a provider session is also bound to a thread other than `threadId`. */
+  readonly getProviderSession: (
+    threadId: ThreadId,
+    providerSessionId: ProviderSessionId,
+  ) => Effect.Effect<
+    OrchestrationV2ThreadProjection["providerSessions"][number] | undefined,
+    ProjectionStoreV2Error
+  >;
   readonly isProviderSessionShared: (
     threadId: ThreadId,
     providerSessionId: ProviderSessionId,
@@ -926,6 +911,10 @@ export function applyToProjection(
  */
 export interface ProjectionReplayState {
   readonly projections: Map<ThreadId, OrchestrationV2ThreadProjection>;
+  readonly providerSessions: Map<
+    ProviderSessionId,
+    OrchestrationV2ThreadProjection["providerSessions"][number]
+  >;
   readonly providerSessionThreadIds: Map<ProviderSessionId, ReadonlySet<ThreadId>>;
   readonly providerThreadInstanceIds: Map<ProviderThreadId, ProviderInstanceId>;
 }
@@ -933,6 +922,7 @@ export interface ProjectionReplayState {
 function makeProjectionReplayState(): ProjectionReplayState {
   return {
     projections: new Map(),
+    providerSessions: new Map(),
     providerSessionThreadIds: new Map(),
     providerThreadInstanceIds: new Map(),
   };
@@ -960,6 +950,12 @@ function applyToProjectionReplayState(
     }
   }
   state.projections.set(event.threadId, next);
+  if (
+    event.type === "provider-session.attached" ||
+    (event.type === "provider-session.updated" && state.providerSessions.has(event.payload.id))
+  ) {
+    state.providerSessions.set(event.payload.id, event.payload);
+  }
 
   switch (event.type) {
     case "provider-thread.updated": {
@@ -1016,6 +1012,9 @@ function applyToProjectionReplayState(
       boundThreadIds.delete(event.threadId);
       if (boundThreadIds.size === 0) {
         state.providerSessionThreadIds.delete(event.payload.providerSessionId);
+        if (event.payload.reason === "Workspace changed.") {
+          state.providerSessions.delete(event.payload.providerSessionId);
+        }
       } else {
         state.providerSessionThreadIds.set(event.payload.providerSessionId, boundThreadIds);
       }
@@ -2207,7 +2206,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at,
                 payload_json
               )
-              VALUES (
+              SELECT
                 ${event.payload.id},
                 ${event.threadId},
                 ${event.payload.providerInstanceId},
@@ -2217,7 +2216,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.model},
                 ${stringField(payload, "updatedAt")},
                 ${payloadJson}
-              )
+              WHERE ${event.type === "provider-session.attached" ? 1 : 0} = 1
+                OR EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_provider_sessions
+                  WHERE provider_session_id = ${event.payload.id}
+                )
               ON CONFLICT(provider_session_id)
               DO UPDATE SET
                 thread_id = excluded.thread_id,
@@ -2246,6 +2249,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE provider_session_id = ${event.payload.providerSessionId}
                 AND thread_id = ${event.threadId}
             `;
+            // An explicit handoff revokes the old runtime location; queue promotion retains it.
+            if (event.payload.reason === "Workspace changed.") {
+              yield* sql`
+                DELETE FROM orchestration_v2_projection_provider_sessions
+                WHERE provider_session_id = ${event.payload.providerSessionId}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_provider_session_bindings
+                    WHERE provider_session_id = ${event.payload.providerSessionId}
+                  )
+              `;
+            }
             break;
           }
           case "provider-thread.updated": {
@@ -4677,6 +4691,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const getProviderSession: ProjectionStoreV2Shape["getProviderSession"] = (
+      threadId,
+      providerSessionId,
+    ) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<PayloadRow>`
+          SELECT payload_json FROM orchestration_v2_projection_provider_sessions
+          WHERE provider_session_id = ${providerSessionId}
+        `;
+        return rows[0] === undefined
+          ? undefined
+          : yield* decodeProviderSessionPayload(rows[0].payload_json);
+      }).pipe(Effect.mapError(controlReadError(threadId)));
+
     const isProviderSessionShared: ProjectionStoreV2Shape["isProviderSessionShared"] = (
       threadId,
       providerSessionId,
@@ -6156,6 +6184,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRuntimeRecoveryProjection,
       getRunningTurnContext,
       getThreadProviderContext,
+      getProviderSession,
       isProviderSessionShared,
       getRuntimeResponseContext,
       getCheckpointContext,
@@ -6199,6 +6228,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const result = yield* Ref.modify(replayState, (existing) => {
             const next: ProjectionReplayState = {
               projections: new Map(existing.projections),
+              providerSessions: new Map(existing.providerSessions),
               providerSessionThreadIds: new Map(existing.providerSessionThreadIds),
               providerThreadInstanceIds: new Map(existing.providerThreadInstanceIds),
             };
@@ -6591,6 +6621,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ),
           };
         }),
+      getProviderSession: (_threadId, providerSessionId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => state.providerSessions.get(providerSessionId)),
+        ),
       isProviderSessionShared: (threadId, providerSessionId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) =>

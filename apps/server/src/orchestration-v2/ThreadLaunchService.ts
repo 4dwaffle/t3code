@@ -490,95 +490,73 @@ const make = Effect.gen(function* () {
       ) {
         const oldBranch = branch;
         const worktreeCwd = worktreePath;
-        branchRename = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
-          Effect.flatMap(({ branch: newBranch, exactName }) =>
-            // Generation takes a beat, during which the agent can check out
-            // a real branch itself. Re-checking right before the git rename
-            // (rather than trusting the stamp this task started with) keeps
-            // the rename from rewriting a ref nothing has checked out
-            // anymore; the expectedBranch compare-and-swap
-            // below is the same guard for the thread's metadata stamp. The
-            // status cache can still hold the branch from before the switch.
-            git.invalidateLocalStatus(worktreeCwd).pipe(
-              Effect.andThen(git.localStatus({ cwd: worktreeCwd })),
-              Effect.flatMap((local) =>
-                local.refName !== oldBranch
-                  ? Effect.void
-                  : git
-                      .renameBranch({
-                        cwd: worktreeCwd,
-                        oldBranch,
-                        newBranch,
-                        ...(exactName ? { exactName: true } : {}),
-                      })
-                      .pipe(
-                        Effect.flatMap((renamed) =>
-                          Effect.gen(function* () {
-                            yield* threads
-                              .dispatch({
-                                type: "thread.metadata.update",
-                                commandId: CommandId.make(`${input.commandId}:branch-rename`),
-                                threadId,
-                                branch: renamed.branch,
-                                worktreePath: worktreeCwd,
-                                expectedBranch: oldBranch,
-                                expectedWorktreePath: worktreeCwd,
-                              })
-                              .pipe(
-                                Effect.catchCause((cause) =>
-                                  Effect.logWarning("Parent thread worktree branch update failed", {
-                                    threadId,
-                                    cause,
-                                  }),
-                                ),
-                              );
-                            // Updating the parent first makes later subagents inherit the new name.
-                            // Re-read after each pass for children of subagents updated in that pass.
-                            const visited = new Set([threadId]);
-                            while (true) {
-                              const snapshot = yield* threads.getShellSnapshot();
-                              const sharing = [
-                                ...snapshot.threads,
-                                ...snapshot.archivedThreads,
-                              ].filter(
-                                (thread) =>
-                                  !visited.has(thread.id) &&
-                                  thread.worktreePath === worktreeCwd &&
-                                  thread.branch === oldBranch,
-                              );
-                              if (sharing.length === 0) break;
-                              for (const thread of sharing) {
-                                visited.add(thread.id);
-                                yield* threads
-                                  .dispatch({
-                                    type: "thread.metadata.update",
-                                    commandId: CommandId.make(
-                                      `${input.commandId}:branch-rename:${thread.id}`,
-                                    ),
-                                    threadId: thread.id,
-                                    branch: renamed.branch,
-                                    expectedBranch: oldBranch,
-                                    expectedWorktreePath: worktreeCwd,
-                                  })
-                                  .pipe(
-                                    Effect.catchCause((cause) =>
-                                      Effect.logWarning(
-                                        "Shared thread worktree branch update failed",
-                                        {
-                                          threadId: thread.id,
-                                          cause,
-                                        },
-                                      ),
-                                    ),
-                                  );
-                              }
-                            }
-                          }),
-                        ),
-                      ),
+        branchRename = yield* Effect.gen(function* () {
+          const { branch: newBranch, exactName } = yield* generateBranchNameFor(
+            worktreeCwd,
+            initialMessage,
+          );
+          // Naming can finish after the agent has checked out another branch.
+          yield* git.invalidateLocalStatus(worktreeCwd);
+          const local = yield* git.localStatus({ cwd: worktreeCwd });
+          if (local.refName !== oldBranch) return;
+          const renamed = yield* git.renameBranch({
+            cwd: worktreeCwd,
+            oldBranch,
+            newBranch,
+            ...(exactName ? { exactName: true } : {}),
+          });
+          yield* threads
+            .dispatch({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(`${input.commandId}:branch-rename`),
+              threadId,
+              branch: renamed.branch,
+              worktreePath: worktreeCwd,
+              expectedBranch: oldBranch,
+              expectedWorktreePath: worktreeCwd,
+            })
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Parent thread worktree branch update failed", {
+                  threadId,
+                  cause,
+                }),
               ),
-            ),
-          ),
+            );
+          // Updating the parent first makes later subagents inherit the new name.
+          // Re-read after each pass for children of subagents updated in that pass.
+          const visited = new Set([threadId]);
+          while (true) {
+            const snapshot = yield* threads.getShellSnapshot();
+            const sharing = [...snapshot.threads, ...snapshot.archivedThreads].filter(
+              (thread) =>
+                !visited.has(thread.id) &&
+                thread.worktreePath === worktreeCwd &&
+                thread.branch === oldBranch,
+            );
+            if (sharing.length === 0) break;
+            for (const thread of sharing) {
+              visited.add(thread.id);
+              yield* threads
+                .dispatch({
+                  type: "thread.metadata.update",
+                  commandId: CommandId.make(`${input.commandId}:branch-rename:${thread.id}`),
+                  threadId: thread.id,
+                  branch: renamed.branch,
+                  expectedBranch: oldBranch,
+                  expectedWorktreePath: worktreeCwd,
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("Shared thread worktree branch update failed", {
+                      threadId: thread.id,
+                      cause,
+                    }),
+                  ),
+                );
+            }
+          }
+        }).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("Thread worktree branch rename failed", {
               commandId: input.commandId,

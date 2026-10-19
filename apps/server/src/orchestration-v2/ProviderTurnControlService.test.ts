@@ -237,6 +237,7 @@ it.effect(
           getRuntimeRequest: () => Effect.die("unused getRuntimeRequest"),
           getRunningTurnContext: () => Effect.die("unused getRunningTurnContext"),
           getThreadProviderContext: () => Effect.die("unused getThreadProviderContext"),
+          getProviderSession: () => Effect.die("unused getProviderSession"),
           isProviderSessionShared: () => Effect.die("unused isProviderSessionShared"),
           getRuntimeResponseContext: () => Effect.die("unused getRuntimeResponseContext"),
           getPendingNativeUserInputs: () => Effect.die("unused getPendingNativeUserInputs"),

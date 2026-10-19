@@ -10,26 +10,21 @@ import {
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as CheckpointCapture from "./CheckpointCaptureService.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
-/**
- * A normalized, bounded failure category safe for a log annotation: the
- * error's own tag when it has one (a typed domain failure), or its name
- * otherwise. Never the message or a stringified cause/stack, which can
- * carry git/command output or, further upstream, credentials — the real
- * value stays in the error's own `cause` field for the error chain, not in
- * annotations.
- */
 function failureCategory(error: unknown): string {
   if (
     typeof error === "object" &&
@@ -43,7 +38,6 @@ function failureCategory(error: unknown): string {
   return typeof error;
 }
 
-/** Same bounded category, from a Cause instead of a single error value. */
 function causeCategory(cause: Cause.Cause<unknown>): string {
   for (const reason of cause.reasons) {
     if (Cause.isFailReason(reason)) return failureCategory(reason.error);
@@ -68,13 +62,7 @@ export class RunFinalizationRefreshError extends Schema.TaggedError<RunFinalizat
   { cwd: Schema.String, cause: Schema.Defect() },
 ) {}
 
-/**
- * The project-wide PR refresh RunExecutionService runs when a turn ends. Kept
- * apart from RunFinalizationObserver because that observer dispatches through
- * ThreadManagementService, which builds the orchestrator and so
- * RunExecutionService itself: a reference RunExecutionService reads at
- * construction must not depend on it, or it captures the no-op default.
- */
+// Run execution is built before the finalization observer, which depends on the orchestrator.
 export class RunTurnObserver extends Context.Reference<{
   readonly refreshAfterTurn: (projectId: ProjectId) => Effect.Effect<void>;
 }>("t3/orchestration-v2/RunTurnObserver", {
@@ -96,9 +84,13 @@ export class RunFinalizationFollowError extends Schema.TaggedError<RunFinalizati
     projectId: Schema.optional(ProjectId),
     operation: Schema.Literals([
       "read-thread",
+      "read-run",
       "read-provider-context",
+      "read-provider-session",
       "read-session-sharing",
       "read-project",
+      "detect-repository",
+      "resolve-repository-metadata",
     ]),
     cause: Schema.Defect(),
   },
@@ -110,12 +102,6 @@ export class RunFinalizationObserver extends Context.Reference<{
     readonly threadId: ThreadId;
     readonly runId: RunId;
   }) => Effect.Effect<void, RunFinalizationRefreshError>;
-  /**
-   * Follows the provider session into (or out of) a worktree during a turn
-   * (#11078, e.g. Claude's EnterWorktree/ExitWorktree): the session's cwd is
-   * live-tracked separately from the turn's checkpoint cwd `refresh` uses, so
-   * this compares it against the thread's recorded location on its own.
-   */
   readonly followWorktreeMove: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -153,9 +139,6 @@ const make = Effect.gen(function* () {
           (cause) => new RunFinalizationError({ ...input, operation: "capture-checkpoint", cause }),
         ),
       );
-    // Best-effort: this follow is independent of (and must not block) the
-    // checkpoint-cwd branch refresh below, so a failure here is logged and
-    // swallowed rather than aborting the rest of finalize.
     yield* observer.followWorktreeMove({ threadId: input.threadId, runId: input.runId }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("worktree-location follow failed", {
@@ -197,30 +180,19 @@ export const layerObserver = Layer.effect(
     const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
     const vcsStatus = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const pullRequests = yield* PullRequestService.PullRequestService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const projects = yield* ProjectService.ProjectService;
+    const vcsDrivers = yield* VcsDriverRegistry.VcsDriverRegistry;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
 
-    // A `git checkout`/`git switch` run inside a thread's dedicated worktree
-    // (by the agent or the user) bypasses T3's own commands, so the stamped
-    // branch goes stale (#11078). Follow it here: adopt the checked-out
-    // branch as the thread's branch, but only while the worktree still
-    // belongs to exactly this thread. For a shared worktree, whose branch it
-    // is would be ambiguous, so leave the stamp alone.
-    // Returns whether it dispatched the follow.
     const followBranchDrift = Effect.fn("RunFinalizationService.followBranchDrift")(function* (
       thread: OrchestrationV2ThreadShell,
       cwd: string,
       refName: string,
       runId: RunId,
     ) {
-      // No dedicated worktree to own exclusively, the first-turn auto-rename
-      // is still in flight, or `cwd` is not the thread's worktree. The last
-      // one happens when followWorktreeMove just moved the thread out of the
-      // checkpoint cwd: that cwd's branch belongs to where the thread was,
-      // not where it is. A null branch still follows: followWorktreeMove
-      // records null for a detached HEAD or placeholder branch, and the
-      // branch checked out there later must not leave the thread branchless.
+      // Ignore the old checkpoint checkout after a location move.
       if (
         thread.worktreePath === null ||
         thread.worktreePath !== cwd ||
@@ -228,39 +200,31 @@ export const layerObserver = Layer.effect(
       ) {
         return false;
       }
-      yield* threads
+      return yield* threads
         .dispatch({
           type: "thread.metadata.update",
-          // Keyed by the run being finalized, not the branch: a retry of the
-          // same at-least-once effect must reuse this id (see
-          // checkpoint.capture below), but a later run drifting back to an
-          // earlier branch is a fresh occurrence, not a duplicate.
           commandId: CommandId.make(`command:effect:worktree-branch-drift:${runId}`),
+          finalizedRunId: runId,
           threadId: thread.id,
           branch: refName,
+          expectedActiveRunId: thread.activeRunId,
           expectedBranch: thread.branch,
           expectedWorktreePath: thread.worktreePath,
           requireExclusiveWorktree: true,
         })
         .pipe(
+          Effect.as(true),
           Effect.catch((error) =>
             Effect.logWarning("failed to follow worktree branch drift after run completion", {
               threadId: thread.id,
               previousBranch: thread.branch,
               branch: refName,
               category: failureCategory(error),
-            }),
+            }).pipe(Effect.as(false)),
           ),
         );
-      return true;
     });
 
-    // The provider session's own cwd (tracked live by the adapter, e.g. from
-    // Claude's EnterWorktree/ExitWorktree) moving away from the thread's
-    // recorded worktreePath (#11078). Unlike followBranchDrift, the
-    // worktreePath itself is always worth tracking here, so it commits even
-    // into a shared worktree; only the branch adoption is conditional, via
-    // the same exclusivity check (requireExclusiveWorktree).
     const followWorktreeMove = Effect.fn("RunFinalizationService.followWorktreeMove")(function* ({
       threadId,
       runId,
@@ -268,62 +232,151 @@ export const layerObserver = Layer.effect(
       readonly threadId: ThreadId;
       readonly runId: RunId;
     }) {
-      const failedTo =
-        (operation: RunFinalizationFollowError["operation"], projectId?: ProjectId) =>
-        (cause: unknown) =>
-          new RunFinalizationFollowError({
-            threadId,
-            operation,
-            cause,
-            ...(projectId !== undefined ? { projectId } : {}),
-          });
       const thread = yield* projections
         .getThreadShell(threadId)
-        .pipe(Effect.mapError(failedTo("read-thread")));
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new RunFinalizationFollowError({ threadId, operation: "read-thread", cause }),
+          ),
+        );
       if (!thread) return;
-      if (thread.activeRunId !== null && thread.activeRunId !== runId) return;
-      if (thread.activeProviderThreadId === null) return;
-      // The session this thread's own provider thread runs on, not just any
-      // session bound to the thread: a thread can stay bound to sessions
-      // opened elsewhere, whose cwd says nothing about where this agent is.
+      const { runs } = yield* projections
+        .getThreadRecords(threadId, ["runs"], {
+          runIds:
+            thread.activeRunId === null || thread.activeRunId === runId
+              ? [runId]
+              : [runId, thread.activeRunId],
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) => new RunFinalizationFollowError({ threadId, operation: "read-run", cause }),
+          ),
+        );
+      const run = runs.find((candidate) => candidate.id === runId);
+      if (run?.startedAt == null) return;
+      if (thread.activeRunId !== null && thread.activeRunId !== runId) {
+        const active = runs.find((candidate) => candidate.id === thread.activeRunId);
+        if (active?.status !== "starting" || active.startedAt !== null) return;
+      }
+      const { providerThreadId, providerInstanceId } = run;
+      if (providerThreadId === null) return;
       const providerContext = yield* projections
-        .getThreadProviderContext(threadId, thread.providerInstanceId)
-        .pipe(Effect.mapError(failedTo("read-provider-context")));
+        .getThreadProviderContext(threadId, providerInstanceId)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new RunFinalizationFollowError({
+                threadId,
+                operation: "read-provider-context",
+                cause,
+              }),
+          ),
+        );
+      // A queued successor may already have selected a different provider thread.
       const providerSessionId = providerContext.providerThreads.find(
-        (providerThread) => providerThread.id === thread.activeProviderThreadId,
+        (providerThread) => providerThread.id === providerThreadId,
       )?.providerSessionId;
       if (providerSessionId == null) return;
-      const liveCwd = providerContext.providerSessions.find(
-        (session) => session.id === providerSessionId,
-      )?.cwd;
+      // Queue promotion can detach the binding before this finishing run follows its session.
+      const session = yield* projections.getProviderSession(threadId, providerSessionId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new RunFinalizationFollowError({
+              threadId,
+              operation: "read-provider-session",
+              cause,
+            }),
+        ),
+      );
+      // An instance-wide session's cwd is where it opened, not where this thread is.
+      if (
+        session === undefined ||
+        session.capabilities.sessions.supportsMultipleProviderThreadsPerSession
+      ) {
+        return;
+      }
+      const liveCwd = session.cwd;
       if (liveCwd === undefined) return;
-      // A shared session has one cwd for every thread on it, so a move may
-      // have been another thread's. Leave the location alone rather than
-      // guess.
-      const shared = yield* projections
-        .isProviderSessionShared(threadId, providerSessionId)
-        .pipe(Effect.mapError(failedTo("read-session-sharing")));
+      // A shared session’s cwd does not identify which thread moved.
+      const shared = yield* projections.isProviderSessionShared(threadId, providerSessionId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new RunFinalizationFollowError({
+              threadId,
+              operation: "read-session-sharing",
+              cause,
+            }),
+        ),
+      );
       if (shared) return;
-      const project = yield* projects
-        .getById(thread.projectId)
-        .pipe(Effect.mapError(failedTo("read-project", thread.projectId)));
+      const project = yield* projects.getById(thread.projectId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new RunFinalizationFollowError({
+              threadId,
+              projectId: thread.projectId,
+              operation: "read-project",
+              cause,
+            }),
+        ),
+      );
       if (Option.isNone(project)) return;
       const recordedCwd = thread.worktreePath ?? project.value.workspaceRoot;
-      if (liveCwd === recordedCwd) return;
+      // A failed turn can retain a native move. Only follow while its requested
+      // source is still recorded; a project repoint must invalidate that observation.
+      if (session.cwdChangeSource !== recordedCwd || liveCwd === recordedCwd) return;
 
-      const newWorktreePath = liveCwd === project.value.workspaceRoot ? null : liveCwd;
-      const local = yield* vcsStatus.refreshLocalStatus(liveCwd).pipe(
+      const [observedRepository, projectRepository] = yield* Effect.all([
+        vcsDrivers.detect({ cwd: liveCwd }),
+        vcsDrivers.detect({ cwd: project.value.workspaceRoot }),
+      ]).pipe(
+        Effect.mapError(
+          (cause) =>
+            new RunFinalizationFollowError({ threadId, operation: "detect-repository", cause }),
+        ),
+      );
+      if (
+        observedRepository?.kind !== "git" ||
+        projectRepository?.kind !== "git" ||
+        !observedRepository.repository.metadataPath ||
+        !projectRepository.repository.metadataPath
+      ) {
+        return;
+      }
+      // Git common dirs identify a repository across worktrees and are relative to detection cwd.
+      const [observedCommonDir, projectCommonDir] = yield* Effect.all([
+        fileSystem.realPath(path.resolve(liveCwd, observedRepository.repository.metadataPath)),
+        fileSystem.realPath(
+          path.resolve(project.value.workspaceRoot, projectRepository.repository.metadataPath),
+        ),
+      ]).pipe(
+        Effect.mapError(
+          (cause) =>
+            new RunFinalizationFollowError({
+              threadId,
+              operation: "resolve-repository-metadata",
+              cause,
+            }),
+        ),
+      );
+      if (observedCommonDir !== projectCommonDir) return;
+      // Projects may select a repository subdirectory; sessions keep their factual cwd.
+      const location =
+        observedRepository.repository.rootPath === projectRepository.repository.rootPath
+          ? project.value.workspaceRoot
+          : observedRepository.repository.rootPath;
+      if (location === recordedCwd) return;
+      const newWorktreePath = location === project.value.workspaceRoot ? null : location;
+      const local = yield* vcsStatus.refreshLocalStatus(location).pipe(
         Effect.catch((error) =>
           Effect.logWarning("failed to read git status after a worktree move", {
             threadId,
-            cwd: liveCwd,
+            cwd: location,
             category: failureCategory(error),
           }).pipe(Effect.as(null)),
         ),
       );
-      // A detached HEAD or the still-in-flight first-turn placeholder
-      // branch has nothing adoptable; a non-dedicated location (back to
-      // the main checkout) never adopts a branch either.
       const checkedOutBranch =
         newWorktreePath !== null &&
         local !== null &&
@@ -335,17 +388,15 @@ export const layerObserver = Layer.effect(
       yield* threads
         .dispatch({
           type: "thread.metadata.update",
-          // Keyed by the run being finalized: a retry of the same
-          // at-least-once effect must reuse this id, but a later run
-          // moving again is a fresh occurrence, not a duplicate.
           commandId: CommandId.make(`command:effect:worktree-location-follow:${runId}`),
+          finalizedRunId: runId,
           threadId,
           worktreePath: newWorktreePath,
           expectedWorktreePath: thread.worktreePath,
+          expectedBranch: thread.branch,
+          expectedActiveRunId: thread.activeRunId,
           branch: checkedOutBranch,
-          // The session itself moved and is already working from the new
-          // location; detaching it (the default for an explicit worktree
-          // handoff) would kill useful, in-progress work.
+          // The provider already moved; an explicit client handoff still detaches.
           preserveProviderSession: true,
           ...(checkedOutBranch !== null ? { requireExclusiveWorktree: true } : {}),
         })
@@ -368,20 +419,15 @@ export const layerObserver = Layer.effect(
             [workspaceEntries.refresh(cwd), vcsStatus.refreshLocalStatus(cwd)],
             { concurrency: "unbounded" },
           );
-          // isDefaultRef only rules out looking up a PR for the default
-          // branch below; a dedicated worktree switching to that branch is
-          // still drift and must still be followed, so this cannot bail
-          // before the drift check runs.
           if (local.refName === null) return;
           const thread = yield* projections.getThreadShell(threadId);
           if (!thread) return;
-          if (thread.activeRunId !== null && thread.activeRunId !== runId) return;
           if (thread.branch !== local.refName) {
-            // After following, the cached PR still belongs to the previous
-            // branch. Re-resolve it below, default branch included, so the
-            // toolbar never pairs the new branch with the old branch's PR.
             if (!(yield* followBranchDrift(thread, cwd, local.refName, runId))) return;
-          } else if (local.isDefaultRef) {
+          } else if (
+            local.isDefaultRef ||
+            (thread.activeRunId !== null && thread.activeRunId !== runId)
+          ) {
             return;
           }
           yield* vcsStatus.refreshPullRequestStatus(cwd).pipe(
@@ -389,7 +435,7 @@ export const layerObserver = Layer.effect(
               Effect.logWarning("failed to refresh pull request status after run completion", {
                 threadId,
                 cwd,
-                detail: error.message,
+                category: failureCategory(error),
               }),
             ),
           );

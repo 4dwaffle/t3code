@@ -199,13 +199,7 @@ interface LiveSessionEntry {
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   readonly supportsMultipleProviderThreads: boolean;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
-  /**
-   * The session as last reported by the runtime. `runtime.providerSession` is
-   * the snapshot it opened with; a session can move afterwards (Claude's
-   * EnterWorktree changes its cwd), and attach, release, and every turn start
-   * (through `exposedRuntime.providerSession`) must not write the opening
-   * snapshot back over that.
-   */
+  // Runtime updates must survive attach, turn start, and release.
   readonly providerSession: Ref.Ref<OrchestrationV2ProviderSession>;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
@@ -1729,8 +1723,6 @@ export const layerWithOptions = (
           });
         return {
           ...runtime,
-          // Live, so a turn start publishes where the session is now, not
-          // where it opened (see LiveSessionEntry.providerSession).
           get providerSession() {
             return Ref.getUnsafe(providerSession);
           },

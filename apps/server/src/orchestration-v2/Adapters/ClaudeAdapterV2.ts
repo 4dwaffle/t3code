@@ -26,6 +26,7 @@ import {
   type EffortLevel,
   type ForkSessionOptions,
   type ForkSessionResult,
+  type HookCallback,
   getSubagentMessages,
   query,
   type Options as ClaudeQueryOptions,
@@ -3761,13 +3762,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
 
-        // Live-tracks this session's actual cwd, separately from `session`
-        // (the snapshot ProviderSessionManager first registered this session
-        // with). Claude's EnterWorktree/ExitWorktree tools move the running
-        // session's cwd without going through any T3 command (#11078); the
-        // PostToolUse hook below reports that move here so the server can
-        // follow it at turn end, the same way it already follows a plain
-        // branch change (git checkout) inside an unmoved cwd.
+        // A root session can move without a T3 worktree handoff.
         const trackedCwd = yield* Ref.make(session.cwd);
         const followWorktreeCwdChange = Effect.fn("ClaudeAdapterV2.followWorktreeCwdChange")(
           function* (nextCwd: string) {
@@ -3775,13 +3770,31 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             if (nextCwd === previousCwd) return;
             yield* Ref.set(trackedCwd, nextCwd);
             const updatedAt = yield* DateTime.now;
+            const context = yield* Ref.get(activeTurn);
             yield* emitProviderEvent({
               type: "provider_session.updated",
               driver: CLAUDE_PROVIDER,
-              providerSession: { ...session, cwd: nextCwd, updatedAt },
+              providerSession: {
+                ...session,
+                cwd: nextCwd,
+                cwdChangeSource: context?.input.runtimePolicy.cwd ?? undefined,
+                updatedAt,
+              },
             });
           },
         );
+
+        const onWorktreeTool: HookCallback = (hookInput) =>
+          runPromise(
+            Effect.gen(function* () {
+              // agent_type can also describe the root of a --agent session.
+              if (hookInput.agent_id) return {};
+              if (hookInput.hook_event_name === "PostToolUse") {
+                yield* followWorktreeCwdChange(hookInput.cwd);
+              }
+              return {};
+            }),
+          );
 
         // Reports one root request's usage as the current context. Usage
         // without input is a placeholder, never a measurement.
@@ -8567,34 +8580,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
             hooks: {
-              PostToolUse: [
-                {
-                  matcher: "^(EnterWorktree|ExitWorktree)$",
-                  hooks: [
-                    (hookInput) =>
-                      runPromise(
-                        Effect.gen(function* () {
-                          // BaseHookInput.agent_id (@anthropic-ai/claude-agent-sdk
-                          // sdk.d.ts) is documented as present only for a tool
-                          // call from within a subagent, and as the field to
-                          // use (not agent_type) for exactly this root-vs-
-                          // subagent distinction; a session started with
-                          // --agent carries agent_type without agent_id on its
-                          // own (root) calls, so checking agent_type here would
-                          // misattribute those. The SDK forwards it unmodified
-                          // from the CLI's own hook_callback control request,
-                          // it is not inferred by the SDK layer itself. A
-                          // subagent's worktree is its own isolated concern,
-                          // not this (root) session's.
-                          if (hookInput.hook_event_name === "PostToolUse" && !hookInput.agent_id) {
-                            yield* followWorktreeCwdChange(hookInput.cwd);
-                          }
-                          return {};
-                        }),
-                      ),
-                  ],
-                },
-              ],
+              PostToolUse: [{ matcher: "^(EnterWorktree|ExitWorktree)$", hooks: [onWorktreeTool] }],
             },
           });
           const querySession = yield* queryRunner
