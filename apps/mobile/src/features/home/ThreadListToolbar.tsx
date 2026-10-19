@@ -11,12 +11,11 @@ import {
 import type { MenuAction } from "@react-native-menu/menu";
 
 import { AndroidHeaderIconButton } from "../../components/ui/AndroidScreenHeader";
-import { CompactBrandTitle } from "../../components/CompactBrandTitle";
 import { AndroidAnchoredMenu } from "../../components/ui/AndroidAnchoredMenu";
 import { Menu } from "../../components/ui/Menu";
 import { SearchField } from "../../components/ui/SearchField";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
-import { WorkspaceConnectionTitle } from "./WorkspaceConnectionTitle";
+import { WorkspaceListToolbarRow } from "../workspace/WorkspaceListToolbarRow";
 import { useWorkspaceConnectionState } from "../../state/workspace";
 import { useToolbarLayout } from "../../components/ui/useToolbarLayout";
 
@@ -38,7 +37,7 @@ export function ThreadListToolbar(props: {
   const homeFocused = useNavigationState((state) => state.routes[state.index]?.name === "Home");
   const listFocused =
     homeFocused && (workspace === null || workspace.state.selectedTab === "threads");
-  const { height: toolbarHeight, ...headerPadding } = useToolbarLayout();
+  const { paddingTop, paddingBottom } = useToolbarLayout();
   const connectionState = useWorkspaceConnectionState();
   const { onRequestVisibility, onSearchQueryChange } = props;
   const searchRef = useRef<TextInputInstance>(null);
@@ -89,7 +88,6 @@ export function ThreadListToolbar(props: {
       onChangeText={onSearchQueryChange}
     />
   );
-  // Filter stays trailing in every layout, so it never moves and still applies while searching.
   const filterButton = connectionState.hasConnections ? (
     <AndroidAnchoredMenu actions={props.filterActions} onPressAction={props.onFilterAction}>
       {(open) => (
@@ -106,37 +104,18 @@ export function ThreadListToolbar(props: {
     <View
       onLayout={props.onLayout}
       className={props.sidebar ? "absolute inset-x-0 top-0 z-[4] bg-header px-2" : "bg-header px-2"}
-      style={headerPadding}
+      style={{ paddingTop, paddingBottom }}
     >
-      <View className="flex-row items-center gap-1" style={{ minHeight: toolbarHeight }}>
-        {searching ? (
-          <>
-            <AndroidHeaderIconButton
-              accessibilityLabel="Close search"
-              icon="arrow.left"
-              onPress={closeSearch}
-            />
-            {searchField}
-            {filterButton}
-          </>
-        ) : (
-          <>
-            <View className="min-w-0 flex-1 pl-4">
-              <WorkspaceConnectionTitle
-                grow
-                onPress={props.onOpenEnvironments}
-                brand={<CompactBrandTitle allowFontScaling={false} fit />}
-              />
-            </View>
-            <AndroidHeaderIconButton
-              accessibilityLabel="Search threads"
-              icon="magnifyingglass"
-              onPress={openSearch}
-            />
-            {filterButton}
-          </>
-        )}
-      </View>
+      <WorkspaceListToolbarRow
+        searching={searching}
+        searchField={searchField}
+        onCloseSearch={closeSearch}
+        onOpenSearch={openSearch}
+        searchAccessibilityLabel="Search threads"
+        titleAccessibilityLabel="T3 Code, Threads"
+        onOpenEnvironments={props.onOpenEnvironments}
+        filter={filterButton}
+      />
     </View>
   );
 }

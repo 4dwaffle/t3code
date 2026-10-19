@@ -2,7 +2,7 @@ import type { MenuAction } from "@react-native-menu/menu";
 import {
   createContext,
   use,
-  useEffect,
+  useLayoutEffect,
   useState,
   type Dispatch,
   type ReactNode,
@@ -41,9 +41,10 @@ export function usePullRequestFilterMenu() {
 
 export function usePublishPullRequestFilterMenu(menu: PullRequestFilterMenu | null) {
   const publish = use(PublishContext);
-  useEffect(() => {
-    if (!publish || !menu) return;
-    publish(menu);
-    return () => publish((current) => (current === menu ? null : current));
+  // A layout effect, so the header's filter button lands in the same frame as the list. There is
+  // no cleanup: the list lives exactly as long as this provider, and a hidden tab runs its
+  // cleanups, which would drop the button for a few frames every time the tab came back.
+  useLayoutEffect(() => {
+    if (publish && menu) publish(menu);
   }, [publish, menu]);
 }

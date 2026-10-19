@@ -20,22 +20,36 @@ import {
 const STATUS_SHOW_DELAY_MS = 800;
 const FADE_IN_MS = 250;
 
-function useDelayedConnectionStatus(): WorkspaceConnectionStatusPresentation | null {
+// The delay hides brief reconnects, so it is the workspace's, not each header's. A header that
+// mounts while the status already shows (a tab opened for the first time) shows it at once
+// instead of the brand until its own delay runs out.
+let statusShowing = false;
+
+function useDelayedConnectionStatus(): {
+  readonly presentation: WorkspaceConnectionStatusPresentation;
+  readonly fadeIn: boolean;
+} | null {
   const { state } = useWorkspaceState();
   const presentation = workspaceConnectionStatusPresentation(state);
   const hasStatus = presentation !== null;
-  const [visible, setVisible] = useState(false);
+  const [shown, setShown] = useState<"waited" | "joined" | null>(() =>
+    hasStatus && statusShowing ? "joined" : null,
+  );
 
   useEffect(() => {
     if (!hasStatus) {
-      setVisible(false);
+      statusShowing = false;
+      setShown(null);
       return;
     }
-    const timer = setTimeout(() => setVisible(true), STATUS_SHOW_DELAY_MS);
+    const timer = setTimeout(() => {
+      statusShowing = true;
+      setShown((current) => current ?? "waited");
+    }, STATUS_SHOW_DELAY_MS);
     return () => clearTimeout(timer);
   }, [hasStatus]);
 
-  return visible ? presentation : null;
+  return shown && presentation ? { presentation, fadeIn: shown === "waited" } : null;
 }
 
 /**
@@ -46,12 +60,15 @@ function useDelayedConnectionStatus(): WorkspaceConnectionStatusPresentation | n
  */
 function StatusFadeIn(props: {
   readonly children: ReactNode;
+  readonly animate: boolean;
   readonly grow?: boolean;
   readonly maxWidth?: number;
 }) {
-  const opacity = useRef(new Animated.Value(0)).current;
+  const { animate } = props;
+  const opacity = useRef(new Animated.Value(animate ? 0 : 1)).current;
 
   useEffect(() => {
+    if (!animate) return;
     const animation = Animated.timing(opacity, {
       duration: FADE_IN_MS,
       toValue: 1,
@@ -59,7 +76,7 @@ function StatusFadeIn(props: {
     });
     animation.start();
     return () => animation.stop();
-  }, [opacity]);
+  }, [animate, opacity]);
 
   return (
     <Animated.View
@@ -81,11 +98,11 @@ export function WorkspaceConnectionTitle(props: {
   readonly statusOffset?: number;
   readonly maxWidth?: number;
 }) {
-  const status = useDelayedConnectionStatus();
+  const delayed = useDelayedConnectionStatus();
   const size = props.size ?? "navbar";
   const { scale } = useAndroidControlSizing();
 
-  if (status === null) {
+  if (delayed === null) {
     return props.grow ? (
       <View style={{ alignItems: "center", flex: 1, flexDirection: "row", minWidth: 0 }}>
         {props.brand}
@@ -95,8 +112,9 @@ export function WorkspaceConnectionTitle(props: {
     );
   }
 
+  const status = delayed.presentation;
   return (
-    <StatusFadeIn grow={props.grow} maxWidth={props.maxWidth}>
+    <StatusFadeIn animate={delayed.fadeIn} grow={props.grow} maxWidth={props.maxWidth}>
       <Pressable
         accessibilityHint="Opens environment settings"
         accessibilityLabel={status.label}
