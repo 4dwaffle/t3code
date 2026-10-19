@@ -5,6 +5,15 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import { CheckpointToolkit } from "./tools.ts";
 
 const handlers = {
+  t3_checkpoint_restore: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* CheckpointMcpService.CheckpointMcpService;
+        return yield* service.restore(scope, input);
+      }),
+  ),
   t3_checkpoint_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

@@ -1,3 +1,5 @@
+import * as CommandReceiptStore from "./orchestration-v2/CommandReceiptStore.ts";
+import * as EffectOutbox from "./orchestration-v2/EffectOutbox.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -694,7 +696,9 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
   ),
   McpHttpServer.layer.pipe(
-    Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(
+      Layer.mergeAll(ProjectionStoreV2.layer, CommandReceiptStore.layer, EffectOutbox.layer),
+    ),
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),

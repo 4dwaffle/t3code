@@ -1,5 +1,8 @@
 import {
+  CommandId,
   CheckpointMcpFailure,
+  type CheckpointMcpRestoreInput,
+  type CheckpointMcpRestoreResult,
   checkpointRollbackAppRunOrdinal,
   latestProviderTurnForAttempt,
   type CheckpointMcpDiffInput,
@@ -16,15 +19,26 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import { isCheckpointRestoreIsolated } from "../orchestration-v2/CheckpointRestoreSafety.ts";
+import {
+  checkpointRestoreThreadState,
+  CheckpointRestoreRejectedRequest,
+  isCheckpointRestoreIsolated,
+} from "../orchestration-v2/CheckpointRestoreSafety.ts";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+
+const decodeRejectedRestore = Schema.decodeUnknownOption(CheckpointRestoreRejectedRequest);
+const encodeRejectedRestore = Schema.encodeSync(CheckpointRestoreRejectedRequest);
 
 const DEFAULT_LIST_LIMIT = 25;
 const DEFAULT_FILE_LIMIT = 20;
@@ -33,6 +47,10 @@ const DEFAULT_DIFF_LIMIT = 20_000;
 export class CheckpointMcpService extends Context.Service<
   CheckpointMcpService,
   {
+    readonly restore: (
+      scope: McpInvocationScope,
+      input: CheckpointMcpRestoreInput,
+    ) => Effect.Effect<CheckpointMcpRestoreResult, CheckpointMcpFailure>;
     readonly list: (
       scope: McpInvocationScope,
       input: CheckpointMcpListInput,
@@ -156,6 +174,8 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
+  const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  const outbox = yield* EffectOutbox.EffectOutboxV2;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -461,7 +481,203 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return CheckpointMcpService.of({ list, diff });
+  const restore: CheckpointMcpService["Service"]["restore"] = Effect.fn(
+    "CheckpointMcpService.restore",
+  )(function* (scope, input) {
+    yield* requireCapability(scope);
+    const projection = yield* loadThread(scope, input.threadId);
+    const threadId = projection.thread.id;
+    // The target is deliberately absent: a key cannot authorize a different restore on retry.
+    const commandId = CommandId.make(
+      [
+        "command",
+        "mcp",
+        encodeURIComponent(scope.requestNamespace),
+        "checkpoint-restore",
+        encodeURIComponent(input.clientRequestId),
+      ].join(":"),
+    );
+    const command = {
+      type: "checkpoint.rollback" as const,
+      commandId,
+      threadId,
+      scopeId: input.scopeId,
+      checkpointId: input.checkpointId,
+      restoreFiles: true,
+      expectedIdle: true as const,
+    };
+    const conflict = () =>
+      failure("idempotency_conflict", "This clientRequestId belongs to another restore target.");
+    const uncertain = () =>
+      failure(
+        "operation_failed",
+        "The restore outcome could not be confirmed. Retry with the same clientRequestId.",
+      );
+    const rejected = () =>
+      failure(
+        "restore_rejected",
+        "This restore request was rejected. Inspect the target and use a new clientRequestId for a new attempt.",
+      );
+    const matches = (target: {
+      readonly threadId: typeof threadId;
+      readonly scopeId: typeof input.scopeId;
+      readonly checkpointId: typeof input.checkpointId;
+    }) =>
+      target.threadId === threadId &&
+      target.scopeId === input.scopeId &&
+      target.checkpointId === input.checkpointId;
+    const readReceipt = receipts.getByCommandId(commandId).pipe(Effect.mapError(uncertain));
+    const observe = Effect.fn("CheckpointMcpService.observeRestore")(function* (
+      receipt: CommandReceiptStore.CommandReceiptV2,
+    ) {
+      if (receipt.threadId !== threadId || receipt.commandType !== "checkpoint.rollback")
+        return yield* conflict();
+      if (receipt.status === "rejected") {
+        const target = decodeRejectedRestore(receipt.error);
+        if (Option.isNone(target) || !matches(target.value)) return yield* conflict();
+        return yield* rejected();
+      }
+      const effects = yield* outbox.listByCommandId(commandId).pipe(Effect.option);
+      const effect = Option.isSome(effects)
+        ? effects.value.find((item) => item.request.type === "provider-thread.rollback")
+        : undefined;
+      if (effect?.request.type === "provider-thread.rollback") {
+        if (!matches({ threadId: effect.threadId, ...effect.request })) return yield* conflict();
+      } else {
+        // Effects can be pruned. The immutable event still binds an accepted key to its target.
+        const original = yield* threadManagement.dispatch(command).pipe(Effect.mapError(uncertain));
+        const event = original.storedEvents
+          .map((item) => item.event)
+          .find((item) => item.type === "checkpoint.rollback-requested");
+        if (event?.type !== "checkpoint.rollback-requested") return yield* uncertain();
+        if (!matches({ threadId: event.threadId, ...event.payload })) return yield* conflict();
+      }
+      const status =
+        effect?.status === "succeeded"
+          ? "APPLIED"
+          : effect?.failureCode === "checkpoint_restore_partial" ||
+              (effect?.status === "cancelled" && effect.attemptCount > 0)
+            ? "PARTIAL"
+            : effect?.status === "failed" || effect?.status === "cancelled"
+              ? "FAILED"
+              : "REQUESTED";
+      return {
+        commandId,
+        threadId,
+        scopeId: input.scopeId,
+        checkpointId: input.checkpointId,
+        status,
+        receipt: {
+          status: "accepted",
+          acceptedAt: DateTime.formatIso(receipt.acceptedAt),
+          sequence: receipt.resultSequence,
+        },
+        effectStatus: effect?.status ?? "unavailable",
+        detail:
+          status === "PARTIAL"
+            ? "Restore may have changed the provider or workspace. Inspect both before taking further action; this request will not be replayed."
+            : status === "FAILED"
+              ? "Restore did not complete. Inspect the target before making a new request."
+              : effect === undefined
+                ? "The request was accepted, but its execution outcome is unavailable."
+                : null,
+      } satisfies CheckpointMcpRestoreResult;
+    });
+    const existing = yield* readReceipt;
+    if (Option.isSome(existing)) return yield* observe(existing.value);
+
+    const target = projection.checkpoints.find(
+      (item) =>
+        item.id === input.checkpointId &&
+        item.threadId === threadId &&
+        item.scopeId === input.scopeId,
+    );
+    const targetScope = projection.checkpointScopes.find(
+      (item) => item.id === input.scopeId && item.threadId === threadId,
+    );
+    const availability =
+      target === undefined ? undefined : yield* readAvailability(target, targetScope);
+    const supported =
+      target !== undefined &&
+      targetScope !== undefined &&
+      availability !== undefined &&
+      restoreBlockers({
+        projection,
+        checkpoint: target,
+        scope: targetScope,
+        refAvailable: availability.refAvailable,
+      }).length === 0 &&
+      (yield* isCheckpointRestoreIsolated(projection.thread, targetScope, {
+        fileSystem,
+        path,
+        projects,
+        projections,
+      }).pipe(
+        Effect.mapError(() =>
+          failure("operation_failed", "Unable to validate checkpoint workspace isolation."),
+        ),
+      ));
+    let accepted: CommandReceiptStore.CommandReceiptV2 | undefined;
+    if (!supported || targetScope === undefined) {
+      // Persist business rejection too: fixing the target does not silently reuse an old key.
+      yield* receipts
+        .insertIfAbsent({
+          commandId,
+          threadId,
+          commandType: command.type,
+          status: "rejected",
+          acceptedAt: yield* DateTime.now,
+          resultSequence: 0,
+          error: encodeRejectedRestore({
+            type: "checkpoint_restore_rejected",
+            threadId,
+            scopeId: input.scopeId,
+            checkpointId: input.checkpointId,
+          }),
+        })
+        .pipe(Effect.mapError(uncertain));
+    } else {
+      const expectedThreadState = checkpointRestoreThreadState(projection);
+      const expectedWorkspaceFingerprint = yield* checkpointStore
+        .readWorkspaceFingerprint(targetScope.cwd)
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "operation_failed",
+              "Unable to read workspace state. Retry with the same clientRequestId.",
+            ),
+          ),
+        );
+      // Admission and execution both compare this acceptance-time state under the thread lock.
+      // Dispatch can commit before its response fails; the durable receipt decides the outcome.
+      const dispatched = yield* threadManagement
+        .dispatch({ ...command, expectedThreadState, expectedWorkspaceFingerprint })
+        .pipe(Effect.option);
+      if (Option.isSome(dispatched)) {
+        const event = dispatched.value.storedEvents
+          .map((item) => item.event)
+          .find((item) => item.type === "checkpoint.rollback-requested");
+        if (event?.type === "checkpoint.rollback-requested") {
+          if (!matches({ threadId: event.threadId, ...event.payload })) return yield* conflict();
+          accepted = {
+            commandId,
+            threadId,
+            commandType: command.type,
+            status: "accepted",
+            acceptedAt: event.occurredAt,
+            resultSequence: dispatched.value.sequence,
+            error: null,
+          };
+        }
+      }
+    }
+    const receipt = yield* readReceipt.pipe(Effect.orElseSucceed(() => Option.none()));
+    const resolved = Option.getOrUndefined(receipt) ?? accepted;
+    if (resolved === undefined) return yield* uncertain();
+    return yield* observe(resolved);
+  });
+
+  return CheckpointMcpService.of({ list, diff, restore });
 });
 
 export const layer = Layer.effect(CheckpointMcpService, make);

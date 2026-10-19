@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import {
+  CommandId,
   CheckpointId,
   CheckpointScopeId,
   IsoDateTime,
@@ -147,6 +148,47 @@ export const CheckpointMcpDiffResult = Schema.Struct({
 });
 export type CheckpointMcpDiffResult = typeof CheckpointMcpDiffResult.Type;
 
+export const CheckpointMcpRestoreInput = Schema.Struct({
+  threadId: Schema.optional(ThreadId),
+  scopeId: CheckpointScopeId,
+  checkpointId: CheckpointId,
+  discardChanges: Schema.Literal(true).annotate({
+    description: "Required acknowledgement that restoring discards current workspace changes.",
+  }),
+  clientRequestId: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(256),
+    Schema.makeFilter((value) => value.isWellFormed()),
+  ).annotate({
+    description:
+      "Stable request key. Reuse it to read the prior outcome; use a new key for a new restore.",
+  }),
+});
+export type CheckpointMcpRestoreInput = typeof CheckpointMcpRestoreInput.Type;
+
+export const CheckpointMcpRestoreResult = Schema.Struct({
+  commandId: CommandId,
+  threadId: ThreadId,
+  scopeId: CheckpointScopeId,
+  checkpointId: CheckpointId,
+  status: Schema.Literals(["REQUESTED", "APPLIED", "FAILED", "PARTIAL"]),
+  receipt: Schema.Struct({
+    status: Schema.Literal("accepted"),
+    acceptedAt: IsoDateTime,
+    sequence: NonNegativeInt,
+  }),
+  effectStatus: Schema.Literals([
+    "pending",
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "unavailable",
+  ]),
+  detail: Schema.NullOr(Schema.String),
+});
+export type CheckpointMcpRestoreResult = typeof CheckpointMcpRestoreResult.Type;
+
 export class CheckpointMcpFailure extends Schema.TaggedError<CheckpointMcpFailure>()(
   "CheckpointMcpFailure",
   {
@@ -159,6 +201,8 @@ export class CheckpointMcpFailure extends Schema.TaggedError<CheckpointMcpFailur
       "invalid_request",
       "unsupported",
       "operation_failed",
+      "restore_rejected",
+      "idempotency_conflict",
     ]),
     message: Schema.String,
   },

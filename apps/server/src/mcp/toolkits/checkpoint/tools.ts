@@ -1,4 +1,6 @@
 import {
+  CheckpointMcpRestoreInput,
+  CheckpointMcpRestoreResult,
   CheckpointMcpDiffInput,
   CheckpointMcpDiffResult,
   CheckpointMcpFailure,
@@ -42,4 +44,16 @@ const diff = Tool.make("t3_checkpoint_diff", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
-export const CheckpointToolkit = Toolkit.make(list, diff);
+const restore = Tool.make("t3_checkpoint_restore", {
+  description:
+    "Restore an idle thread to an exact checkpoint from t3_checkpoint_list, discarding workspace changes. Requires discardChanges:true and a stable clientRequestId. REQUESTED is acceptance, not completion: repeat the same request to read APPLIED, FAILED or PARTIAL. A partial restore is never replayed. Only isolated worktrees and providers supporting conversation rollback and snapshots are supported.",
+  parameters: CheckpointMcpRestoreInput,
+  success: CheckpointMcpRestoreResult,
+  failure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true);
+export const CheckpointToolkit = Toolkit.make(list, diff, restore);

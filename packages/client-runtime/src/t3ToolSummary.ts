@@ -305,6 +305,9 @@ export function summarizeT3ToolCalls(
     case "checkpoint-list":
       label = phrase("Listed", "list", `checkpoints ${times}`);
       break;
+    case "checkpoint-restore":
+      label = phrase("Restored", "restore", `checkpoints ${times}`);
+      break;
     case "checkpoint-diff":
       label = phrase("Read", "read", `checkpoint diffs ${times}`);
       break;

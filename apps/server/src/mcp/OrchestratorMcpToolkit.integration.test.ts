@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   CheckpointRef,
   NodeId,
+  CheckpointMcpRestoreResult,
   CheckpointMcpListResult,
   CheckpointMcpDiffResult,
 } from "@t3tools/contracts";
@@ -29,6 +30,7 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2DomainEvent,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpTaskCancelResult,
@@ -69,6 +71,8 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
 import { threadShellFromProjection } from "../orchestration-v2/ProjectionStore.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -123,6 +127,7 @@ const createdThreadPrompt = "Complete the newly created ordinary thread.";
 const queuedFollowupPrompt = "Complete the queued follow-up and return the final result.";
 const queuedFollowupResult = "Queued delegated follow-up completed.";
 
+const decodeCheckpointRestoreResult = Schema.decodeUnknownEffect(CheckpointMcpRestoreResult);
 const decodeCheckpointListResult = Schema.decodeUnknownEffect(CheckpointMcpListResult);
 const decodeCheckpointDiffResult = Schema.decodeUnknownEffect(CheckpointMcpDiffResult);
 const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
@@ -213,6 +218,12 @@ function makeDeterministicAdapter(input: {
   readonly terminalGate?: (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
   ) => Deferred.Deferred<void> | undefined;
+  readonly rollback?: (
+    input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput,
+  ) => Effect.Effect<
+    ProviderAdapter.ProviderAdapterV2ThreadSnapshot,
+    ProviderAdapter.ProviderAdapterV2Error
+  >;
   readonly response: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) => string;
   readonly steerReceived?: (
     steer: ProviderAdapter.ProviderAdapterV2SteerInput,
@@ -433,7 +444,9 @@ function makeDeterministicAdapter(input: {
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () =>
             unsupported(input.driver, "readThreadSnapshot is unused in this test"),
-          rollbackThread: () => unsupported(input.driver, "rollbackThread is unused in this test"),
+          rollbackThread:
+            input.rollback ??
+            (() => unsupported(input.driver, "rollbackThread is unused in this test")),
           forkThread: () => unsupported(input.driver, "forkThread is unused in this test"),
         };
       }),
@@ -620,6 +633,8 @@ describe("orchestrator MCP toolkit", () => {
         const serviceDependencies = Layer.mergeAll(
           threadLayer,
           storeLayer,
+          Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({}),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({}),
           Layer.mock(ProjectStore.ProjectStoreV2)({}),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getShellSnapshot: () =>
@@ -711,6 +726,438 @@ describe("orchestrator MCP toolkit", () => {
             declaredFailure(yield* invoke("t3_checkpoint_list", { threadId: "thread:foreign" })),
           ).toMatchObject({ code: "thread_not_found" });
         }).pipe(Effect.provide(layer));
+      }),
+    ),
+  );
+
+  it.live.each([
+    "applied",
+    "tracked-change",
+    "staged-change",
+    "untracked-change",
+    "queued",
+    "provider-failure",
+    "observation-failure",
+    "admission-change",
+  ] as const)("restores through serialized MCP with durable outcomes: %s", (scenario) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("mcp-checkpoint-restore", {
+          "tracked.txt": "original\n",
+        });
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const rollbackCalls = yield* Ref.make(0);
+        const registry = ProviderAdapterRegistry.layerFromAdapters([
+          makeDeterministicAdapter({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            capabilities: CodexProviderCapabilitiesV2,
+            capturedTurns,
+            shouldComplete: () => true,
+            response: () => "done",
+            rollback: ({ providerThread }) =>
+              Ref.update(rollbackCalls, (count) => count + 1).pipe(
+                Effect.andThen(
+                  scenario === "provider-failure"
+                    ? Effect.fail(
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: ProviderDriverKind.make("codex"),
+                          detail: "private provider diagnostic",
+                        }),
+                      )
+                    : Effect.succeed({
+                        providerThread,
+                        providerTurns: [],
+                        messages: [],
+                        runtimeRequests: [],
+                      }),
+                ),
+              ),
+          }),
+        ]);
+        const database = SqlitePersistence.layerMemory;
+        const runtime = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-restore", runtimePolicyOverride: { cwd } },
+          registry,
+          { databaseLayer: database, runEffectWorker: false },
+        );
+        const stores = Layer.mergeAll(
+          CommandReceiptStore.layer,
+          EffectOutbox.layer,
+          ProjectStore.layer,
+          ProjectionStore.layer,
+        ).pipe(Layer.provide(database));
+        const threads = ThreadManagementService.layer.pipe(
+          Layer.provide(runtime),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(stores),
+        );
+        const vcs = VcsDriverRegistry.layer.pipe(
+          Layer.provide(GitVcsDriver.layer),
+          Layer.provide(ServerConfig.ServerConfig.layerTest(cwd, { prefix: "mcp-restore-" })),
+          Layer.provide(VcsProcess.layer),
+          Layer.provide(NodeServices.layer),
+        );
+        const store = CheckpointStore.layer.pipe(Layer.provide(vcs));
+        const dependencies = Layer.mergeAll(
+          runtime,
+          stores,
+          threads,
+          store,
+          VcsProcess.layer,
+          database,
+        ).pipe(Layer.provideMerge(NodeServices.layer));
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const fs = yield* FileSystem.FileSystem;
+          const gitProcess = yield* VcsProcess.VcsProcess;
+          const checkpointStore = yield* CheckpointStore.CheckpointStore;
+          const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+          const admissionEntered = yield* Deferred.make<void>();
+          const admissionReleased = yield* Deferred.make<void>();
+          const git = (args: ReadonlyArray<string>) =>
+            gitProcess.run({ operation: "mcp-test", command: "git", cwd, args });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("restore:create"),
+            threadId: parentThreadId,
+            projectId,
+            title: "Restore target",
+            modelSelection: codexSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+
+          const dispatched = yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("restore:run"),
+            threadId: parentThreadId,
+            messageId: MessageId.make("restore:message"),
+            text: "complete",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+
+          yield* worker.drain();
+
+          yield* sink.stream({ threadId: parentThreadId, afterSequence: dispatched.sequence }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "run.updated" &&
+                (stored.event.payload.status === "waiting" ||
+                  stored.event.payload.status === "completed"),
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+          );
+          yield* worker.drain();
+
+          const initial = yield* orchestrator.getThreadProjection(parentThreadId);
+          const baseline = initial.checkpoints.find((item) => item.ordinalWithinScope === 0)!;
+          expect(baseline.status).toBe("ready");
+          expect(initial.runs[0]?.status).toBe("completed");
+          const args = {
+            threadId: parentThreadId,
+            scopeId: baseline.scopeId,
+            checkpointId: baseline.id,
+            discardChanges: true,
+            clientRequestId: "restore-key",
+          };
+          const invocation: McpInvocationContext.McpInvocationScope = {
+            environmentId: EnvironmentId.make("environment:restore"),
+            capabilities: new Set(["orchestration"]),
+            requestNamespace: "restore-test",
+            issuedAt: 1,
+            thread: undefined,
+            client: { sessionId: "restore-client", label: "Restore test", access: "full-access" },
+          };
+          const observationReads = yield* Ref.make(0);
+          const observedReceipts =
+            scenario === "observation-failure"
+              ? {
+                  ...commandReceipts,
+                  getByCommandId: (commandId: CommandId) =>
+                    Ref.updateAndGet(observationReads, (count) => count + 1).pipe(
+                      Effect.flatMap((count) =>
+                        count === 2
+                          ? Effect.fail(
+                              new CommandReceiptStore.CommandReceiptStoreReadError({ commandId }),
+                            )
+                          : commandReceipts.getByCommandId(commandId),
+                      ),
+                    ),
+                }
+              : commandReceipts;
+          const outboxReads = yield* Ref.make(0);
+          const observedOutbox =
+            scenario === "observation-failure"
+              ? {
+                  ...outbox,
+                  listByCommandId: (commandId: CommandId) =>
+                    Ref.updateAndGet(outboxReads, (count) => count + 1).pipe(
+                      Effect.flatMap((count) =>
+                        count === 1
+                          ? Effect.fail(new EffectOutbox.EffectOutboxError({ operation: "list" }))
+                          : outbox.listByCommandId(commandId),
+                      ),
+                    ),
+                }
+              : outbox;
+          const mcpLayer = McpHttpServer.layerCheckpointToolkit.pipe(
+            Layer.provide(Layer.succeed(EffectOutbox.EffectOutboxV2, observedOutbox)),
+            Layer.provide(
+              Layer.succeed(ThreadManagementService.ThreadManagementService, {
+                ...threadManagement,
+                dispatch: (command) =>
+                  scenario === "admission-change" && command.type === "checkpoint.rollback"
+                    ? Deferred.succeed(admissionEntered, undefined).pipe(
+                        Effect.andThen(Deferred.await(admissionReleased)),
+                        Effect.andThen(threadManagement.dispatch(command)),
+                      )
+                    : threadManagement.dispatch(command),
+              }),
+            ),
+            Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provide(
+              Layer.succeed(CommandReceiptStore.CommandReceiptStoreV2, observedReceipts),
+            ),
+          );
+          const outcome = yield* Effect.gen(function* () {
+            const server = yield* McpServer.McpServer;
+            const invoke = (name: string, input: Record<string, unknown>) =>
+              server
+                .callTool({ name, arguments: input })
+                .pipe(
+                  Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+                  Effect.provideService(McpSchema.McpServerClient, client),
+                );
+            const restore = (input: Record<string, unknown> = args) =>
+              invoke("t3_checkpoint_restore", input);
+            if (scenario === "applied") {
+              expect(
+                yield* restore({ ...args, discardChanges: false }).pipe(Effect.flip),
+              ).toMatchObject({ _tag: "InvalidParams" });
+              expect(
+                yield* restore({ ...args, clientRequestId: "\ud800" }).pipe(Effect.flip),
+              ).toMatchObject({ _tag: "InvalidParams" });
+              const now = yield* DateTime.now;
+              let eventOrdinal = 0;
+              const update = (
+                event:
+                  | { readonly type: "checkpoint.captured"; readonly payload: typeof baseline }
+                  | {
+                      readonly type: "thread.metadata-updated";
+                      readonly payload: typeof initial.thread;
+                    }
+                  | {
+                      readonly type: "provider-session.updated";
+                      readonly payload: (typeof initial.providerSessions)[number];
+                    },
+              ) =>
+                sink.write({
+                  commandId: CommandId.make(`restore:preflight:${eventOrdinal}`),
+                  events: [
+                    {
+                      ...event,
+                      id: EventId.make(`restore:preflight:${eventOrdinal++}`),
+                      threadId: parentThreadId,
+                      providerInstanceId: codexInstanceId,
+                      occurredAt: now,
+                    } as OrchestrationV2DomainEvent,
+                  ],
+                });
+              for (const [key, changed] of [
+                ["stale", { ...baseline, status: "stale" as const }],
+                ["missing", { ...baseline, ref: CheckpointRef.make("refs/t3/missing") }],
+                ["ambiguous", { ...baseline, ordinalWithinScope: 2 }],
+              ] as const) {
+                yield* update({ type: "checkpoint.captured", payload: changed });
+                expect(
+                  declaredFailure(yield* restore({ ...args, clientRequestId: key })),
+                ).toMatchObject({ code: "restore_rejected" });
+                yield* update({ type: "checkpoint.captured", payload: baseline });
+                expect(
+                  declaredFailure(yield* restore({ ...args, clientRequestId: key })),
+                ).toMatchObject({ code: "restore_rejected" });
+              }
+              for (const [key, changed] of [
+                ["shared", { ...initial.thread, worktreePath: null }],
+                ["archived", { ...initial.thread, archivedAt: now }],
+                ["provider-changed", { ...initial.thread, modelSelection: claudeSelection }],
+              ] as const) {
+                yield* update({ type: "thread.metadata-updated", payload: changed });
+                expect(
+                  declaredFailure(yield* restore({ ...args, clientRequestId: key })),
+                ).toMatchObject({ code: "restore_rejected" });
+                yield* update({ type: "thread.metadata-updated", payload: initial.thread });
+              }
+              const session = initial.providerSessions[0]!;
+              yield* update({
+                type: "provider-session.updated",
+                payload: {
+                  ...session,
+                  capabilities: {
+                    ...session.capabilities,
+                    checkpointing: {
+                      ...session.capabilities.checkpointing,
+                      providerRollbackReturnsSnapshot: false,
+                    },
+                  },
+                },
+              });
+              expect(
+                declaredFailure(yield* restore({ ...args, clientRequestId: "unsupported" })),
+              ).toMatchObject({ code: "restore_rejected" });
+              yield* update({ type: "provider-session.updated", payload: session });
+              expect(yield* Ref.get(rollbackCalls)).toBe(0);
+            }
+            yield* fs.writeFileString(`${cwd}/tracked.txt`, "staged before request\n");
+            yield* git(["add", "tracked.txt"]);
+            yield* fs.writeFileString(`${cwd}/tracked.txt`, "unstaged before request\n");
+            yield* fs.writeFileString(`${cwd}/untracked.txt`, "untracked before request\n");
+            if (scenario === "admission-change") {
+              const before = yield* checkpointStore.readWorkspaceFingerprint(cwd);
+              const submitting = yield* restore().pipe(Effect.forkScoped);
+              yield* Deferred.await(admissionEntered);
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make("restore:admission-queue"),
+                threadId: parentThreadId,
+                messageId: MessageId.make("restore:admission-queued-message"),
+                text: "queued",
+                attachments: [],
+                dispatchMode: { type: "defer_start" },
+                createdBy: "user",
+                creationSource: "web",
+              });
+              yield* Deferred.succeed(admissionReleased, undefined);
+              expect(declaredFailure(yield* Fiber.join(submitting))).toMatchObject({
+                code: "restore_rejected",
+              });
+              expect(declaredFailure(yield* restore())).toMatchObject({ code: "restore_rejected" });
+              expect(yield* Ref.get(rollbackCalls)).toBe(0);
+              expect(yield* checkpointStore.readWorkspaceFingerprint(cwd)).toBe(before);
+              return;
+            }
+            const accepted = yield* decodeCheckpointRestoreResult(
+              (yield* restore()).structuredContent,
+            );
+            expect(accepted).toMatchObject({
+              status: "REQUESTED",
+              effectStatus: scenario === "observation-failure" ? "unavailable" : "pending",
+              receipt: { status: "accepted" },
+            });
+            expect(yield* Ref.get(rollbackCalls)).toBe(0);
+            if (scenario === "tracked-change")
+              yield* fs.writeFileString(`${cwd}/tracked.txt`, "newer edit\n");
+            if (scenario === "staged-change") {
+              yield* fs.writeFileString(`${cwd}/tracked.txt`, "newer staged edit\n");
+              yield* git(["add", "tracked.txt"]);
+            }
+            if (scenario === "untracked-change")
+              yield* fs.writeFileString(`${cwd}/newer.txt`, "newer untracked edit\n");
+            if (scenario === "queued")
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make("restore:queue"),
+                threadId: parentThreadId,
+                messageId: MessageId.make("restore:queued-message"),
+                text: "queued",
+                attachments: [],
+                dispatchMode: { type: "defer_start" },
+                createdBy: "user",
+                creationSource: "web",
+              });
+            const before = yield* checkpointStore.readWorkspaceFingerprint(cwd);
+            yield* worker.drain();
+            const terminal = yield* decodeCheckpointRestoreResult(
+              (yield* restore()).structuredContent,
+            );
+            const applied = scenario === "applied" || scenario === "observation-failure";
+            expect(terminal.status).toBe(
+              applied ? "APPLIED" : scenario === "provider-failure" ? "PARTIAL" : "FAILED",
+            );
+            expect(terminal.commandId).toBe(accepted.commandId);
+            expect(terminal.receipt).toEqual(accepted.receipt);
+            expect(yield* Ref.get(rollbackCalls)).toBe(
+              applied || scenario === "provider-failure" ? 1 : 0,
+            );
+            if (applied) {
+              expect(yield* fs.readFileString(`${cwd}/tracked.txt`)).toBe("original\n");
+              expect(yield* fs.exists(`${cwd}/untracked.txt`)).toBe(false);
+              expect((yield* git(["diff", "--cached", "--name-only"])).stdout).toBe("");
+              expect(
+                (yield* orchestrator.getThreadProjection(parentThreadId)).runs[0]?.status,
+              ).toBe("rolled_back");
+            } else {
+              expect(yield* checkpointStore.readWorkspaceFingerprint(cwd)).toBe(before);
+              expect(terminal.detail).not.toContain("private provider diagnostic");
+            }
+            if (scenario === "applied")
+              yield* sink.write({
+                commandId: CommandId.make("restore:target-stale"),
+                events: [
+                  {
+                    id: EventId.make("restore:target-stale"),
+                    type: "checkpoint.captured",
+                    threadId: parentThreadId,
+                    providerInstanceId: codexInstanceId,
+                    occurredAt: yield* DateTime.now,
+                    payload: { ...baseline, status: "stale" },
+                  },
+                ],
+              });
+            expect(
+              yield* decodeCheckpointRestoreResult((yield* restore()).structuredContent),
+            ).toEqual(terminal);
+            expect(
+              declaredFailure(yield* restore({ ...args, checkpointId: "checkpoint:other" })),
+            ).toMatchObject({ code: "idempotency_conflict" });
+            const effects = yield* outbox.listByCommandId(accepted.commandId);
+            expect(effects).toHaveLength(1);
+            expect(effects[0]?.attemptCount).toBe(1);
+            expect(effects[0]?.status).toBe(applied ? "succeeded" : "failed");
+            yield* outbox.reconcileAfterProcessLoss;
+            yield* worker.drain();
+            expect(
+              yield* decodeCheckpointRestoreResult((yield* restore()).structuredContent),
+            ).toEqual(terminal);
+            expect(yield* Ref.get(rollbackCalls)).toBe(
+              applied || scenario === "provider-failure" ? 1 : 0,
+            );
+            return terminal;
+          }).pipe(Effect.provide(mcpLayer));
+          if (outcome !== undefined)
+            yield* Effect.gen(function* () {
+              const recreatedServer = yield* McpServer.McpServer;
+              const replay = yield* recreatedServer
+                .callTool({ name: "t3_checkpoint_restore", arguments: args })
+                .pipe(
+                  Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+                  Effect.provideService(McpSchema.McpServerClient, client),
+                );
+              expect(yield* decodeCheckpointRestoreResult(replay.structuredContent)).toEqual(
+                outcome,
+              );
+              expect(yield* Ref.get(rollbackCalls)).toBe(
+                scenario === "applied" ||
+                  scenario === "observation-failure" ||
+                  scenario === "provider-failure"
+                  ? 1
+                  : 0,
+              );
+            }).pipe(Effect.provide(mcpLayer));
+        }).pipe(Effect.provide(dependencies));
       }),
     ),
   );

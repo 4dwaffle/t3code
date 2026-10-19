@@ -1,3 +1,5 @@
+import * as CommandReceiptStore from "../../../orchestration-v2/CommandReceiptStore.ts";
+import * as EffectOutbox from "../../../orchestration-v2/EffectOutbox.ts";
 import * as CheckpointStore from "../../../checkpointing/CheckpointStore.ts";
 import * as ProjectStore from "../../../orchestration-v2/ProjectStore.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
@@ -38,6 +40,8 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({}),
+  Layer.mock(EffectOutbox.EffectOutboxV2)({}),
   Layer.mock(CheckpointStore.CheckpointStore)({}),
   Layer.mock(ProjectStore.ProjectStoreV2)({}),
   Layer.mock(Orchestrator.OrchestratorV2)({}),
