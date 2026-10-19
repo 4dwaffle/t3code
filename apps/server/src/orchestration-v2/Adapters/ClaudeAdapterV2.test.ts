@@ -2855,8 +2855,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* start("/unrestricted");
         assert.equal(harness.getOpenedOptions()?.permissionMode, "bypassPermissions");
         assert.equal(harness.getOpenedOptions()?.allowDangerouslySkipPermissions, true);
-        // The SDK can dispatch control callbacks before yielding queued init/status frames.
-        // Unrestricted bypass tools do not invoke canUseTool at all.
+        // Forwarded asks (including ask rules and settings fallback) still need a decision
+        // before queued init/status frames arrive.
         for (const { phase, frame } of [
           {
             phase: "init",

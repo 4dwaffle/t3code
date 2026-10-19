@@ -1941,8 +1941,8 @@ function claudeBypassAvailability(
 }
 
 function requiresClaudeApproval(context: ActiveClaudeTurnContext): boolean {
-  // Unrestricted bypass tools never reach this callback. A forwarded request must ask,
-  // even when the CLI's init/status mode update is still queued in the SDK.
+  // CLI-forwarded requests need a person's decision even under bypass (ask rules,
+  // safety checks, or settings fallback). Do not wait for queued init/status updates.
   const policy = context.queryPolicy;
   return policy.installPermissionCallback || policy.permissionMode === "bypassPermissions";
 }
