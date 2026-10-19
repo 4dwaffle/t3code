@@ -357,7 +357,7 @@ export const layerWithOptions = (
                 return {
                   browser: browserOverridden ? false : settings.enableAgentBrowserAccess,
                   device: deviceOverridden ? false : settings.enableAgentDeviceAccess,
-                  tools: resolveAgentTools(settings, null),
+                  tools: resolveAgentTools(settings, thread.projectId),
                 };
             }
             const effective = resolveProjectSettings(settings, thread.projectId).settings;

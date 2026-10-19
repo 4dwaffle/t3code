@@ -636,6 +636,7 @@ function runBrowserAccessScenario(input: {
   readonly deviceOverride?: boolean;
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
+  readonly toolsOverride?: boolean;
 }) {
   return Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -679,9 +680,22 @@ function runBrowserAccessScenario(input: {
           projectServiceLayer: layerProjectService,
           serverSettingsLayer: ServerSettings.layerTest({
             enableAgentBrowserAccess: input.enableAgentBrowserAccess,
+            ...(input.toolsOverride
+              ? {
+                  mcpServers: {
+                    docs: {
+                      enabled: true,
+                      transport: { type: "http", url: "https://example.com/mcp", headers: [] },
+                    },
+                  },
+                }
+              : {}),
             projectSettingsOverrides: {
               [projectId]: {
                 enableAgentBrowserAccess: input.projectOverride,
+                ...(input.toolsOverride
+                  ? { mcpServers: { docs: { enabled: false } }, disabledSkills: { review: true } }
+                  : {}),
                 ...(input.deviceOverride === undefined
                   ? {}
                   : { enableAgentDeviceAccess: input.deviceOverride }),
@@ -2000,9 +2014,12 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing pr
       enableAgentBrowserAccess: true,
       projectOverride: true,
       projectExists: false,
+      toolsOverride: true,
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
+    assert.deepEqual(captured?.tools?.servers, []);
+    assert.deepEqual(captured?.tools?.disabledSkills, ["review"]);
   }),
 );
 

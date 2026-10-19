@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { OpencodeClient, ToolPart } from "@opencode-ai/sdk/v2";
 import {
   CheckpointId,
+  EnvironmentId,
   NodeId,
   ProjectId,
   ProviderInstanceId,
@@ -537,6 +538,68 @@ describe("OpenCodeAdapterV2", () => {
         Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
         Effect.scoped,
       ),
+  );
+
+  it.effect("leaves external MCP configuration untouched through add, disable and reopen", () =>
+    Effect.gen(function* () {
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      const threadId = ThreadId.make("thread-opencode-external-tools");
+      const nativeConfig = { type: "remote", url: "https://native.example/mcp" };
+      const registry = new Map([["native", nativeConfig]]);
+      const added: string[] = [];
+      const injected = {
+        name: "docs",
+        transport: {
+          type: "http" as const,
+          url: "https://tools.example/mcp",
+          headers: [{ name: "Authorization", value: "must-not-retain", sensitive: true }],
+        },
+      };
+      const client = {
+        event: {
+          subscribe: async (_input: unknown, options: { signal: AbortSignal }) => {
+            const events = asyncEventStream();
+            options.signal.addEventListener("abort", () => events.close());
+            return { stream: events.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+        mcp: {
+          add: async ({ name, config }: { name: string; config: typeof nativeConfig }) => {
+            added.push(name);
+            registry.set(name, config);
+            return { data: Object.fromEntries(registry) };
+          },
+        },
+      };
+      for (const servers of [[injected], [], []]) {
+        yield* sessions.set({
+          environmentId: EnvironmentId.make("test"),
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("opencode-external-tools"),
+          providerSessionId: "external-tools",
+          endpoint: "https://t3.example/mcp",
+          authorizationHeader: "Bearer test",
+          browserToolsAvailable: false,
+          tools: { servers, disabledSkills: [], fingerprint: String(servers.length) },
+        });
+        const scope = yield* Scope.make();
+        yield* makeOpenCodeRuntimeHarness("external-tools", "root", client).pipe(
+          Effect.provideService(Scope.Scope, scope),
+        );
+        yield* Scope.close(scope, Exit.void);
+        assert.isFalse(registry.has("docs"));
+        assert.deepEqual(Array.from(registry), [["native", nativeConfig]]);
+      }
+      assert.deepEqual(added, []);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
   );
 
   it.effect("aborts external root and descendants before closing the event stream", () =>

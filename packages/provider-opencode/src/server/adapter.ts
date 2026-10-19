@@ -991,10 +991,9 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             ),
           );
         }
-        // The user's servers are additions that do not need to reach T3, so
-        // an external server gets them too. One that fails to register must
-        // not stop the session, so each logs and moves on.
-        for (const server of mcpSession?.tools?.servers ?? []) {
+        // OpenCode 1 cannot remove dynamic configuration. An external server
+        // outlives this session, so injecting here would retain revoked credentials.
+        for (const server of connection.external ? [] : (mcpSession?.tools?.servers ?? [])) {
           yield* OpenCodeRuntime.runOpenCodeSdk("mcp.add", () =>
             client.mcp.add(
               {
