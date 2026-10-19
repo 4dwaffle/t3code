@@ -214,13 +214,14 @@ export const layerObserver = Layer.effect(
       refName: string,
       runId: RunId,
     ) {
-      // No branch to compare-and-swap against, no dedicated worktree to own
-      // exclusively, the first-turn auto-rename is still in flight, or `cwd`
-      // is not the thread's worktree. The last one happens when
-      // followWorktreeMove just moved the thread out of the checkpoint cwd:
-      // that cwd's branch belongs to where the thread was, not where it is.
+      // No dedicated worktree to own exclusively, the first-turn auto-rename
+      // is still in flight, or `cwd` is not the thread's worktree. The last
+      // one happens when followWorktreeMove just moved the thread out of the
+      // checkpoint cwd: that cwd's branch belongs to where the thread was,
+      // not where it is. A null branch still follows: followWorktreeMove
+      // records null for a detached HEAD or placeholder branch, and the
+      // branch checked out there later must not leave the thread branchless.
       if (
-        thread.branch === null ||
         thread.worktreePath === null ||
         thread.worktreePath !== cwd ||
         isTemporaryWorktreeBranch(refName)

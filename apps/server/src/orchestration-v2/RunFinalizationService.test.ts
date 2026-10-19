@@ -283,11 +283,13 @@ it.effect.each(
         expectDispatch: false,
       },
       {
-        label: "does not invent a branch for a thread that never had one recorded",
+        // A follow into a detached HEAD or placeholder branch records null;
+        // the branch checked out there later must still be adopted.
+        label: "adopts a branch for a dedicated worktree thread recorded without one",
         branch: null,
         worktreePath: "/repo",
         checkedOut: "feature",
-        expectDispatch: false,
+        expectDispatch: true,
       },
       {
         label: "does not adopt a temporary worktree-setup branch name",
