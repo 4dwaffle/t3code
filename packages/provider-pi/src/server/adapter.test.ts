@@ -919,7 +919,7 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("adopts a completed native wake without sending a synthetic prompt", () =>
+  it.effect("adopts a wake during same-file registration without a prompt", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const offers =
@@ -939,6 +939,10 @@ describe("PiAdapterV2", () => {
         modelSelection: modelSelection("default"),
         runtimePolicy,
       });
+      const reading = yield* Deferred.make<void>();
+      fake.deferNextState(reading);
+      const registering = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkChild);
+      yield* Deferred.await(reading);
       yield* fake.emit({ type: "agent_start" });
       const offer = yield* Queue.take(offers).pipe(
         Effect.raceFirst(
@@ -954,6 +958,8 @@ describe("PiAdapterV2", () => {
       assert.equal(offer.providerThreadId, providerThread.id);
       assert.equal(offer.delivery, "adapter_buffered");
       assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+      yield* Fiber.join(registering);
       let dispatchCommitted = false;
       yield* offer.dispatchIfCurrent!(
         Effect.sync(() => {
@@ -1215,14 +1221,23 @@ describe("PiAdapterV2", () => {
         modelSelection: modelSelection("default"),
         runtimePolicy,
       });
-      yield* fake.emit({ type: "agent_start" });
-      const offer = yield* Queue.take(offers);
-      assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
       const otherThread = {
         ...providerThread,
         appThreadId: ThreadId.make("other-thread"),
         id: ProviderThreadId.make("other-provider-thread"),
       };
+      const reading = yield* Deferred.make<void>();
+      fake.deferNextState(reading);
+      const registering = yield* runtime
+        .resumeThread({ providerThread: otherThread })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(reading);
+      yield* fake.emit({ type: "agent_start" });
+      const offer = yield* Queue.take(offers);
+      yield* fake.resolveDeferredState(recordedIdleState("/fake/other-session.jsonl"));
+      assert.equal((yield* Fiber.join(registering))._tag, "Failure");
+      assert.isFalse(fake.allRequests().some((request) => request.type === "switch_session"));
+      assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
       assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(otherThread));
       const failure = yield* runtime
         .resumeThread({ providerThread: otherThread })
@@ -1428,6 +1443,40 @@ describe("PiAdapterV2", () => {
           1,
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("creates a fresh session when cold resume is bypassed before registration", () =>
+    Effect.gen(function* () {
+      const original = yield* openRuntime(yield* makeFakePi);
+      const persisted = yield* original.runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        undefined,
+        FAKE_SESSION_FILE,
+      );
+      const fresh = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+        existingProviderThread: { ...persisted, nativeThreadRef: null },
+      });
+      assert.equal(fresh.id, persisted.id);
+      assert.notEqual(fresh.nativeThreadRef?.nativeId, persisted.nativeThreadRef?.nativeId);
+      assert.equal(
+        fake.allRequests().filter((request) => request.type === "new_session").length,
+        1,
+      );
+      assert.isFalse(fake.allRequests().some((request) => request.type === "switch_session"));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("reserves registration during its state read and releases it on interruption", () =>

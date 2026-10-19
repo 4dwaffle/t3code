@@ -543,9 +543,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
-      let registrationAttempted = false;
+      let registrationAttempted = input.initialNativeThreadId !== undefined;
       let registrationInProgress = false;
-      let lastNativeThreadId: string | null = null;
+      let lastNativeThreadId: string | null = input.initialNativeThreadId ?? null;
       let stopRequested = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PiWake | null = null;
@@ -2252,6 +2252,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             liveSessionFile !== undefined &&
             path.resolve(cwd, liveSessionFile) === path.resolve(cwd, resumeId);
           if (!alreadyOnResumeFile && (resumeId != null || needsNewSession)) {
+            if (pendingWake !== null) {
+              return yield* protocolError(
+                "Cannot switch Pi threads while native work is awaiting a turn",
+              );
+            }
             lastNativeThreadId = resumeId ?? lastNativeThreadId;
             // Even a failed lifecycle operation can change Pi's native session.
             // Never leave the old app binding or model defaults usable afterward.
@@ -2341,7 +2346,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   createdAt,
                   updatedAt: createdAt,
                 };
-          threadState = { providerThread, activeTurn: null };
+          if (
+            threadState !== null &&
+            threadState.providerThread.id === providerThread.id &&
+            threadState.providerThread.appThreadId === threadInput.threadId &&
+            threadState.providerThread.nativeThreadRef?.nativeId === resumeId
+          ) {
+            // A wake arriving during the reads still owns this same-session binding.
+            threadState.providerThread = providerThread;
+          } else {
+            if (pendingWake !== null) {
+              return yield* protocolError(
+                "Cannot switch Pi threads while native work is awaiting a turn",
+              );
+            }
+            threadState = { providerThread, activeTurn: null };
+          }
           const baselineEntries = yield* request({ type: "get_entries" }).pipe(
             Effect.orElseSucceed(() => undefined),
           );
