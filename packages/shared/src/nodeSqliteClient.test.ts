@@ -1408,7 +1408,7 @@ it.effect.each([
             const connection = reserved ? yield* sql.reserve : undefined;
             const insert = (value: number) =>
               connection
-                ? connection.executeUnprepared("INSERT INTO entries VALUES (?)", [value])
+                ? connection.executeUnprepared("INSERT INTO entries VALUES (?)", [value], undefined)
                 : sql`INSERT INTO entries VALUES (${value})`;
             const scheduled = schedulerHoldingDispatch(stage === "resumed");
             yield* Effect.addFinalizer(() => Effect.sync(scheduled.resume));
