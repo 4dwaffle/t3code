@@ -257,18 +257,20 @@ export function buildScheduledTaskUpdateInput(
   )
     patch.modelSelection = draft.modelSelection;
   const schedule = scheduleFromDraft(draft.schedule);
-  if (
-    schedule !== null &&
-    (JSON.stringify(schedule) !== JSON.stringify(scheduleFromDraft(baseline.schedule)) ||
-      (schedule.type === "interval" &&
-        liveTask.schedule.type === "interval" &&
-        liveTask.schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS))
-  ) {
+  const scheduleChanged =
+    JSON.stringify(schedule) !== JSON.stringify(scheduleFromDraft(baseline.schedule));
+  if (scheduleChanged && schedule !== null) {
     // Mobile cannot edit signing credentials; preserve the current web/desktop choice.
     patch.schedule =
       schedule.type === "webhook" && liveTask.schedule.type === "webhook"
         ? { ...schedule, signature: liveTask.schedule.signature }
         : schedule;
+  } else if (
+    !scheduleChanged &&
+    liveTask.schedule.type === "interval" &&
+    liveTask.schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS
+  ) {
+    patch.schedule = { ...liveTask.schedule, everyMs: MIN_SCHEDULED_TASK_INTERVAL_MS };
   }
   const workspace = workspaceStrategyFromDraft(draft);
   const openingWorkspace = workspaceStrategyFromDraft(baseline);

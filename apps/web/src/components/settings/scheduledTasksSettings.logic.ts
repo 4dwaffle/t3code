@@ -231,16 +231,17 @@ export function buildScheduledTaskUpdateInput(
   if (draft.runtimeMode !== baseline.runtimeMode) patch.runtimeMode = draft.runtimeMode;
   if (draft.interactionMode !== baseline.interactionMode)
     patch.interactionMode = draft.interactionMode;
-  if (draft.modelKey !== baseline.modelKey) patch.modelSelection = modelSelection;
+  if (`${modelSelection.instanceId}:${modelSelection.model}` !== baseline.modelKey)
+    patch.modelSelection = modelSelection;
   const schedule = scheduleFromDraft(draft);
-  if (
-    schedule !== null &&
-    (JSON.stringify(schedule) !== JSON.stringify(scheduleFromDraft(baseline)) ||
-      (schedule.type === "interval" &&
-        task.schedule.type === "interval" &&
-        task.schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS))
+  const scheduleChanged = JSON.stringify(schedule) !== JSON.stringify(scheduleFromDraft(baseline));
+  if (scheduleChanged && schedule !== null) patch.schedule = schedule;
+  else if (
+    !scheduleChanged &&
+    task.schedule.type === "interval" &&
+    task.schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS
   )
-    patch.schedule = schedule;
+    patch.schedule = { ...task.schedule, everyMs: MIN_SCHEDULED_TASK_INTERVAL_MS };
   const workspace = workspaceStrategyFromDraft(draft);
   const openingWorkspace = workspaceStrategyFromDraft(baseline);
   if (workspace.type !== openingWorkspace.type) patch.workspaceStrategy = workspace;
