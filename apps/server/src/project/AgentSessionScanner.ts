@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's public File API omits exact file IDs above 2^53.
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 
 import {
@@ -548,13 +550,18 @@ function extractCwd(line: string): string | null {
   return null;
 }
 
-function transcriptIdentity(filePath: string, stats: FileSystem.File.Info) {
+type TranscriptIdentity = Pick<
+  AgentSessionImportSource,
+  "filePath" | "size" | "mtimeMs" | "device" | "inode" | "birthtimeMs"
+>;
+
+function transcriptIdentity(filePath: string, stats: FileSystem.File.Info): TranscriptIdentity {
   return {
     filePath,
     size: Number(stats.size),
     mtimeMs: Option.match(stats.mtime, { onNone: () => null, onSome: (date) => date.getTime() }),
     device: Number(stats.dev),
-    inode: Option.match(stats.ino, { onNone: () => null, onSome: Number }),
+    inode: Option.match(stats.ino, { onNone: () => null, onSome: String }),
     birthtimeMs: Option.match(stats.birthtime, {
       onNone: () => null,
       onSome: (date) => date.getTime(),
@@ -562,10 +569,23 @@ function transcriptIdentity(filePath: string, stats: FileSystem.File.Info) {
   };
 }
 
-type TranscriptIdentity = Pick<
-  AgentSessionImportSource,
-  "filePath" | "size" | "mtimeMs" | "device" | "inode" | "birthtimeMs"
->;
+// Use one stat result for all fields; a pathname can change between syscalls.
+function bigintTranscriptIdentity(
+  filePath: string,
+  stats: import("node:fs").BigIntStats,
+): TranscriptIdentity {
+  return {
+    filePath,
+    size: Number(stats.size),
+    mtimeMs: Number(stats.mtimeMs),
+    device: Number(stats.dev),
+    inode: stats.ino === 0n ? null : stats.ino.toString(),
+    birthtimeMs: Number(stats.birthtimeMs),
+  };
+}
+
+// Sources recorded before file IDs were strings stored a number.
+const fileIdKey = (inode: TranscriptIdentity["inode"]) => (inode === null ? null : String(inode));
 
 function sameTranscriptIdentity(left: TranscriptIdentity, right: TranscriptIdentity): boolean {
   return (
@@ -573,7 +593,7 @@ function sameTranscriptIdentity(left: TranscriptIdentity, right: TranscriptIdent
     left.size === right.size &&
     left.mtimeMs === right.mtimeMs &&
     left.device === right.device &&
-    left.inode === right.inode &&
+    fileIdKey(left.inode) === fileIdKey(right.inode) &&
     left.birthtimeMs === right.birthtimeMs
   );
 }
@@ -757,17 +777,44 @@ export const make = Effect.gen(function* () {
 
   const readTranscript = Effect.fn("AgentSessionScanner.readTranscript")(function* (
     filePath: string,
-    expected: ReturnType<typeof transcriptIdentity>,
+    expected: TranscriptIdentity,
+    useBigintStat: boolean,
     recordLimit: number,
     source: AgentSessionSource,
   ) {
     if (expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
 
+    // Effect's public File API cannot expose an exact large inode. Keep the
+    // bigint stat and reads on one Node handle instead of restatting its path.
+    const opened = Effect.gen(function* () {
+      if (useBigintStat) {
+        const handle = yield* Effect.acquireRelease(
+          Effect.tryPromise(() => NodeFSP.open(filePath, "r")),
+          (handle) => Effect.promise(() => handle.close()),
+        );
+        return {
+          identity: Effect.tryPromise(() => handle.stat({ bigint: true })).pipe(
+            Effect.map((stats) => bigintTranscriptIdentity(filePath, stats)),
+          ),
+          readAlloc: (size: number) =>
+            Effect.tryPromise(async () => {
+              const buffer = new Uint8Array(size);
+              const { bytesRead } = await handle.read(buffer, 0, size, null);
+              return bytesRead === 0 ? Option.none() : Option.some(buffer.subarray(0, bytesRead));
+            }),
+        };
+      }
+      const file = yield* fileSystem.open(filePath, { flag: "r" });
+      return {
+        identity: file.stat.pipe(Effect.map((stats) => transcriptIdentity(filePath, stats))),
+        readAlloc: (size: number) => file.readAlloc(size),
+      };
+    });
     return yield* Effect.scoped(
-      fileSystem.open(filePath, { flag: "r" }).pipe(
+      opened.pipe(
         Effect.flatMap((file) =>
           Effect.gen(function* () {
-            if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
+            if (!sameTranscriptIdentity(expected, yield* file.identity)) {
               return null;
             }
             const records: Array<DecodedTranscriptRecord> = [];
@@ -829,7 +876,7 @@ export const make = Effect.gen(function* () {
             }
 
             if (recordStarted && !(yield* Effect.try(finishRecord))) return null;
-            return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
+            return sameTranscriptIdentity(expected, yield* file.identity)
               ? { records, recordCount }
               : null;
           }),
@@ -1316,10 +1363,25 @@ export const make = Effect.gen(function* () {
           if (Option.isNone(stats) || stats.value.type !== "File") {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          const identity = transcriptIdentity(transcript.filePath, stats.value);
+          const useBigintStat = Option.isNone(stats.value.ino);
+          const identity = useBigintStat
+            ? yield* Effect.tryPromise(() =>
+                NodeFSP.stat(transcript.filePath, { bigint: true }),
+              ).pipe(
+                Effect.map((info) =>
+                  Option.some(bigintTranscriptIdentity(transcript.filePath, info)),
+                ),
+                Effect.orElseSucceed(() => Option.none<TranscriptIdentity>()),
+              )
+            : Option.some(transcriptIdentity(transcript.filePath, stats.value));
+          if (Option.isNone(identity)) {
+            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+          }
+          const currentIdentity = identity.value;
           const completedSource = completed?.find(
             (source) =>
-              source.provider === candidate.source && sameTranscriptIdentity(source, identity),
+              source.provider === candidate.source &&
+              sameTranscriptIdentity(source, currentIdentity),
           );
           if (completedSource !== undefined) {
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
@@ -1333,16 +1395,17 @@ export const make = Effect.gen(function* () {
           if (
             transcriptsRemaining === 0 ||
             recordsRemaining === 0 ||
-            identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
-            identity.size > bytesRemaining
+            currentIdentity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
+            currentIdentity.size > bytesRemaining
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
           transcriptsRemaining -= 1;
-          bytesRemaining -= identity.size;
+          bytesRemaining -= currentIdentity.size;
           const snapshot = yield* readTranscript(
             transcript.filePath,
-            identity,
+            currentIdentity,
+            useBigintStat,
             recordsRemaining,
             candidate.source,
           );
@@ -1381,7 +1444,7 @@ export const make = Effect.gen(function* () {
           }
 
           const source: AgentSessionImportSource = {
-            ...identity,
+            ...currentIdentity,
             provider: parsedThread.source,
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,

@@ -1,5 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Inject replacements at the native open boundary.
+import * as NodeFSP from "node:fs/promises";
+import { vi } from "vite-plus/test";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type OrchestrationProjectShell,
@@ -9,6 +12,7 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -22,6 +26,11 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFSP>();
+  return { ...actual, open: vi.fn(actual.open), stat: vi.fn(actual.stat) };
+});
 
 const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => ({
   id: ProjectId.make("project-1"),
@@ -1907,6 +1916,247 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             source: { size: imported.source.size, mtimeMs: imported.source.mtimeMs },
           });
         }).pipe(Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })));
+      }),
+    );
+
+    it.effect("tells a replaced transcript apart when its file ID is above 2^53", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-large-id-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-large-id-codex-");
+        const workspace = yield* makeTempDir("t3code-large-id-workspace-");
+        const filePath = path.join(
+          codexHomePath,
+          "sessions",
+          "2026",
+          "08",
+          "24",
+          "rollout-large-id.jsonl",
+        );
+        const contents = (sessionId: string) =>
+          [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: { id: sessionId, cwd: workspace },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: { type: "user_message", message: "Imported prompt" },
+            }),
+          ].join("\n");
+        yield* writeTranscript({
+          filePath,
+          contents: contents("original-session"),
+          mtimeMs: nowMs,
+        });
+
+        // Effect's stat omits file IDs above Number.MAX_SAFE_INTEGER, as on
+        // many NTFS volumes. Windows `utimes` cannot set the creation time, so
+        // pin it too; otherwise only a same-millisecond replacement collides.
+        const pinnedBirthtime = DateTime.toDateUtc(DateTime.makeUnsafe(nowMs));
+        const withLargeFileId = (target: string, info: FileSystem.File.Info) =>
+          target === filePath
+            ? { ...info, ino: Option.none(), birthtime: Option.some(pinnedBirthtime) }
+            : info;
+        // An ABA replacement opens another transcript, then restores the
+        // expected pathname before the handle is statted or read.
+        const alternatePath = `${filePath}.alternate`;
+        const savedPath = `${filePath}.saved`;
+        yield* writeTranscript({
+          filePath: alternatePath,
+          contents: contents("swappedx-session"),
+          mtimeMs: nowMs,
+        });
+        let replaceDuringOpen = false;
+        let replaceAt: "stat" | "read" | null = null;
+        let openedHandle: NodeFSP.FileHandle | undefined;
+        const beforeOpen = async () => {
+          await NodeFSP.rename(filePath, savedPath);
+          await NodeFSP.rename(alternatePath, filePath);
+        };
+        const afterOpen = async () => {
+          await NodeFSP.rename(filePath, alternatePath);
+          await NodeFSP.rename(savedPath, filePath);
+        };
+        const native = yield* Effect.promise(() =>
+          vi.importActual<typeof NodeFSP>("node:fs/promises"),
+        );
+        const nativeOpen = native.open;
+        let largeIds = true;
+        const ids = new Map<bigint, bigint>();
+        const nativeIdentity = (info: import("node:fs").BigIntStats) => {
+          let id = ids.get(info.ino);
+          if (id === undefined) {
+            id = BigInt(ids.size + 42);
+            ids.set(info.ino, id);
+          }
+          return {
+            ...info,
+            ino: largeIds ? (1n << 60n) + id : id,
+            birthtimeMs: BigInt(nowMs),
+          };
+        };
+        const statSpy = vi
+          .mocked(NodeFSP.stat)
+          .mockImplementation(async (target, options) =>
+            target === filePath && options?.bigint
+              ? nativeIdentity(await native.stat(target, { bigint: true }))
+              : native.stat(target, options),
+          );
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => statSpy.mockImplementation(native.stat)),
+        );
+        const openSpy = vi.mocked(NodeFSP.open).mockImplementation(async (target, flags, mode) => {
+          if (target !== filePath) return nativeOpen(target, flags, mode);
+          const replace = replaceDuringOpen;
+          if (replace) {
+            replaceDuringOpen = false;
+            await beforeOpen();
+          }
+          const handle = await nativeOpen(target, flags, mode);
+          openedHandle = handle;
+          if (replace) await afterOpen();
+          const stat = handle.stat.bind(handle);
+          vi.spyOn(handle, "stat").mockImplementation(async (options) => {
+            const result = options?.bigint
+              ? nativeIdentity(await stat({ bigint: true }))
+              : await stat(options);
+            if (replaceAt === "stat") {
+              replaceAt = null;
+              await beforeOpen();
+            }
+            return result;
+          });
+          if (replaceAt === "read") {
+            // The production reader supplies this overload; bind the real
+            // method so the bytes still come from the acquired descriptor.
+            const read = handle.read.bind(handle);
+            vi.spyOn(handle, "read").mockImplementationOnce(async (...args) => {
+              replaceAt = null;
+              await beforeOpen();
+              return read(...args);
+            });
+          }
+          return handle;
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(() => openSpy.mockImplementation(nativeOpen)));
+        const largeFileIdFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          stat: (target) =>
+            fileSystem.stat(target).pipe(Effect.map((info) => withLargeFileId(target, info))),
+          open: (target, options) =>
+            Effect.gen(function* () {
+              const replace = target === filePath && replaceDuringOpen;
+              if (replace) {
+                replaceDuringOpen = false;
+                yield* Effect.promise(beforeOpen);
+              }
+              const file = yield* fileSystem.open(target, options);
+              if (replace) yield* Effect.promise(afterOpen);
+              return file;
+            }).pipe(
+              Effect.map((file) => ({
+                ...file,
+                stat: file.stat.pipe(Effect.map((info) => withLargeFileId(target, info))),
+                readAlloc: (size: number) => file.readAlloc(size),
+              })),
+            ),
+        });
+
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const initial = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          const imported = initial[0];
+          expect(imported?._tag).toBe("Importable");
+          if (imported?._tag !== "Importable") return;
+          expect(imported.source.inode).toEqual(expect.any(String));
+          const opensBeforeCompleted = openSpy.mock.calls.length;
+          const completed = yield* scanner
+            .recentThreads(workspace, [imported.source])
+            .pipe(Stream.runCollect);
+          expect(completed[0]?._tag).toBe("AlreadyImported");
+          expect(openSpy.mock.calls).toHaveLength(opensBeforeCompleted);
+          // Older sources stored the ID as a number, or as null when it was too
+          // large. Null ones are read once so the importer records the full ID.
+          expect(BigInt(String(imported.source.inode))).toBeGreaterThan(
+            BigInt(Number.MAX_SAFE_INTEGER),
+          );
+          largeIds = false;
+          const safe = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          expect(safe[0]?._tag).toBe("Importable");
+          if (safe[0]?._tag !== "Importable") return;
+          const opensBeforeNumeric = openSpy.mock.calls.length;
+          const numeric = yield* scanner
+            .recentThreads(workspace, [{ ...safe[0].source, inode: Number(safe[0].source.inode) }])
+            .pipe(Stream.runCollect);
+          expect(numeric[0]?._tag).toBe("AlreadyImported");
+          expect(openSpy.mock.calls).toHaveLength(opensBeforeNumeric);
+          largeIds = true;
+          const legacy = yield* scanner
+            .recentThreads(workspace, [{ ...imported.source, inode: null }])
+            .pipe(Stream.runCollect);
+          expect(legacy[0]).toMatchObject({
+            _tag: "Importable",
+            source: { inode: imported.source.inode },
+          });
+
+          replaceDuringOpen = true;
+          const raced = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          expect(replaceDuringOpen).toBe(false);
+          expect(raced).toEqual([{ _tag: "Skipped" }]);
+          expect(openedHandle?.fd).toBe(-1);
+          const retried = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          expect(retried[0]).toMatchObject({
+            _tag: "Importable",
+            thread: { providerSessionId: "original-session" },
+            source: { inode: imported.source.inode },
+          });
+
+          for (const stage of ["stat", "read"] as const) {
+            replaceAt = stage;
+            const duringRead = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+            expect(replaceAt).toBeNull();
+            expect(openedHandle?.fd).toBe(-1);
+            expect(duringRead[0]).toMatchObject({
+              _tag: "Importable",
+              thread: { providerSessionId: "original-session" },
+              source: { inode: imported.source.inode },
+            });
+            const nextScan = yield* scanner
+              .recentThreads(workspace, [imported.source])
+              .pipe(Stream.runCollect);
+            expect(nextScan[0]).toMatchObject({
+              _tag: "Importable",
+              thread: { providerSessionId: "swappedx-session" },
+            });
+            if (nextScan[0]?._tag === "Importable") {
+              expect(nextScan[0].source.inode).not.toBe(imported.source.inode);
+            }
+            yield* Effect.promise(afterOpen);
+          }
+
+          // Holding the old file open keeps its ID from being reused.
+          yield* fileSystem.open(filePath);
+          yield* fileSystem.remove(filePath);
+          yield* writeTranscript({
+            filePath,
+            contents: contents("replaced-session"),
+            mtimeMs: nowMs,
+          });
+          const replaced = yield* scanner
+            .recentThreads(workspace, [imported.source])
+            .pipe(Stream.runCollect);
+          expect(replaced[0]).toMatchObject({
+            _tag: "Importable",
+            thread: { providerSessionId: "replaced-session" },
+          });
+        }).pipe(
+          Effect.provide(layerScannerTest({ claudeHomePath, codexHomePath })),
+          Effect.provideService(FileSystem.FileSystem, largeFileIdFileSystem),
+        );
       }),
     );
 
