@@ -3005,15 +3005,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }
             const subagent = child.subagent;
             if (subagent === undefined) continue;
+            const hasNativeWork = child.status === "running" || hasWorkingDescendant(sessionId);
             const newDelegation =
               child.delegationId !== null &&
               child.delegationId !== subagent.task.nativeTaskRef?.nativeId &&
               !subagent.childItemOrdinals.has(`${sessionId}:prompt:${child.delegationId}`);
             if (
-              (child.status === "running" && acpSubagentStatusIsTerminal(subagent.task.status)) ||
+              (hasNativeWork && acpSubagentStatusIsTerminal(subagent.task.status)) ||
               (child.owner !== context &&
                 (child.owner?.finalizedStatus !== "completed" || newDelegation) &&
-                (child.status === "running" || child.pending.length > 0))
+                (hasNativeWork || child.pending.length > 0))
             ) {
               // The ownership event precedes child tools so the old run can detach first.
               child.owner = context;
