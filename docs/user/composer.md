@@ -62,7 +62,7 @@ If your **Send shortcut** requires `Cmd+Enter` or `Ctrl+Enter`, that shortcut us
 your default follow-up behavior; add **Shift** to use the opposite action. This
 applies only to multiline messages when you choose the multiline send option.
 When you steer Claude while it runs a command, the command moves to the background
-so Claude reads your message right away. The command keeps running; Stop ends it.
+so Claude can read your message while the command keeps running.
 If Claude can't move it, for example with background tasks turned off, the steer
 waits for the command as before.
 

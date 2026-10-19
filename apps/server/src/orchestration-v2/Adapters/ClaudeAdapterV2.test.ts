@@ -3213,119 +3213,128 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  // Moves are forked, so a test proves one was not asked for by draining the
-  // requests up to a later control move instead of polling an empty queue.
-  const makeSteerBackgroundHarness = (options: {
-    readonly attempt: string;
-    readonly registered?: (toolUseId: string) => boolean;
-    readonly offer?: (
-      message: SDKUserMessage,
-    ) => Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
-  }) =>
-    Effect.gen(function* () {
-      const moves: Array<{ readonly toolUseId: string; readonly offeredBefore: number }> = [];
-      const moved = yield* Queue.unbounded<string>();
-      let offered: ReadonlyArray<SDKUserMessage> = [];
-      const harness = yield* makeWakeHarnessWithOptions({
-        backgroundTasks: (toolUseId) =>
-          Effect.sync(() => moves.push({ toolUseId, offeredBefore: offered.length })).pipe(
-            Effect.andThen(Queue.offer(moved, toolUseId)),
-            Effect.as(options.registered?.(toolUseId) ?? false),
-          ),
-        ...(options.offer === undefined ? {} : { offer: options.offer }),
-      });
-      offered = harness.offeredMessages;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const attemptId = RunAttemptId.make(options.attempt);
-      const input = makeClaudeTestTurnInput({
-        threadId: harness.threadId,
-        providerThread: harness.providerThread,
-        now: yield* DateTime.now,
-        attemptId,
-        text: "Run the slow suite.",
-        attachments: [],
-      });
-      yield* harness.runtime.startTurn(input);
-      let frame = 0;
-      const uuid = () =>
-        `00000000-0000-4000-8000-${(0x900 + frame++).toString(16).padStart(12, "0")}`;
-      const toolUse = (id: string) =>
-        claudeSdkFrame({
-          type: "assistant",
-          uuid: uuid(),
-          session_id: WAKE_NATIVE_SESSION,
-          parent_tool_use_id: null,
-          message: {
-            id: `message-${id}`,
-            model: "claude-sonnet-5-5",
-            content: [{ type: "tool_use", id, name: "Bash", input: { command: "vp test" } }],
-          },
-        });
-      const taskStarted = (toolUseId: string) =>
-        claudeSdkFrame({
-          type: "system",
-          subtype: "task_started",
-          task_id: `task-${toolUseId}`,
-          tool_use_id: toolUseId,
-          description: "Run the suite",
-          is_backgrounded: false,
-          task_type: "local_bash",
-          uuid: uuid(),
-          session_id: WAKE_NATIVE_SESSION,
-        });
-      const steer = (text: string) =>
-        harness.runtime.steerTurn({
-          threadId: harness.threadId,
-          runId: input.runId,
-          providerThread: harness.providerThread,
-          providerTurnId: idAllocator.derive.providerTurn({
-            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-            nativeTurnId: `turn:${attemptId}`,
-          }),
-          message: {
-            createdBy: "user",
-            creationSource: "web",
-            messageId: MessageId.make(`message-${options.attempt}-${frame++}`),
-            text,
-            attachments: [],
-          },
-        });
-      const movesUntil = Effect.fnUntraced(function* (control: string) {
-        const taken: Array<string> = [];
-        while (taken.at(-1) !== control) taken.push(yield* Queue.take(moved));
-        return taken;
-      });
-      return { harness, moves, toolUse, taskStarted, steer, movesUntil, uuid };
-    });
-
-  it.effect.each([true, false])(
-    "a steer moves running root commands to the background, registered at steer %s",
-    (registered) =>
+  it.effect.each([false, true])(
+    "steer backgrounds only eligible root commands across overlapping offers (older abort: %s)",
+    (olderAbort) =>
       Effect.scoped(
         Effect.gen(function* () {
-          // The CLI registers a foreground command's task about three seconds
-          // in; before that, backgroundTasks matches nothing.
-          const registeredTasks = new Set<string>(registered ? ["toolu-running"] : []);
-          const { harness, moves, toolUse, taskStarted, steer, movesUntil, uuid } =
-            yield* makeSteerBackgroundHarness({
-              attempt: "attempt-steer-background",
-              registered: (toolUseId) => registeredTasks.has(toolUseId),
+          const moved = yield* Queue.unbounded<string>();
+          const moves: Array<{ id: string; offered: number; registered: boolean }> = [];
+          const registered = new Set(["registered"]);
+          const stopped: Array<string> = [];
+          let interrupts = 0;
+          let rejectOffer = false;
+          const harness = yield* makeWakeHarnessWithOptions({
+            backgroundTasks: (id) =>
+              Effect.gen(function* () {
+                moves.push({
+                  id,
+                  offered: harness.offeredMessages.length,
+                  registered: registered.has(id),
+                });
+                yield* Queue.offer(moved, id);
+                if (id === "unsupported") {
+                  return yield* new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                    method: "backgroundTasks",
+                    cause: new Error("Backgrounding unavailable."),
+                  });
+                }
+                return registered.has(id);
+              }),
+            offer: () =>
+              rejectOffer
+                ? Effect.fail(
+                    new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                      method: "offer",
+                      cause: new Error("Input rejected."),
+                    }),
+                  )
+                : Effect.void,
+            stopTask: (id) =>
+              Effect.sync(() => {
+                stopped.push(id);
+              }),
+            interrupt: Effect.sync(() => {
+              interrupts++;
+            }),
+          });
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const attemptId = RunAttemptId.make("steer-command-cohorts");
+          const input = makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId,
+            text: "Run the slow suites.",
+            attachments: [],
+          });
+          yield* harness.runtime.startTurn(input);
+          let sequence = 0;
+          const uuid = () =>
+            `00000000-0000-4000-8000-${(++sequence).toString(16).padStart(12, "0")}`;
+          const command = (id: string) =>
+            harness.offerAndWait(
+              claudeSdkFrame({
+                type: "assistant",
+                uuid: uuid(),
+                session_id: WAKE_NATIVE_SESSION,
+                parent_tool_use_id: null,
+                message: {
+                  id: `message-${id}`,
+                  model: "claude-sonnet-5-5",
+                  content: [{ type: "tool_use", id, name: "Bash", input: { command: "vp test" } }],
+                },
+              }),
+            );
+          const taskStarted = (id: string) =>
+            harness.offerAndWait(
+              claudeSdkFrame({
+                type: "system",
+                subtype: "task_started",
+                task_id: `task-${id}`,
+                tool_use_id: id,
+                description: "Run the suite",
+                is_backgrounded: false,
+                task_type: "local_bash",
+                uuid: uuid(),
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+          const steer = (text: string) =>
+            harness.runtime.steerTurn({
+              threadId: harness.threadId,
+              runId: input.runId,
+              providerThread: harness.providerThread,
+              providerTurnId: idAllocator.derive.providerTurn({
+                driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                nativeTurnId: `turn:${attemptId}`,
+              }),
+              message: {
+                createdBy: "user",
+                creationSource: "web",
+                messageId: MessageId.make(`steer-${sequence++}`),
+                text,
+                attachments: [],
+              },
             });
-          yield* harness.offerAndWait(toolUse("toolu-running"));
-
+          // Background requests are forked; a later control request drains earlier
+          // requests without sleeps or assertions against an unobserved empty queue.
+          const through = Effect.fnUntraced(function* (id: string) {
+            for (;;) {
+              if ((yield* Queue.take(moved)) === id) return;
+            }
+          });
+          yield* command("registered");
+          yield* taskStarted("registered");
+          yield* command("late");
           yield* steer("Skip the e2e tests.");
+          yield* through("late");
           assert.equal(harness.offeredMessages[1]?.priority, "now");
-          assert.deepEqual(yield* movesUntil("toolu-running"), ["toolu-running"]);
-          if (!registered) {
-            registeredTasks.add("toolu-running");
-            yield* harness.offerAndWait(taskStarted("toolu-running"));
-            assert.deepEqual(yield* movesUntil("toolu-running"), ["toolu-running"]);
-          }
-          // Offered first, so the steer is queued when the tool call returns.
-          assert.isTrue(moves.every((move) => move.offeredBefore === 2));
-
-          yield* Queue.offer(
-            harness.sdkMessages,
+          assert.deepEqual(moves, [
+            { id: "registered", offered: 2, registered: true },
+            { id: "late", offered: 2, registered: false },
+          ]);
+          yield* harness.offerAndWait(
             claudeSdkFrame({
               type: "user",
               uuid: uuid(),
@@ -3336,36 +3345,52 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 content: [
                   {
                     type: "tool_result",
-                    tool_use_id: "toolu-running",
-                    content:
-                      "Command was manually backgrounded by user with ID: task-toolu-running.",
+                    tool_use_id: "registered",
+                    content: "Command was manually backgrounded by user with ID: task-registered.",
                   },
                 ],
               },
             }),
           );
-          yield* Queue.offer(
-            harness.sdkMessages,
-            makeResultFrame({ uuid: uuid(), result: "", terminalReason: "aborted_tools" }),
-          );
-          // Claude has read the steer: its own later commands keep running.
-          yield* harness.offerAndWait(toolUse("toolu-later"));
-          yield* harness.offerAndWait(taskStarted("toolu-later"));
-          // A second steer moves toolu-later once, and toolu-control after it.
-          yield* harness.offerAndWait(toolUse("toolu-control"));
+          yield* command("unsupported");
           yield* steer("Also skip lint.");
-          const taken = yield* movesUntil("toolu-control");
-          assert.lengthOf(
-            taken.filter((id) => id === "toolu-later"),
-            1,
+          yield* through("unsupported");
+          yield* command("new");
+          rejectOffer = true;
+          assert.isTrue(Exit.isFailure(yield* steer("Undeliverable steer").pipe(Effect.exit)));
+          rejectOffer = false;
+          registered.add("new");
+          yield* taskStarted("new");
+          if (olderAbort) {
+            yield* harness.offerAndWait(
+              makeResultFrame({
+                uuid: uuid(),
+                result: "",
+                terminalReason: "aborted_tools",
+              }),
+            );
+          }
+          registered.add("late");
+          yield* taskStarted("late");
+          yield* command("control");
+          yield* steer("Now stop waiting for the new suite, too.");
+          yield* through("control");
+          assert.isTrue(
+            moves.some((move) => move.id === "late" && move.registered && move.offered === 4),
+            "late registration retains eligibility from successful steers, even after an older abort",
           );
-
+          assert.deepEqual(
+            moves.filter((move) => move.id === "new"),
+            [{ id: "new", offered: 5, registered: true }],
+            "a later command waits for its own successful steer, even if another offer fails",
+          );
+          assert.deepEqual(stopped, []);
+          assert.equal(interrupts, 0);
           yield* Queue.offer(
             harness.sdkMessages,
-            makeResultFrame({ uuid: uuid(), result: "Skipped the e2e tests." }),
+            makeResultFrame({ uuid: uuid(), result: "Done." }),
           );
-          const terminal = yield* Queue.take(harness.terminalReceipts);
-          assert.equal(terminal.status, "completed");
+          assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
           assert.lengthOf(harness.terminalEvents(), 1);
         }).pipe(
           Effect.provide(
@@ -3373,82 +3398,6 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         ),
       ),
-  );
-
-  it.effect("a command Claude starts while the steer is still being offered stays put", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        // Steering while Claude streams aborts the stream at once, so the
-        // steer's abort result and Claude's next command can reach the adapter
-        // before the offer returns.
-        let duringOffer: Effect.Effect<void> = Effect.void;
-        const { harness, toolUse, taskStarted, steer, movesUntil, uuid } =
-          yield* makeSteerBackgroundHarness({
-            attempt: "attempt-steer-during-offer",
-            offer: (message) => (message.priority === "now" ? duringOffer : Effect.void),
-          });
-        duringOffer = Effect.suspend(() => {
-          duringOffer = Effect.void;
-          return Queue.offerAll(harness.sdkMessages, [
-            makeResultFrame({ uuid: uuid(), result: "", terminalReason: "aborted_streaming" }),
-            toolUse("toolu-after-steer"),
-            taskStarted("toolu-after-steer"),
-          ]).pipe(Effect.asVoid);
-        });
-        yield* steer("Skip the e2e tests.");
-
-        yield* harness.offerAndWait(toolUse("toolu-control"));
-        yield* steer("Also skip lint.");
-        const taken = yield* movesUntil("toolu-control");
-        assert.lengthOf(
-          taken.filter((id) => id === "toolu-after-steer"),
-          1,
-        );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-    ),
-  );
-
-  it.effect("a steer Claude never received leaves later commands in the foreground", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        let delivered = false;
-        const { harness, toolUse, taskStarted, steer, movesUntil } =
-          yield* makeSteerBackgroundHarness({
-            attempt: "attempt-steer-undelivered",
-            offer: (message) =>
-              message.priority === "now" && !delivered
-                ? Effect.fail(
-                    new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
-                      method: "offer",
-                      cause: new Error("The CLI closed its input."),
-                    }),
-                  )
-                : Effect.void,
-          });
-        yield* harness.offerAndWait(toolUse("toolu-undelivered"));
-
-        assert.isTrue(Exit.isFailure(yield* steer("Skip the e2e tests.").pipe(Effect.exit)));
-        yield* harness.offerAndWait(taskStarted("toolu-undelivered"));
-
-        // A delivered steer moves toolu-undelivered once, and toolu-control after it.
-        delivered = true;
-        yield* harness.offerAndWait(toolUse("toolu-control"));
-        yield* steer("Skip the e2e tests.");
-        const taken = yield* movesUntil("toolu-control");
-        assert.lengthOf(
-          taken.filter((id) => id === "toolu-undelivered"),
-          1,
-        );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-    ),
   );
 
   it.effect("announces usage-limit pauses once per window and again on a new turn", () =>
