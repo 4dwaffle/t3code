@@ -692,8 +692,8 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
       (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
 
   // No composing-text check, unlike iOS's marked-text guard: Latin IMEs keep a composing region
-  // over the current word even for hardware typing, and IMEs that confirm a composition with
-  // Return consume the key before it reaches the view.
+  // over the current word even for hardware typing, so it would block every send. An IME that
+  // confirms a composition with Return is expected to consume the key before the view sees it.
   private fun canSubmit(): Boolean =
     submitEnabled && submitListener != null && !readOnly && isEnabled
 
