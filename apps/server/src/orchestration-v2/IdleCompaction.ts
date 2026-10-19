@@ -120,6 +120,8 @@ export function idleCompactionCandidate(
     // Persistent monitors are left out of pending background work but still report.
     turnItems.some(
       (item) =>
+        // Like pending background work, a rolled-back run's open items are stale.
+        runs.find((run) => run.id === item.runId)?.status !== "rolled_back" &&
         (item.type === "command_execution" ||
           item.type === "dynamic_tool" ||
           item.type === "subagent") &&

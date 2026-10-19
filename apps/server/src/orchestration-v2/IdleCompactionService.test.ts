@@ -12,6 +12,7 @@ import {
   ProviderTurnId,
   RunId,
   ThreadId,
+  TurnItemId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
@@ -261,6 +262,36 @@ describe("idle compaction eligibility", () => {
       ];
       expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
     }
+    value.providerThreads = projection().providerThreads;
+    value.turnItems = [
+      {
+        id: TurnItemId.make("open-command"),
+        threadId: value.thread.id,
+        runId: RunId.make("rewound"),
+        nodeId: null,
+        providerThreadId: value.providerThreads[0]!.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "running",
+        title: null,
+        startedAt: at(),
+        completedAt: null,
+        updatedAt: at(),
+        type: "command_execution",
+        input: "vp run dev",
+        output: "",
+        exitCode: null,
+      },
+    ];
+    expect(idleCompactionCandidate(value, true, NOW_MS)).toBeNull();
+    // A rolled-back run's open items are stale and must not block compaction forever.
+    value.runs = [
+      ...value.runs,
+      { ...value.runs[0]!, id: RunId.make("rewound"), ordinal: 0, status: "rolled_back" },
+    ];
+    expect(idleCompactionCandidate(value, true, NOW_MS)).not.toBeNull();
   });
 
   it("requires measured occupancy, preferring current turn usage to cumulative accounting", () => {
