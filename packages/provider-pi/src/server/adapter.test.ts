@@ -19,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -87,7 +88,7 @@ interface FakePi {
   readonly vetoNextSwitch: () => void;
   readonly queueState: (data: Record<string, unknown>) => void;
   readonly setStreaming: (streaming: boolean) => void;
-  readonly deferNextState: () => void;
+  readonly deferNextState: (started?: Deferred.Deferred<void>) => void;
   readonly resolveDeferredState: (data: unknown) => Effect.Effect<void>;
   readonly failNextState: (skip?: number) => void;
   readonly deferNextLifecycle: (type: "switch_session" | "new_session" | "fork") => void;
@@ -130,6 +131,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const statsQueue: Array<unknown> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
+  let deferredStateStarted: Deferred.Deferred<void> | undefined;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failStateAfter: number | null = null;
   let vetoSwitch = false;
@@ -224,6 +226,10 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         if (record["type"] === "get_state" && deferState) {
           deferState = false;
           deferredStateRequest = record;
+          if (deferredStateStarted !== undefined) {
+            yield* Deferred.succeed(deferredStateStarted, undefined);
+            deferredStateStarted = undefined;
+          }
           continue;
         }
         if (record["type"] === deferredLifecycle) {
@@ -277,8 +283,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     takeRequest,
     queueEntries: (data) => entriesQueue.push(data),
     queueMessages: (data) => messagesQueue.push(data),
-    deferNextState: () => {
+    deferNextState: (started) => {
       deferState = true;
+      deferredStateStarted = started;
     },
     resolveDeferredState: (data) =>
       Effect.gen(function* () {
@@ -1421,6 +1428,129 @@ describe("PiAdapterV2", () => {
           1,
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("reserves registration during its state read and releases it on interruption", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread, "anthropic/claude-sonnet");
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_settled" });
+      yield* takeEvent((event) => event.type === "turn.terminal");
+
+      const reading = yield* Deferred.make<void>();
+      fake.deferNextState(reading);
+      const registering = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkChild);
+      yield* Deferred.await(reading);
+      const overlappingTurn = yield* startTurn(runtime, providerThread).pipe(Effect.result);
+      assert.equal(overlappingTurn._tag, "Failure", "A turn was accepted during registration");
+      const overlappingResume = yield* runtime.resumeThread({ providerThread }).pipe(Effect.result);
+      assert.equal(overlappingResume._tag, "Failure");
+      yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+      const resumed = yield* Fiber.join(registering);
+
+      const interruptedRead = yield* Deferred.make<void>();
+      fake.deferNextState(interruptedRead);
+      const interrupted = yield* runtime
+        .resumeThread({ providerThread: resumed })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(interruptedRead);
+      yield* Fiber.interrupt(interrupted);
+      yield* fake.resolveDeferredState(recordedIdleState(FAKE_SESSION_FILE));
+      fake.failNextState();
+      const failedRead = yield* runtime
+        .resumeThread({ providerThread: resumed })
+        .pipe(Effect.result);
+      assert.equal(failedRead._tag, "Failure");
+
+      yield* startTurn(runtime, resumed, "anthropic/claude-sonnet", [], "Continue", undefined, 2);
+      assert.equal((yield* fake.takeRequest("prompt"))["message"], "Continue");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.isFalse(fake.allRequests().some((request) => request.type === "switch_session"));
+      assert.equal(fake.allRequests().filter((request) => request.type === "set_model").length, 1);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("recovers an unusable spawn session before falling back to a fresh native thread", () =>
+    Effect.gen(function* () {
+      const original = yield* openRuntime(yield* makeFakePi);
+      const persisted = yield* original.runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const failed = yield* makeFakePi;
+      const replacement = yield* makeFakePi;
+      let spawnCount = 0;
+      const fake = {
+        ...replacement,
+        spawner: ChildProcessSpawner.make((command) => {
+          spawnCount++;
+          return (spawnCount === 1 ? failed : replacement).spawner.spawn(command);
+        }),
+      };
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        undefined,
+        FAKE_SESSION_FILE,
+      );
+      assert.include(failed.lastSpawn().args, "--session");
+      yield* failed.closeStdout;
+      replacement.queueState({ sessionFile: "/fake/default-session.jsonl" });
+      replacement.deferNextLifecycle("switch_session");
+      const resuming = yield* runtime
+        .resumeThread({ providerThread: persisted })
+        .pipe(Effect.result, Effect.forkChild);
+      const switchRequest = yield* Effect.raceFirst(
+        replacement.takeRequest("switch_session"),
+        Fiber.join(resuming).pipe(Effect.as(undefined)),
+      );
+      assert.isDefined(switchRequest, "Pi did not retry the failed session launch");
+      if (switchRequest === undefined) return;
+      assert.equal(spawnCount, 2);
+      assert.notInclude(replacement.lastSpawn().args, "--session");
+      assert.notInclude(replacement.lastSpawn().args, "--no-session");
+      assert.include(replacement.lastSpawn().args, "--extension");
+      assert.equal(replacement.lastSpawn().env.T3_PI_RUNTIME_MODE, "full-access");
+      yield* replacement.emit({
+        type: "response",
+        id: switchRequest.id,
+        command: "switch_session",
+        success: false,
+        error: "Stored session working directory does not exist",
+      });
+      assert.equal((yield* Fiber.join(resuming))._tag, "Failure");
+
+      const fresh = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+        existingProviderThread: { ...persisted, nativeThreadRef: null },
+      });
+      assert.notEqual(fresh.nativeThreadRef?.nativeId, persisted.nativeThreadRef?.nativeId);
+      assert.isTrue(replacement.allRequests().some((request) => request.type === "new_session"));
+      yield* startTurn(runtime, fresh);
+      yield* replacement.takeRequest("prompt");
+      yield* replacement.emit({ type: "agent_start" });
+      yield* replacement.emit({ type: "agent_settled" });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(spawnCount, 2);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("rejects a resume while a turn is active", () =>
