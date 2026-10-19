@@ -1121,124 +1121,239 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
 });
 
 describe("ClaudeAdapterV2 worktree location follow", () => {
-  it.effect("reports EnterWorktree/ExitWorktree cwd moves as provider_session.updated", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
-          prefix: "t3-claude-worktree-follow-",
-        });
-        let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
-        const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
-          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
-          settings: DEFAULT_CLAUDE_SETTINGS,
-          environment: {},
-          attachmentsDir,
-          fileSystem,
-          path: yield* Path.Path,
-          crypto: yield* Crypto.Crypto,
-          idAllocator,
-          queryRunner: {
-            allocateSessionId: Effect.succeed("native-thread-claude-worktree-follow"),
-            open: (input) =>
-              Effect.sync(() => {
-                openedOptions = input.options;
-                return {
-                  messages: Stream.never,
-                  offer: () => Effect.void,
-                  setModel: () => Effect.void,
-                  applyFlagSettings: () => Effect.void,
-                  setPermissionMode: () => Effect.void,
-                  stopTask: () => Effect.void,
-                  backgroundTasks: () => Effect.succeed(false),
-                  interrupt: Effect.void,
-                  close: Effect.void,
-                };
-              }),
-            forkSession: () => Effect.die("unused"),
-            subagentLaunchToolUseId: () => Effect.succeed(null),
-            assertComplete: Effect.void,
-          },
-        });
-        const originalCwd = "/workspace";
-        const threadId = ThreadId.make("thread-claude-worktree-follow");
-        const runtime = yield* adapter.openSession({
-          threadId,
-          providerSessionId: ProviderSessionId.make("provider-session-claude-worktree-follow"),
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-        });
-        const providerThread = yield* runtime.ensureThread({
-          threadId,
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-        });
-        const now = yield* DateTime.now;
-        yield* runtime.startTurn(
-          makeClaudeTestTurnInput({
+  it.effect.each(["reuse", "replace"] as const)(
+    "reports EnterWorktree/ExitWorktree cwd moves as provider_session.updated across %s after failure",
+    (lifecycle) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-worktree-follow-",
+          });
+          let openedOptions: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
+          const openedCwds: Array<string | undefined> = [];
+          const processQueues: Array<Queue.Queue<SDKMessage>> = [];
+          let closedProcesses = 0;
+          const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+            instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            path: yield* Path.Path,
+            crypto: yield* Crypto.Crypto,
+            idAllocator,
+            queryRunner: {
+              allocateSessionId: Effect.succeed("native-thread-claude-worktree-follow"),
+              open: (input) =>
+                Effect.gen(function* () {
+                  openedOptions = input.options;
+                  openedCwds.push(input.options.cwd);
+                  const messages = yield* Queue.unbounded<SDKMessage>();
+                  processQueues.push(messages);
+                  return {
+                    messages: Stream.fromQueue(messages),
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    applyFlagSettings: () => Effect.void,
+                    setPermissionMode: () => Effect.void,
+                    stopTask: () => Effect.void,
+                    backgroundTasks: () => Effect.succeed(false),
+                    interrupt: Effect.void,
+                    close: Queue.shutdown(messages).pipe(
+                      Effect.tap(() =>
+                        Effect.sync(() => {
+                          closedProcesses += 1;
+                        }),
+                      ),
+                    ),
+                  };
+                }),
+              forkSession: () => Effect.die("unused"),
+              subagentLaunchToolUseId: () => Effect.succeed(null),
+              assertComplete: Effect.void,
+            },
+          });
+          const originalCwd = "/workspace";
+          const threadId = ThreadId.make("thread-claude-worktree-follow");
+          const runtime = yield* adapter.openSession({
             threadId,
-            providerThread,
-            now,
-            attemptId: RunAttemptId.make("attempt-claude-worktree-follow"),
-            text: "Enter the worktree.",
-            attachments: [],
-          }),
-        );
-        const hook = openedOptions?.hooks?.PostToolUse?.[0]?.hooks[0];
-        assert.isFunction(hook);
-        const fireHook = (input: {
-          readonly cwd: string;
-          readonly toolName: "EnterWorktree" | "ExitWorktree";
-          readonly agentId?: string;
-        }) =>
-          Effect.promise(() =>
-            hook!(
-              {
-                hook_event_name: "PostToolUse",
-                session_id: "sdk-session",
-                transcript_path: "/tmp/transcript.jsonl",
-                cwd: input.cwd,
-                tool_name: input.toolName,
-                tool_use_id: `tool-${input.toolName}`,
-                tool_input: {},
-                tool_response: {},
-                ...(input.agentId === undefined ? {} : { agent_id: input.agentId }),
-              },
-              undefined,
-              { signal: new AbortController().signal },
-            ),
+            providerSessionId: ProviderSessionId.make("provider-session-claude-worktree-follow"),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const now = yield* DateTime.now;
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-worktree-follow"),
+              text: "Enter the worktree.",
+              attachments: [],
+            }),
           );
-        const nextSessionUpdate = Effect.gen(function* () {
-          const event = yield* runtime.events.pipe(
-            Stream.filter((item) => item.type === "provider_session.updated"),
-            Stream.runHead,
-          );
-          assert.isTrue(Option.isSome(event));
-          assert.equal(
-            Option.isSome(event) ? event.value.providerSession.cwdChangeSource : undefined,
-            originalCwd,
-          );
-          return Option.isSome(event) ? event.value.providerSession.cwd : null;
-        });
+          const hook = openedOptions?.hooks?.PostToolUse?.[0]?.hooks[0];
+          assert.isFunction(hook);
+          const fireHook = (input: {
+            readonly cwd: string;
+            readonly toolName: "EnterWorktree" | "ExitWorktree";
+            readonly agentId?: string;
+          }) =>
+            Effect.promise(() =>
+              openedOptions!.hooks!.PostToolUse![0]!.hooks[0]!(
+                {
+                  hook_event_name: "PostToolUse",
+                  session_id: "sdk-session",
+                  transcript_path: "/tmp/transcript.jsonl",
+                  cwd: input.cwd,
+                  tool_name: input.toolName,
+                  tool_use_id: `tool-${input.toolName}`,
+                  tool_input: {},
+                  tool_response: {},
+                  ...(input.agentId === undefined ? {} : { agent_id: input.agentId }),
+                },
+                undefined,
+                { signal: new AbortController().signal },
+              ),
+            );
+          const nextSessionUpdate = Effect.gen(function* () {
+            const event = yield* runtime.events.pipe(
+              Stream.filter((item) => item.type === "provider_session.updated"),
+              Stream.runHead,
+            );
+            assert.isTrue(Option.isSome(event));
+            assert.equal(
+              Option.isSome(event) ? event.value.providerSession.cwdChangeSource : undefined,
+              originalCwd,
+            );
+            return Option.isSome(event) ? event.value.providerSession.cwd : null;
+          });
 
-        const worktreeCwd = `${originalCwd}/.claude/worktrees/feature`;
-        yield* fireHook({ cwd: worktreeCwd, toolName: "EnterWorktree" });
-        assert.equal(yield* nextSessionUpdate, worktreeCwd);
+          const worktreeCwd = `${originalCwd}/.claude/worktrees/feature`;
+          yield* fireHook({ cwd: worktreeCwd, toolName: "EnterWorktree" });
+          assert.equal(yield* nextSessionUpdate, worktreeCwd);
 
-        yield* fireHook({
-          cwd: `${originalCwd}/.claude/worktrees/subagent-only`,
-          toolName: "EnterWorktree",
-          agentId: "agent-1",
-        });
-        yield* fireHook({ cwd: originalCwd, toolName: "ExitWorktree" });
-        assert.equal(yield* nextSessionUpdate, originalCwd);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          yield* fireHook({
+            cwd: `${originalCwd}/.claude/worktrees/subagent-only`,
+            toolName: "EnterWorktree",
+            agentId: "agent-1",
+          });
+          yield* fireHook({ cwd: originalCwd, toolName: "ExitWorktree" });
+          assert.equal(yield* nextSessionUpdate, originalCwd);
+
+          yield* fireHook({ cwd: worktreeCwd, toolName: "EnterWorktree" });
+          assert.equal(yield* nextSessionUpdate, worktreeCwd);
+          const sessionUpdates: Array<
+            Extract<
+              ProviderAdapter.ProviderAdapterV2Event,
+              { type: "provider_session.updated" }
+            >["providerSession"]
+          > = [];
+          const finishTurn = (ordinal: number, failed = false) =>
+            Effect.gen(function* () {
+              yield* Queue.offer(processQueues.at(-1)!, {
+                type: "result",
+                subtype: failed ? "error_during_execution" : "success",
+                duration_ms: 10,
+                duration_api_ms: 10,
+                is_error: failed,
+                num_turns: 1,
+                result: failed ? "boom" : "Done",
+                errors: failed ? ["boom"] : [],
+                stop_reason: "end_turn",
+                total_cost_usd: 0,
+                usage: {
+                  input_tokens: 1,
+                  output_tokens: 1,
+                  cache_creation_input_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+                  inference_geo: "us",
+                  iterations: [],
+                  server_tool_use: { web_fetch_requests: 0, web_search_requests: 0 },
+                  service_tier: "standard",
+                  speed: "standard",
+                },
+                modelUsage: {},
+                permission_denials: [],
+                terminal_reason: failed ? "model_error" : "completed",
+                uuid: `00000000-0000-4000-8000-00000000000${ordinal}`,
+                session_id: "native-thread-claude-worktree-follow",
+              });
+              const terminal = yield* runtime.events.pipe(
+                Stream.tap((event) =>
+                  Effect.sync(() => {
+                    if (event.type === "provider_session.updated")
+                      sessionUpdates.push(event.providerSession);
+                  }),
+                ),
+                Stream.filter((event) => event.type === "turn.terminal"),
+                Stream.runHead,
+              );
+              assert.equal(Option.getOrThrow(terminal).status, failed ? "failed" : "completed");
+            });
+          yield* finishTurn(1, true);
+
+          const nextTurn = (ordinal: number) =>
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make(`attempt-claude-worktree-follow-${ordinal}`),
+              providerTurnOrdinal: ordinal,
+              text: "Continue.",
+              attachments: [],
+              modelSelection:
+                lifecycle === "replace"
+                  ? CLAUDE_TEST_RESTART_MODEL_SELECTION
+                  : CLAUDE_TEST_MODEL_SELECTION,
+            });
+          yield* runtime.startTurn(nextTurn(2));
+          assert.deepEqual(
+            openedCwds,
+            lifecycle === "replace" ? [originalCwd, originalCwd] : [originalCwd],
+          );
+          assert.equal(closedProcesses, lifecycle === "replace" ? 1 : 0);
+          yield* finishTurn(2);
+          const afterSuccess = sessionUpdates.map(({ cwd, cwdChangeSource }) => ({
+            cwd,
+            cwdChangeSource,
+          }));
+
+          yield* runtime.startTurn(nextTurn(3));
+          yield* fireHook({ cwd: worktreeCwd, toolName: "EnterWorktree" });
+          yield* finishTurn(3);
+          assert.deepEqual(
+            {
+              afterSuccess,
+              afterRepeatedEnter: sessionUpdates.map(({ cwd, cwdChangeSource }) => ({
+                cwd,
+                cwdChangeSource,
+              })),
+            },
+            lifecycle === "replace"
+              ? {
+                  afterSuccess: [{ cwd: originalCwd, cwdChangeSource: undefined }],
+                  afterRepeatedEnter: [
+                    { cwd: originalCwd, cwdChangeSource: undefined },
+                    { cwd: worktreeCwd, cwdChangeSource: originalCwd },
+                  ],
+                }
+              : { afterSuccess: [], afterRepeatedEnter: [] },
+          );
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
         ),
       ),
-    ),
   );
 });
 

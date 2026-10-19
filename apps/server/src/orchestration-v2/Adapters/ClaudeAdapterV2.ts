@@ -8601,6 +8601,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   : Effect.void,
               ),
             );
+          // A replacement process starts at its requested cwd, not the previous process's move.
+          const openedCwd = queryOptions.cwd ?? process.cwd();
+          if (openedCwd !== (yield* Ref.get(trackedCwd))) {
+            yield* Ref.set(trackedCwd, openedCwd);
+            yield* emitProviderEvent({
+              type: "provider_session.updated",
+              driver: CLAUDE_PROVIDER,
+              providerSession: {
+                ...session,
+                cwd: openedCwd,
+                cwdChangeSource: undefined,
+                updatedAt: yield* DateTime.now,
+              },
+            });
+          }
           // Marked only after a successful open: a failed create must not
           // leave the runtime believing the native session exists, or the
           // retry would resume a session that was never created.

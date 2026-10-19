@@ -93,6 +93,8 @@ import {
   OLDER_THREAD_USER_TURN_LIMIT,
 } from "./threadHistoryPaging.ts";
 
+export const WORKSPACE_CHANGED_DETACH_REASON = "Workspace changed.";
+
 export class ProjectionStoreApplyEventError extends Schema.TaggedError<ProjectionStoreApplyEventError>()(
   "ProjectionStoreApplyEventError",
   {
@@ -1012,7 +1014,7 @@ function applyToProjectionReplayState(
       boundThreadIds.delete(event.threadId);
       if (boundThreadIds.size === 0) {
         state.providerSessionThreadIds.delete(event.payload.providerSessionId);
-        if (event.payload.reason === "Workspace changed.") {
+        if (event.payload.reason === WORKSPACE_CHANGED_DETACH_REASON) {
           state.providerSessions.delete(event.payload.providerSessionId);
         }
       } else {
@@ -2250,7 +2252,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 AND thread_id = ${event.threadId}
             `;
             // An explicit handoff revokes the old runtime location; queue promotion retains it.
-            if (event.payload.reason === "Workspace changed.") {
+            if (event.payload.reason === WORKSPACE_CHANGED_DETACH_REASON) {
               yield* sql`
                 DELETE FROM orchestration_v2_projection_provider_sessions
                 WHERE provider_session_id = ${event.payload.providerSessionId}
