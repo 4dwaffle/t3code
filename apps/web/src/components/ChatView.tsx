@@ -88,6 +88,7 @@ import {
 import { readPastedComposerContext } from "./composerInlineTokenPaste";
 import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
+import { declinePendingApprovals } from "@t3tools/client-runtime/state/thread-requests";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
 import {
@@ -6511,6 +6512,39 @@ export default function ChatView(props: ChatViewProps) {
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
       );
       return;
+    }
+    // A message sent while approvals are pending redirects the agent. They are declined only
+    // here, after everything above has accepted the send, so local commands and rejected
+    // drafts leave them alone.
+    if (pendingApprovals.length > 0) {
+      const draftBeforeDecline = useComposerDraftStore
+        .getState()
+        .getComposerDraft(composerDraftTarget);
+      const promptBeforeDecline = promptRef.current;
+      const declined =
+        !pendingApprovals.some((approval) => respondingRequestIds.includes(approval.requestId)) &&
+        (await declinePendingApprovals(pendingApprovals, onRespondToApprovalStable).catch(
+          () => false,
+        ));
+      // A draft edited during the decline is no longer the message the user sent.
+      const draftChanged =
+        promptRef.current !== promptBeforeDecline ||
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) !==
+          draftBeforeDecline;
+      if (!declined || draftChanged || currentRouteThreadKeyRef.current !== routeThreadKey) {
+        sendInFlightRef.current = false;
+        setDockedDraftHeroThreadKey((currentThreadKey) =>
+          currentThreadKey === activeThreadKey ? null : currentThreadKey,
+        );
+        if (declined && draftChanged) {
+          toastManager.add({
+            type: "info",
+            title: "Approval declined. Your message changed, so it wasn't sent.",
+            description: "Send again when it's ready.",
+          });
+        }
+        return;
+      }
     }
     if (sendQueuesBehindSetup) {
       setSetupQueueSendThreadKey(activeThreadKey);

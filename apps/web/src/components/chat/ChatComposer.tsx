@@ -31,6 +31,7 @@ import type {
   ProjectId,
   PullRequestListInput,
   PreviewAnnotationPayload,
+  ProviderApprovalDecision,
   ThreadContextRecord,
   ProviderInteractionMode,
   ResolvedKeybindingsConfig,
@@ -53,11 +54,6 @@ import {
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import {
-  declinePendingApprovals,
-  type ApprovalResponder,
-} from "@t3tools/client-runtime/state/thread-requests";
-import { parseCodexFeedbackCommand } from "@t3tools/client-runtime/state/threads";
 import * as Schema from "effect/Schema";
 import {
   isPasteAsTextShortcut,
@@ -68,7 +64,7 @@ import {
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { folderDropTarget, resolveDroppedFolderPath } from "./folderDrop";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
-import { USAGE_LIMITS_COMMAND, isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
+import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
 import {
   memo,
   type ComponentProps,
@@ -95,7 +91,6 @@ import {
   expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
   replaceTextRange,
-  parseStandaloneComposerSlashCommand,
 } from "../../composer-logic";
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { listContinuationForEnter, listIndentForTab } from "../../composer-list-continuation";
@@ -1622,7 +1617,10 @@ export interface ChatComposerProps {
   onResume: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
-  onRespondToApproval: ApprovalResponder;
+  onRespondToApproval: (
+    requestId: RuntimeRequestId,
+    decision: ProviderApprovalDecision,
+  ) => Promise<unknown>;
   onSelectActivePendingUserInputOption: (questionId: string, optionValue: string) => void;
   onAdvanceActivePendingUserInput: () => void;
   onDismissActivePendingUserInput: (requestId: RuntimeRequestId) => void;
@@ -3949,8 +3947,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return showPlanFollowUpPrompt || composerSendState.hasSendableContent;
   };
 
-  const approvalSubmissionInFlightRef = useRef(false);
-  const submitComposer = async (
+  const submitComposer = (
     event?: { preventDefault: () => void },
     dispatchMode?: ComposerDispatchMode,
     submissionIntent?: ComposerSubmissionIntent,
@@ -3983,74 +3980,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         description: "Send again once its chip resolves.",
       });
       return;
-    }
-    const draftBeforeDecline = useComposerDraftStore
-      .getState()
-      .getComposerDraft(composerDraftTarget);
-    const promptOnly =
-      draftBeforeDecline === null ||
-      !composerDraftHasUserContent({ ...draftBeforeDecline, prompt: "" });
-    // Mirrors the send handler: these commands run locally only when the draft is just the prompt.
-    const runsLocalCommand =
-      promptOnly &&
-      ((onUsageLimitsCommand !== undefined && isUsageLimitsCommand(promptRef.current)) ||
-        (planModeUiEnabled && parseStandaloneComposerSlashCommand(promptRef.current) !== null) ||
-        (selectedProvider === "codex" && parseCodexFeedbackCommand(promptRef.current) !== null));
-    // Saving a queued-message edit or running a local command sends nothing to the agent, so it
-    // leaves approvals alone. Approvals the typing guard still hides count too: the redirect
-    // replaces them all.
-    if (
-      pendingApprovals.length > 0 &&
-      activePendingProgress === null &&
-      !isEditingQueuedMessage &&
-      !runsLocalCommand
-    ) {
-      event?.preventDefault();
-      if (
-        approvalSubmissionInFlightRef.current ||
-        pendingApprovals.some((approval) => respondingRequestIds.includes(approval.requestId)) ||
-        !composerSendState.hasSendableContent
-      )
-        return;
-      const validationMessage = getComposerSubmissionValidationMessage({
-        prompt: promptRef.current,
-        submissionTarget: "provider-turn",
-      });
-      setComposerSubmissionError(validationMessage);
-      if (validationMessage) return;
-      const submittedPrompt = promptRef.current;
-      approvalSubmissionInFlightRef.current = true;
-      const declined = await declinePendingApprovals(pendingApprovals, onRespondToApproval).catch(
-        () => false,
-      );
-      approvalSubmissionInFlightRef.current = false;
-      if (!declined || composerDraftTargetKey !== composerDraftTargetKeyRef.current) return;
-      // A draft edited during the decline (text, attachments, contexts) is no longer what the
-      // user chose to send.
-      if (
-        promptRef.current !== submittedPrompt ||
-        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) !==
-          draftBeforeDecline
-      ) {
-        toastManager.add({
-          type: "info",
-          title: "Approval declined. Your message changed, so it wasn't sent.",
-          description: "Send again when it's ready.",
-        });
-        return;
-      }
-      // A paste that started during the decline isn't in the draft snapshot yet.
-      if (
-        (pendingImageCompressionsRef.current.get(attachmentTargetKeyRef.current) ?? 0) > 0 ||
-        pendingDraftWork.has(attachmentTargetKeyRef.current)
-      ) {
-        toastManager.add({
-          type: "info",
-          title: "Still bringing attached context into this message.",
-          description: "Send again once its chip resolves.",
-        });
-        return;
-      }
     }
     const submission = submitComposerDraft({
       prompt: promptRef.current,

@@ -556,7 +556,10 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         pendingPastedTextAttachmentCountRef.current === 0 &&
         pendingNativeImagePasteCountRef.current === 0 &&
         draft.text === draftAtSend.text &&
-        draft.attachments.length === draftAtSend.attachments.length
+        draft.attachments.length === draftAtSend.attachments.length &&
+        draft.attachments.every(
+          (attachment, index) => attachment.id === draftAtSend.attachments[index]?.id,
+        )
       );
     };
     const sent = await settlePromise(() => onSendMessage(followUp, stillSendable));

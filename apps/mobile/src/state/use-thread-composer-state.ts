@@ -501,7 +501,10 @@ export function useThreadComposerState() {
     scheduleUnusedComposerAttachmentCleanup(draft.attachments);
   };
 
-  const onSendMessage = async (followUpOverride?: ActiveTurnComposerAction) => {
+  const onSendMessage = async (
+    followUpOverride?: ActiveTurnComposerAction,
+    beforeDispatch?: () => Promise<boolean>,
+  ) => {
     if (
       selectedThreadShell &&
       selectedEnvironmentRuntime?.connectionState === "connected" &&
@@ -617,6 +620,8 @@ export function useThreadComposerState() {
       });
       return null;
     }
+
+    if (beforeDispatch !== undefined && !(await beforeDispatch())) return null;
 
     // Resolved here rather than at drain time: the outbox can deliver minutes
     // later, and the choice belongs to the moment the user pressed send.

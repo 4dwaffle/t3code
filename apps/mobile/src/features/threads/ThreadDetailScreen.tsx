@@ -12,7 +12,6 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import {
   childThreadInputsTitle,
-  parseCodexFeedbackCommand,
   type CodexFeedbackSubmission,
   type EnvironmentThreadStatus,
 } from "@t3tools/client-runtime/state/threads";
@@ -222,7 +221,10 @@ export interface ThreadDetailScreenProps {
   readonly onNativePasteText: (paste: ComposerTextPaste) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
-  readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
+  readonly onSendMessage: (
+    followUp?: ActiveTurnComposerAction,
+    beforeDispatch?: () => Promise<boolean>,
+  ) => Promise<MessageId | null>;
   readonly onReconnectEnvironment: () => void;
   readonly canSwitchThreadProvider: boolean;
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
@@ -908,36 +910,21 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     const hasUserMessage = selectedThreadFeed.some(
       (entry) => entry.type === "message" && entry.message.role === "user",
     );
-    const draft =
-      props.composerDraftKey === null ? null : getComposerDraftSnapshot(props.composerDraftKey);
-    const draftInstanceId = (draft?.modelSelection ?? props.selectedThread.modelSelection)
-      .instanceId;
-    // Mirrors the send path: `/feedback` with no attachments on Codex goes to Codex, not the agent.
-    const sendsFeedback =
-      draft !== null &&
-      draft.attachments.length === 0 &&
-      props.serverConfig?.providers.find((provider) => provider.instanceId === draftInstanceId)
-        ?.driver === "codex" &&
-      parseCodexFeedbackCommand(draft.text) !== null;
-    // Saving a queued-message edit or submitting feedback sends nothing to the agent, so it
-    // leaves approvals alone.
-    if (
-      props.activePendingApprovals.length > 0 &&
-      props.activePendingUserInput === null &&
-      props.queuedRunEdit === null &&
-      !sendsFeedback
-    ) {
-      if (
-        props.respondingApprovalId !== null ||
-        !(await declinePendingApprovals(props.activePendingApprovals, props.onRespondToApproval)) ||
-        selectedThreadKeyRef.current !== targetThreadKey ||
-        // A draft edited or pasted into during the decline isn't what the user sent.
-        stillSendable?.() === false
-      ) {
-        return null;
-      }
-    }
-    const messageId = await props.onSendMessage(followUp);
+    // Runs only once the send path has validated the draft and is about to deliver it, so an
+    // empty submit, a queued-message edit, or `/feedback` leaves approvals alone.
+    const declineBeforeDispatch =
+      props.activePendingApprovals.length > 0 && props.activePendingUserInput === null
+        ? async () =>
+            props.respondingApprovalId === null &&
+            (await declinePendingApprovals(
+              props.activePendingApprovals,
+              props.onRespondToApproval,
+            )) &&
+            selectedThreadKeyRef.current === targetThreadKey &&
+            // A draft edited or pasted into during the decline isn't what the user sent.
+            stillSendable?.() !== false
+        : undefined;
+    const messageId = await props.onSendMessage(followUp, declineBeforeDispatch);
     if (messageId === null || selectedThreadKeyRef.current !== targetThreadKey) {
       return messageId;
     }
