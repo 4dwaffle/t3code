@@ -2454,6 +2454,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   const makeWakeHarnessWithOptions = (options?: {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
+    readonly setPermissionMode?: ClaudeAdapterV2.ClaudeAgentSdkQuerySession["setPermissionMode"];
     readonly stopTask?: (
       taskId: string,
     ) => Effect.Effect<void, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
@@ -2562,7 +2563,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   setPermissionMode: (mode) =>
                     Effect.sync(() => {
                       permissionModeChanges.push(mode);
-                    }),
+                    }).pipe(
+                      Effect.andThen(() => options?.setPermissionMode?.(mode) ?? Effect.void),
+                    ),
                   backgroundTasks: options?.backgroundTasks ?? (() => Effect.succeed(false)),
                   stopTask: options?.stopTask ?? (() => Effect.void),
                   interrupt: Effect.void,
@@ -2587,7 +2590,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 setPermissionMode: (mode) =>
                   Effect.sync(() => {
                     permissionModeChanges.push(mode);
-                  }),
+                  }).pipe(Effect.andThen(() => options?.setPermissionMode?.(mode) ?? Effect.void)),
                 backgroundTasks: options?.backgroundTasks ?? (() => Effect.succeed(false)),
                 stopTask: options?.stopTask ?? (() => Effect.void),
                 interrupt: options?.interrupt ?? Effect.void,
@@ -2754,6 +2757,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const harness = yield* makeWakeHarnessWithOptions({
           close: Queue.shutdown,
           freshQueueOnReopen: true,
+          setPermissionMode: (mode) =>
+            mode === "bypassPermissions"
+              ? Effect.fail(
+                  new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+                    method: "setPermissionMode",
+                    cause: new Error(
+                      "Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration",
+                    ),
+                  }),
+                )
+              : Effect.void,
         });
         const now = yield* DateTime.now;
         let ordinal = 0;
@@ -2923,7 +2937,58 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           "A CLI policy downgrade must not be restored to bypass on the next turn",
         );
         assert.equal(resolveSettings.mock.calls.length, 3);
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "status",
+            status: null,
+            permissionMode: "plan",
+            uuid: "policy-restricted-enter-plan",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
         yield* finish;
+        assert.equal(notices().length, 1);
+
+        for (const phase of ["restore", "reuse"]) {
+          const started = yield* start("/unrestricted").pipe(Effect.exit);
+          assert.isTrue(
+            Exit.isSuccess(started),
+            `A rejected bypass restore must not fail the ${phase} turn`,
+          );
+          assert.strictEqual(harness.getOpenedOptions(), unrestrictedOptions);
+          assert.deepEqual(harness.permissionModeChanges, ["auto", "bypassPermissions", "default"]);
+          assert.equal(harness.offeredMessages.length, ordinal);
+          const restoredDecision = yield* Effect.promise(() =>
+            harness.getOpenedOptions()!.canUseTool!(
+              "Bash",
+              { command: "git status" },
+              {
+                signal: new AbortController().signal,
+                toolUseID: `forwarded-after-plan-${phase}`,
+                requestId: `request-after-plan-${phase}`,
+              },
+            ),
+          ).pipe(Effect.forkScoped);
+          const restoredFirst = yield* Effect.raceFirst(
+            Queue.take(harness.runtimeRequestReceipts).pipe(
+              Effect.map((event) => ({ type: "request", event }) as const),
+            ),
+            Fiber.join(restoredDecision).pipe(
+              Effect.map((result) => ({ type: "decision", result }) as const),
+            ),
+          );
+          assert.equal(restoredFirst.type, "request");
+          if (restoredFirst.type !== "request") return;
+          assert.equal(restoredFirst.event.runtimeRequest.kind, "command");
+          yield* harness.runtime.respondToRuntimeRequest({
+            requestId: restoredFirst.event.runtimeRequest.id,
+            decision: "decline",
+          });
+          assert.equal((yield* Fiber.join(restoredDecision))?.behavior, "deny");
+          yield* finish;
+          assert.equal(harness.terminalEvents().at(-1)?.status, "completed");
+        }
         assert.equal(notices().length, 1);
       }).pipe(
         Effect.provide(
@@ -3017,10 +3082,47 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* fileSystem.writeFileString(settingsFile, "{ invalid json");
           assert.equal((yield* open).permissionMode, "auto");
           yield* fileSystem.remove(settingsFile);
-          vi.mocked(ClaudeSdk.resolveSettings).mockRejectedValue(
-            new Error("Cannot resolve managed settings"),
+          const resolveSettings = vi
+            .mocked(ClaudeSdk.resolveSettings)
+            .mockClear()
+            .mockRejectedValueOnce(new Error("Cannot resolve managed settings"))
+            .mockResolvedValue({ effective: {}, provenance: {}, sources: [] });
+          const harness = yield* makeWakeHarnessWithOptions({
+            settings: { ...DEFAULT_CLAUDE_SETTINGS, homePath: home },
+            close: Queue.shutdown,
+            freshQueueOnReopen: true,
+          });
+          for (const ordinal of [1, 2]) {
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make(`attempt-settings-recovery-${ordinal}`),
+                providerTurnOrdinal: ordinal,
+                text: "Run git status.",
+                attachments: [],
+              }),
+            );
+            const options = harness.getOpenedOptions()!;
+            assert.equal(
+              options.permissionMode,
+              ordinal === 1 ? "auto" : "bypassPermissions",
+              "A transient resolver failure must only downgrade the failing turn",
+            );
+            if (ordinal === 1) assert.isUndefined(options.allowDangerouslySkipPermissions);
+            else assert.equal(options.allowDangerouslySkipPermissions, true);
+            assert.equal(resolveSettings.mock.calls.length, ordinal);
+            yield* harness.offerAndWait(
+              makeResultFrame({ uuid: `settings-recovery-result-${ordinal}`, result: "Done." }),
+            );
+            assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
+          }
+          assert.equal(harness.offeredMessages.length, 2);
+          assert.equal(
+            resolveSettings.mock.calls[0]?.[0]?.cwd,
+            resolveSettings.mock.calls[1]?.[0]?.cwd,
           );
-          assert.equal((yield* open).permissionMode, "auto");
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
