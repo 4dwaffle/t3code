@@ -22,7 +22,6 @@ import android.view.KeyCharacterMap
 import android.view.MotionEvent
 import android.view.KeyEvent
 import android.view.ViewGroup
-import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
@@ -692,12 +691,11 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
     event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
       (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
 
-  private fun canSubmit(): Boolean {
-    // Return during IME composition (CJK on a hardware keyboard) commits the candidate, like
-    // iOS's marked-text guard, so the draft is never sent half-typed.
-    val composing = text?.let { BaseInputConnection.getComposingSpanStart(it) != -1 } == true
-    return submitEnabled && submitListener != null && !readOnly && isEnabled && !composing
-  }
+  // No composing-text check, unlike iOS's marked-text guard: Latin IMEs keep a composing region
+  // over the current word even for hardware typing, and IMEs that confirm a composition with
+  // Return consume the key before it reaches the view.
+  private fun canSubmit(): Boolean =
+    submitEnabled && submitListener != null && !readOnly && isEnabled
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
     val alternate = submitChord(keyCode, event)

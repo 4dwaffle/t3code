@@ -99,13 +99,13 @@ class ComposerSubmitTest {
   }
 
   @Test
-  fun returnDoesNotSendWhileComposing() {
-    editor.setText("ni")
+  fun returnSendsOverAnAutocompleteComposingRegion() {
+    editor.setText("line")
     BaseInputConnection.setComposingSpans(editor.text)
 
     pressReturn()
 
-    assertEquals(emptyList<Boolean>(), sends)
+    assertEquals(listOf(false), sends)
   }
 
   @Test
