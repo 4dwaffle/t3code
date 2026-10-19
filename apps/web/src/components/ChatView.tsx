@@ -6530,8 +6530,19 @@ export default function ChatView(props: ChatViewProps) {
     if (approvalsToDecline.length > 0) {
       // A draft edited since send, or a paste still landing in it, is no longer the message
       // the user sent.
-      const draftChangedSinceSend = () =>
-        promptRef.current !== promptAtSend || composerRef.current?.hasPendingAttachments() === true;
+      const attachmentIdsAtSend = composerAttachmentsSnapshot.map((attachment) => attachment.id);
+      const draftChangedSinceSend = () => {
+        const sendContext = composerRef.current?.getSendContext();
+        const attachmentIds = sendContext
+          ? [...sendContext.images, ...sendContext.files].map((attachment) => attachment.id)
+          : attachmentIdsAtSend;
+        return (
+          promptRef.current !== promptAtSend ||
+          attachmentIds.length !== attachmentIdsAtSend.length ||
+          attachmentIds.some((id, index) => id !== attachmentIdsAtSend[index]) ||
+          composerRef.current?.hasPendingAttachments() === true
+        );
+      };
       const draftBeforeDecline = useComposerDraftStore
         .getState()
         .getComposerDraft(composerDraftTarget);
