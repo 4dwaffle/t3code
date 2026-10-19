@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import Migration0065 from "./065_RepairClientSettlementTimestamps.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
@@ -80,6 +81,7 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
         const sweepTwoRequestedAt = "2026-06-01T00:00:00.000Z";
         const sweepTwoCompletedAt = "2026-06-01T00:05:00.000Z";
         const insertActivityEvent = (
+          threadId: string,
           streamVersion: number,
           eventType: string,
           occurredAt: string,
@@ -90,36 +92,102 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
             command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
           )
           VALUES (
-            ${`event-sweep-2-${streamVersion}`}, 'thread', 'sweep-2', ${streamVersion}, ${eventType},
-            ${occurredAt}, NULL, NULL, NULL, 'server',
-            ${JSON.stringify({ threadId: "sweep-2", ...payload })}, '{}'
+            ${`event-${threadId}-${streamVersion}`}, 'thread', ${threadId}, ${streamVersion},
+            ${eventType}, ${occurredAt}, NULL, NULL, NULL, 'server',
+            ${JSON.stringify({ threadId, ...payload })}, '{}'
           )
         `;
-        yield* insertActivityEvent(1, "thread.turn-start-requested", sweepTwoRequestedAt, {
-          createdAt: sweepTwoRequestedAt,
-        });
-        yield* insertActivityEvent(2, "thread.session-set", "2026-06-01T00:00:01.000Z", {
+        yield* insertActivityEvent(
+          "sweep-2",
+          1,
+          "thread.turn-start-requested",
+          sweepTwoRequestedAt,
+          {
+            createdAt: sweepTwoRequestedAt,
+          },
+        );
+        yield* insertActivityEvent("sweep-2", 2, "thread.session-set", "2026-06-01T00:00:01.000Z", {
           session: {
             status: "running",
             activeTurnId: "turn-1",
             updatedAt: "2026-06-01T00:00:01.000Z",
           },
         });
-        yield* insertActivityEvent(3, "thread.message-sent", "2026-06-01T00:01:00.000Z", {
-          role: "assistant",
-          turnId: "turn-1",
-          streaming: true,
-          createdAt: "2026-06-01T00:01:00.000Z",
-          updatedAt: "2026-06-01T00:01:00.000Z",
-        });
-        yield* insertActivityEvent(4, "thread.session-set", "2026-06-01T00:05:00.500Z", {
+        yield* insertActivityEvent(
+          "sweep-2",
+          3,
+          "thread.message-sent",
+          "2026-06-01T00:01:00.000Z",
+          {
+            role: "assistant",
+            turnId: "turn-1",
+            streaming: true,
+            createdAt: "2026-06-01T00:01:00.000Z",
+            updatedAt: "2026-06-01T00:01:00.000Z",
+          },
+        );
+        yield* insertActivityEvent("sweep-2", 4, "thread.session-set", "2026-06-01T00:05:00.500Z", {
           session: { status: "ready", activeTurnId: null, updatedAt: sweepTwoCompletedAt },
         });
-        yield* insertActivityEvent(5, "thread.session-set", "2026-06-03T00:00:00.000Z", {
+        yield* insertActivityEvent("sweep-2", 5, "thread.session-set", "2026-06-03T00:00:00.000Z", {
           session: { status: "stopped", activeTurnId: null, updatedAt: "2026-06-03T00:00:00.000Z" },
         });
-        yield* insertActivityEvent(6, "thread.turn-start-requested", "2026-09-10T00:00:00.000Z", {
-          createdAt: "2026-09-10T00:00:00.000Z",
+        yield* insertActivityEvent(
+          "sweep-2",
+          6,
+          "thread.turn-start-requested",
+          "2026-09-10T00:00:00.000Z",
+          {
+            createdAt: "2026-09-10T00:00:00.000Z",
+          },
+        );
+
+        // sweep-3 lost its turn start: the streamed reply opened the turn
+        // while the session was still starting, and the stop finished it.
+        const sweepThreeStoppedAt = "2026-06-10T00:03:00.000Z";
+        yield* insertActivityEvent("sweep-3", 1, "thread.session-set", "2026-06-10T00:00:00.000Z", {
+          session: {
+            status: "starting",
+            activeTurnId: null,
+            updatedAt: "2026-06-10T00:00:00.000Z",
+          },
+        });
+        yield* insertActivityEvent(
+          "sweep-3",
+          2,
+          "thread.message-sent",
+          "2026-06-10T00:01:00.000Z",
+          {
+            role: "assistant",
+            turnId: "turn-1",
+            streaming: true,
+            createdAt: "2026-06-10T00:01:00.000Z",
+            updatedAt: "2026-06-10T00:01:00.000Z",
+          },
+        );
+        yield* insertActivityEvent("sweep-3", 3, "thread.session-set", sweepThreeStoppedAt, {
+          session: { status: "stopped", activeTurnId: null, updatedAt: sweepThreeStoppedAt },
+        });
+
+        // sweep-4's session went back to starting mid-turn, which does not
+        // finish a turn, so the later ready does.
+        const sweepFourReadyAt = "2026-06-20T00:09:00.000Z";
+        yield* insertActivityEvent("sweep-4", 1, "thread.session-set", "2026-06-20T00:00:00.000Z", {
+          session: {
+            status: "running",
+            activeTurnId: "turn-1",
+            updatedAt: "2026-06-20T00:00:00.000Z",
+          },
+        });
+        yield* insertActivityEvent("sweep-4", 2, "thread.session-set", "2026-06-20T00:04:00.000Z", {
+          session: {
+            status: "starting",
+            activeTurnId: null,
+            updatedAt: "2026-06-20T00:04:00.000Z",
+          },
+        });
+        yield* insertActivityEvent("sweep-4", 3, "thread.session-set", sweepFourReadyAt, {
+          session: { status: "ready", activeTurnId: null, updatedAt: sweepFourReadyAt },
         });
 
         // sweep-5 was already imported into V2 before this migration ran:
@@ -268,6 +336,8 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
         assert.strictEqual(settledAtByThread.get("sweep-0"), sweepZeroActivityAt);
         assert.strictEqual(settledAtByThread.get("sweep-1"), CREATED_AT);
         assert.strictEqual(settledAtByThread.get("sweep-2"), sweepTwoCompletedAt);
+        assert.strictEqual(settledAtByThread.get("sweep-3"), sweepThreeStoppedAt);
+        assert.strictEqual(settledAtByThread.get("sweep-4"), sweepFourReadyAt);
         for (const threadId of sweepIds) {
           assert.notStrictEqual(
             settledAtByThread.get(threadId),
@@ -356,8 +426,17 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
           eventsBefore.filter((event) => !unrepairedEventIds.has(String(event.event_id))),
         );
 
-        // Idempotent: nothing left to run, and running the repair again is a no-op.
+        // Idempotent: nothing left to run, and running the repair again
+        // changes nothing because repaired values no longer match a sweep.
         assert.deepStrictEqual(yield* runMigrations(), []);
+        const snapshot = Effect.all([
+          sql`SELECT * FROM projection_threads ORDER BY thread_id`,
+          sql`SELECT * FROM orchestration_v2_projection_threads ORDER BY thread_id`,
+          sql`SELECT * FROM orchestration_events ORDER BY sequence`,
+        ]);
+        const afterFirstRun = yield* snapshot;
+        yield* Migration0065;
+        assert.deepStrictEqual(yield* snapshot, afterFirstRun);
       }),
   );
 });

@@ -92,65 +92,103 @@ export default Effect.gen(function* () {
       WHERE burst_clusters.distinct_thread_count >= 10
         AND burst_clusters.span_seconds <= 120
     ),
-    session_transitions AS (
-      SELECT
-        stream_id AS thread_id,
-        occurred_at,
-        payload_json,
-        json_extract(payload_json, '$.session.status') AS status,
-        LAG(json_extract(payload_json, '$.session.status'))
-          OVER (PARTITION BY stream_id ORDER BY sequence) AS previous_status
+    swept_threads AS (
+      SELECT DISTINCT thread_id FROM automatic_settlements
+    ),
+    -- Only the swept threads' history matters, and stream_id is indexed.
+    turn_events AS (
+      SELECT stream_id AS thread_id, sequence, event_type, occurred_at, payload_json
       FROM orchestration_events
       WHERE aggregate_kind = 'thread'
         AND application_event_version = 1
-        AND event_type = 'thread.session-set'
+        AND stream_id IN (SELECT thread_id FROM swept_threads)
+        AND event_type IN (
+          'thread.turn-start-requested',
+          'thread.turn-diff-completed',
+          'thread.turn-interrupt-requested',
+          'thread.message-sent',
+          'thread.session-set'
+        )
+    ),
+    turn_openings AS (
+      SELECT thread_id, sequence
+      FROM turn_events
+      WHERE (
+          event_type = 'thread.session-set'
+          AND json_extract(payload_json, '$.session.status') = 'running'
+          AND json_type(payload_json, '$.session.activeTurnId') = 'text'
+        )
+        OR (
+          event_type = 'thread.message-sent'
+          AND json_extract(payload_json, '$.role') = 'assistant'
+          AND json_type(payload_json, '$.turnId') = 'text'
+          AND json_type(payload_json, '$.streaming') = 'true'
+        )
+    ),
+    session_ends AS (
+      SELECT
+        thread_id,
+        sequence,
+        occurred_at,
+        payload_json,
+        LAG(sequence, 1, 0) OVER (PARTITION BY thread_id ORDER BY sequence)
+          AS previous_end_sequence
+      FROM turn_events
+      WHERE event_type = 'thread.session-set'
+        AND json_extract(payload_json, '$.session.status')
+          IN ('idle', 'ready', 'error', 'interrupted', 'stopped')
     ),
     -- Last activity is what the old projection_turns table recorded: turn
-    -- requests, starts, assistant messages, interrupts, checkpoints, and the
-    -- session leaving "running", which is how the projector marked a turn
-    -- complete. 063 dropped that table, so read the V1 events it was
-    -- projected from instead. A session that changes state without leaving
-    -- "running", such as a server restart stopping an idle session, is not
-    -- turn activity.
+    -- requests, starts, assistant messages, interrupts, checkpoints, and a
+    -- session reaching a final state while a turn was open, which is how the
+    -- projector marked a turn finished. A turn opens with a running session
+    -- or a streamed reply. 063 dropped that table, so read the V1 events it
+    -- was projected from instead. A final state with no turn open since the
+    -- last one, such as a restart stopping an idle session, is not activity.
     activity_timestamps AS (
       SELECT thread_id, created_at AS activity_at
       FROM projection_thread_messages
       WHERE role = 'user'
+        AND thread_id IN (SELECT thread_id FROM swept_threads)
       UNION ALL
       SELECT
-        stream_id,
+        thread_id,
         CASE
+          WHEN event_type = 'thread.session-set' THEN occurred_at
           WHEN event_type = 'thread.turn-diff-completed'
             THEN json_extract(payload_json, '$.completedAt')
           WHEN event_type = 'thread.message-sent' AND json_type(payload_json, '$.streaming') = 'false'
             THEN json_extract(payload_json, '$.updatedAt')
           ELSE json_extract(payload_json, '$.createdAt')
         END
-      FROM orchestration_events
-      WHERE aggregate_kind = 'thread'
-        AND application_event_version = 1
-        AND (
-          event_type IN ('thread.turn-start-requested', 'thread.turn-diff-completed')
-          OR (
-            event_type = 'thread.turn-interrupt-requested'
-            AND json_type(payload_json, '$.turnId') = 'text'
-          )
-          OR (
-            event_type = 'thread.message-sent'
-            AND json_extract(payload_json, '$.role') = 'assistant'
-            AND json_type(payload_json, '$.turnId') = 'text'
-          )
+      FROM turn_events
+      WHERE event_type IN ('thread.turn-start-requested', 'thread.turn-diff-completed')
+        OR (
+          event_type = 'thread.turn-interrupt-requested'
+          AND json_type(payload_json, '$.turnId') = 'text'
+        )
+        OR (
+          event_type = 'thread.message-sent'
+          AND json_extract(payload_json, '$.role') = 'assistant'
+          AND json_type(payload_json, '$.turnId') = 'text'
+        )
+        OR (
+          event_type = 'thread.session-set'
+          AND json_extract(payload_json, '$.session.status') = 'running'
+          AND json_type(payload_json, '$.session.activeTurnId') = 'text'
         )
       UNION ALL
       SELECT
-        thread_id,
-        CASE
-          WHEN status = 'running' THEN occurred_at
-          ELSE COALESCE(json_extract(payload_json, '$.session.updatedAt'), occurred_at)
-        END
-      FROM session_transitions
-      WHERE (status = 'running' AND json_type(payload_json, '$.session.activeTurnId') = 'text')
-        OR (status IS NOT 'running' AND previous_status = 'running')
+        session_end.thread_id,
+        COALESCE(json_extract(session_end.payload_json, '$.session.updatedAt'), session_end.occurred_at)
+      FROM session_ends AS session_end
+      WHERE EXISTS (
+        SELECT 1
+        FROM turn_openings AS opening
+        WHERE opening.thread_id = session_end.thread_id
+          AND opening.sequence > session_end.previous_end_sequence
+          AND opening.sequence < session_end.sequence
+      )
     )
   `;
 
