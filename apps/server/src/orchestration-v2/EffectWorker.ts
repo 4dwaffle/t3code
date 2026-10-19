@@ -429,7 +429,8 @@ export const layerExecutor: Layer.Layer<
                       (reason) =>
                         reason._tag === "Fail" &&
                         (reason.error._tag === "CheckpointRollbackPartialError" ||
-                          reason.error.reason !== "unexpected-failure"),
+                          (EffectOutbox.isGuardedCheckpointRestore(effect.request) &&
+                            reason.error.reason !== "unexpected-failure")),
                     )) ||
                   Cause.hasInterruptsOnly(cause)
                     ? Effect.void
@@ -462,13 +463,12 @@ export const layerExecutor: Layer.Layer<
                       effectId: effect.id,
                       effectType: effect.request.type,
                       cause,
-                      ...(!EffectOutbox.isGuardedCheckpointRestore(effect.request)
-                        ? {}
-                        : cause._tag === "CheckpointRollbackPartialError"
-                          ? { failureCode: "checkpoint_restore_partial" as const }
-                          : cause.reason === "unexpected-failure"
-                            ? {}
-                            : { failureCode: "checkpoint_restore_rejected" as const }),
+                      ...(cause._tag === "CheckpointRollbackPartialError"
+                        ? { failureCode: "checkpoint_restore_partial" as const }
+                        : !EffectOutbox.isGuardedCheckpointRestore(effect.request) ||
+                            cause.reason === "unexpected-failure"
+                          ? {}
+                          : { failureCode: "checkpoint_restore_rejected" as const }),
                     }),
                 ),
               );

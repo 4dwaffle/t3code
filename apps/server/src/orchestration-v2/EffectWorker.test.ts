@@ -85,6 +85,7 @@ function layerExecutorFor(input: {
   readonly threads?: Partial<ThreadManagementService.ThreadManagementService["Service"]>;
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
+  readonly rollback?: CheckpointRollbackService.CheckpointRollbackServiceV2Shape["execute"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -138,7 +139,9 @@ function layerExecutorFor(input: {
     ),
     Layer.succeed(
       CheckpointRollbackService.CheckpointRollbackServiceV2,
-      CheckpointRollbackService.CheckpointRollbackServiceV2.of({ execute: () => Effect.void }),
+      CheckpointRollbackService.CheckpointRollbackServiceV2.of({
+        execute: input.rollback ?? (() => Effect.void),
+      }),
     ),
     Layer.succeed(
       RuntimeRequestService.RuntimeRequestServiceV2,
@@ -507,6 +510,65 @@ it.effect.each([false, true])(
       assert.isTrue(Exit.isFailure(exit));
       assert.equal(yield* Ref.get(retries), guardedRestore ? 0 : 1);
       assert.equal(yield* Ref.get(terminalizations), guardedRestore ? 1 : 0);
+    }),
+);
+
+it.effect.each([false, true])(
+  "terminalizes a typed partial rollback with guardedRestore=%s",
+  (guardedRestore) =>
+    Effect.gen(function* () {
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const record = (event: string) => Ref.update(events, (current) => [...current, event]);
+      const checkpointId = CheckpointId.make("checkpoint:partial");
+      const effect: EffectOutbox.OrchestrationEffectV2 = {
+        ...restartEffect(yield* DateTime.now, { type: "detach" }),
+        request: {
+          type: "provider-thread.rollback",
+          providerThreadId,
+          checkpointId,
+          scopeId: CheckpointScopeId.make("scope:partial"),
+          ...(guardedRestore ? { expectedWorkspaceFingerprint: "accepted" } : {}),
+        },
+      };
+      const layerExecutor = layerExecutorFor({
+        events,
+        rollback: () =>
+          record("rollback").pipe(
+            Effect.andThen(
+              new CheckpointRollbackService.CheckpointRollbackPartialError({
+                threadId,
+                checkpointId,
+                cause: "file restore failed after provider rollback",
+              }),
+            ),
+          ),
+        threads: {
+          dispatch: (command) =>
+            record(command.type).pipe(Effect.as({ sequence: 1, storedEvents: [] })),
+        },
+      });
+      const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Effect.succeed(Option.some(effect)),
+        get: () => Effect.succeed(Option.some(effect)),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        retry: () => record("retry").pipe(Effect.as(true)),
+        fail: (input) => {
+          assert.equal(input.failureCode, "checkpoint_restore_partial");
+          return record("terminal").pipe(Effect.as(true));
+        },
+      });
+      yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((worker) => worker.runOnce),
+        Effect.provide(
+          EffectWorker.layer.pipe(Layer.provide(Layer.merge(layerOutbox, layerExecutor))),
+        ),
+      );
+      assert.deepEqual(yield* Ref.get(events), [
+        "rollback",
+        "checkpoint.rollback.fail",
+        "terminal",
+      ]);
     }),
 );
 

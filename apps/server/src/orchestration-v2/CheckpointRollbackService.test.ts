@@ -402,11 +402,12 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
 it.effect.each([
   { order: "normal", restoreFiles: true },
   { order: "cleanup-first", restoreFiles: true },
+  { order: "cleanup-first", restoreFiles: true, guarded: true },
   { order: "cleanup-first", restoreFiles: false },
   { order: "rollback-first", restoreFiles: true },
   // A path the server would not have made is left missing, not recreated.
   { order: "cleanup-first", restoreFiles: false, unmanaged: true },
-])("locks rollback with %s", ({ order, restoreFiles, unmanaged = false }) =>
+])("locks rollback with %s", ({ order, restoreFiles, unmanaged = false, guarded = false }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -454,7 +455,10 @@ it.effect.each([
         Layer.mergeAll(
           ThreadCommandExecutor.layer,
           NodeServices.layer,
-          Layer.mock(CheckpointStore.CheckpointStore)({}),
+          Layer.mock(CheckpointStore.CheckpointStore)({
+            hasCheckpointRef: () => Effect.succeed(true),
+            readWorkspaceFingerprint: () => Effect.succeed("recreated-worktree"),
+          }),
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as never),
           ServerSettings.layerTest(),
           Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -482,6 +486,11 @@ it.effect.each([
               }),
           }),
           Layer.mock(CheckpointService.CheckpointServiceV2)({
+            withRestoreLock: (_cwd, use) =>
+              use({
+                restore: () => Effect.die("guarded restore must not mutate files"),
+                deleteStaleRefs: () => Effect.die("guarded restore must not delete refs"),
+              }),
             restore: () =>
               Effect.gen(function* () {
                 assert.isTrue(yield* fileSystem.exists(worktreePath).pipe(Effect.orDie));
@@ -544,7 +553,16 @@ it.effect.each([
           ? yield* cleanupEffect.pipe(Effect.forkChild({ startImmediately: true }))
           : undefined;
       const rollback = yield* service
-        .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles })
+        .execute({
+          threadId,
+          providerThreadId,
+          checkpointId,
+          scopeId,
+          restoreFiles,
+          ...(guarded
+            ? { expectedIdle: true as const, expectedWorkspaceFingerprint: "accepted-worktree" }
+            : {}),
+        })
         .pipe(Effect.forkChild({ startImmediately: true }));
       if (order === "cleanup-first") assert.deepEqual(calls, []);
       if (order === "rollback-first") yield* Deferred.await(openEntered);
@@ -555,6 +573,14 @@ it.effect.each([
       if (order === "rollback-first") assert.isFalse(cleanupEntered);
       yield* Deferred.succeed(release, undefined);
       if (cleanup !== undefined) yield* Fiber.join(cleanup);
+      if (guarded) {
+        const error = yield* Fiber.join(rollback).pipe(Effect.flip);
+        assert.deepEqual(calls, ["cleanup"]);
+        assert.isFalse(yield* fileSystem.exists(worktreePath));
+        assert.equal(error._tag, "CheckpointRollbackExecutionError");
+        assert.equal("reason" in error ? error.reason : undefined, "restore-precondition-changed");
+        return;
+      }
       if (unmanaged) {
         const error = yield* Fiber.join(rollback).pipe(Effect.flip);
         assert.equal(error._tag, "CheckpointRollbackExecutionError");

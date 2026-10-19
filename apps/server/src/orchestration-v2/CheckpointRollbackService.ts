@@ -275,6 +275,7 @@ export const layer: Layer.Layer<
         !(yield* fileSystem.exists(worktreePath)) &&
         (yield* isManagedWorktreePath(worktreePath))
       ) {
+        if (guarded) return yield* reject("restore-precondition-changed");
         const project = yield* projects.get(projection.thread.projectId);
         if (Option.isSome(project)) {
           yield* gitWorkflow.pruneWorktrees({ cwd: project.value.workspaceRoot });
