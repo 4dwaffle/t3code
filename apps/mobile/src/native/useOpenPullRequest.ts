@@ -4,7 +4,7 @@ import { useCallback } from "react";
 import { Platform } from "react-native";
 import { resetAndroidWorkspace } from "../lib/android-workspace-navigation";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { useThreadShell } from "../state/entities";
+import { useQuietThreadShell } from "../state/entities";
 import { tryOpenExternalUrl } from "../lib/openExternalUrl";
 
 type PullRequestContext = { readonly environmentId: string; readonly projectId: string };
@@ -46,7 +46,7 @@ export function useOpenPullRequest(options?: {
   };
   const environmentId = options?.context?.environmentId ?? first(routeContext?.environmentId);
   const threadId = first(routeContext?.threadId);
-  const thread = useThreadShell(
+  const thread = useQuietThreadShell(
     environmentId && threadId
       ? { environmentId: EnvironmentId.make(environmentId), threadId: ThreadId.make(threadId) }
       : null,
