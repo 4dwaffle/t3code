@@ -908,14 +908,24 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     const hasUserMessage = selectedThreadFeed.some(
       (entry) => entry.type === "message" && entry.message.role === "user",
     );
-    // Saving a queued-message edit or submitting `/feedback` sends nothing to the agent, so it
+    const draft =
+      props.composerDraftKey === null ? null : getComposerDraftSnapshot(props.composerDraftKey);
+    const draftInstanceId = (draft?.modelSelection ?? props.selectedThread.modelSelection)
+      .instanceId;
+    // Mirrors the send path: `/feedback` with no attachments on Codex goes to Codex, not the agent.
+    const sendsFeedback =
+      draft !== null &&
+      draft.attachments.length === 0 &&
+      props.serverConfig?.providers.find((provider) => provider.instanceId === draftInstanceId)
+        ?.driver === "codex" &&
+      parseCodexFeedbackCommand(draft.text) !== null;
+    // Saving a queued-message edit or submitting feedback sends nothing to the agent, so it
     // leaves approvals alone.
     if (
       props.activePendingApprovals.length > 0 &&
       props.activePendingUserInput === null &&
       props.queuedRunEdit === null &&
-      (props.composerDraftKey === null ||
-        parseCodexFeedbackCommand(getComposerDraftSnapshot(props.composerDraftKey).text) === null)
+      !sendsFeedback
     ) {
       if (
         props.respondingApprovalId !== null ||

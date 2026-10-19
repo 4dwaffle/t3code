@@ -338,6 +338,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const inputRef = props.editorRef ?? fallbackInputRef;
   const [isFocused, setIsFocused] = useState(false);
   const pendingPastedTextAttachmentCountRef = useRef(0);
+  const pendingNativeImagePasteCountRef = useRef(0);
   const [pendingPastedTextAttachmentCount, setPendingPastedTextAttachmentCount] = useState(0);
   const settingsSheetPresentation = useThreadSettingsSheetPresentation({
     editorRef: inputRef,
@@ -553,6 +554,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
       const draft = getComposerDraftSnapshot(composerDraftKey);
       return (
         pendingPastedTextAttachmentCountRef.current === 0 &&
+        pendingNativeImagePasteCountRef.current === 0 &&
         draft.text === draftAtSend.text &&
         draft.attachments.length === draftAtSend.attachments.length
       );
@@ -822,7 +824,12 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                 selection={composerMenu.selection}
                 onChangeText={props.onChangeDraftMessage}
                 onSelectionChange={composerMenu.onSelectionChange}
-                onPasteImages={(uris) => void props.onNativePasteImages(uris)}
+                onPasteImages={(uris) => {
+                  pendingNativeImagePasteCountRef.current += 1;
+                  void props.onNativePasteImages(uris).finally(() => {
+                    pendingNativeImagePasteCountRef.current -= 1;
+                  });
+                }}
                 onPasteText={(paste) => {
                   const insertPaste = () => {
                     const insertion = replaceTextSelection({

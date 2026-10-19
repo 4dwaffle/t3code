@@ -3984,16 +3984,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
-    // Saving a queued-message edit or running a local command (`/plan`, `/feedback`, usage limits) sends
-    // nothing, so it leaves approvals alone. Approvals the typing guard still hides count too:
-    // the redirect replaces them all.
+    const draftBeforeDecline = useComposerDraftStore
+      .getState()
+      .getComposerDraft(composerDraftTarget);
+    const promptOnly =
+      draftBeforeDecline === null ||
+      !composerDraftHasUserContent({ ...draftBeforeDecline, prompt: "" });
+    // Mirrors the send handler: these commands run locally only when the draft is just the prompt.
+    const runsLocalCommand =
+      promptOnly &&
+      ((onUsageLimitsCommand !== undefined && isUsageLimitsCommand(promptRef.current)) ||
+        (planModeUiEnabled && parseStandaloneComposerSlashCommand(promptRef.current) !== null) ||
+        (selectedProvider === "codex" && parseCodexFeedbackCommand(promptRef.current) !== null));
+    // Saving a queued-message edit or running a local command sends nothing to the agent, so it
+    // leaves approvals alone. Approvals the typing guard still hides count too: the redirect
+    // replaces them all.
     if (
       pendingApprovals.length > 0 &&
       activePendingProgress === null &&
       !isEditingQueuedMessage &&
-      !isUsageLimitsCommand(promptRef.current) &&
-      parseStandaloneComposerSlashCommand(promptRef.current) === null &&
-      parseCodexFeedbackCommand(promptRef.current) === null
+      !runsLocalCommand
     ) {
       event?.preventDefault();
       if (
@@ -4014,13 +4024,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         () => false,
       );
       approvalSubmissionInFlightRef.current = false;
-      // A draft edited during the decline is no longer what the user chose to send.
+      if (!declined || composerDraftTargetKey !== composerDraftTargetKeyRef.current) return;
+      // A draft edited during the decline (text, attachments, contexts) is no longer what the
+      // user chose to send.
       if (
-        !declined ||
-        composerDraftTargetKey !== composerDraftTargetKeyRef.current ||
-        promptRef.current !== submittedPrompt
-      )
+        promptRef.current !== submittedPrompt ||
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) !==
+          draftBeforeDecline
+      ) {
+        toastManager.add({
+          type: "info",
+          title: "Approval declined. Your message changed, so it wasn't sent.",
+          description: "Send again when it's ready.",
+        });
         return;
+      }
       // A paste that started during the decline isn't in the draft snapshot yet.
       if (
         (pendingImageCompressionsRef.current.get(attachmentTargetKeyRef.current) ?? 0) > 0 ||
