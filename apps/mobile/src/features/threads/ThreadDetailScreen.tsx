@@ -902,6 +902,10 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     selectedThreadKey,
   ]);
 
+  const activePendingApprovalsRef = useRef(props.activePendingApprovals);
+  useLayoutEffect(() => {
+    activePendingApprovalsRef.current = props.activePendingApprovals;
+  }, [props.activePendingApprovals]);
   const handleSendMessage = async (
     followUp?: ActiveTurnComposerAction,
     stillSendable?: () => boolean,
@@ -912,17 +916,21 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     );
     // Runs only once the send path has validated the draft and is about to deliver it, so an
     // empty submit, a queued-message edit, or `/feedback` leaves approvals alone.
+    const approvalsToDecline = props.activePendingApprovals;
     const declineBeforeDispatch =
-      props.activePendingApprovals.length > 0 && props.activePendingUserInput === null
+      approvalsToDecline.length > 0 && props.activePendingUserInput === null
         ? async () =>
             props.respondingApprovalId === null &&
-            (await declinePendingApprovals(
-              props.activePendingApprovals,
-              props.onRespondToApproval,
-            )) &&
+            (await declinePendingApprovals(approvalsToDecline, props.onRespondToApproval)) &&
             selectedThreadKeyRef.current === targetThreadKey &&
             // A draft edited or pasted into during the decline isn't what the user sent.
-            stillSendable?.() !== false
+            stillSendable?.() !== false &&
+            // An approval that arrived during the decline would block the redirect; the draft
+            // stays so the next send declines it too.
+            !activePendingApprovalsRef.current.some(
+              (approval) =>
+                !approvalsToDecline.some((declined) => declined.requestId === approval.requestId),
+            )
         : undefined;
     const messageId = await props.onSendMessage(followUp, declineBeforeDispatch);
     if (messageId === null || selectedThreadKeyRef.current !== targetThreadKey) {

@@ -6547,17 +6547,30 @@ export default function ChatView(props: ChatViewProps) {
         draftChangedSinceSend() ||
         useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) !==
           draftBeforeDecline;
-      if (!declined || draftChanged || currentRouteThreadKeyRef.current !== routeThreadKey) {
+      // An approval that arrived during the decline would block the redirect; keep the draft so
+      // the next send declines it too.
+      const approvalArrived = pendingApprovalsRef.current.some(
+        (approval) =>
+          !approvalsToDecline.some((declined) => declined.requestId === approval.requestId),
+      );
+      if (
+        !declined ||
+        draftChanged ||
+        approvalArrived ||
+        currentRouteThreadKeyRef.current !== routeThreadKey
+      ) {
         sendInFlightRef.current = false;
         setDockedDraftHeroThreadKey((currentThreadKey) =>
           currentThreadKey === activeThreadKey ? null : currentThreadKey,
         );
-        if (draftChanged) {
+        if (draftChanged || (declined && approvalArrived)) {
           toastManager.add({
             type: "info",
-            title: declined
-              ? "Approval declined. Your message changed, so it wasn't sent."
-              : "Your message changed, so it wasn't sent.",
+            title: draftChanged
+              ? declined
+                ? "Approval declined. Your message changed, so it wasn't sent."
+                : "Your message changed, so it wasn't sent."
+              : "Another approval arrived, so your message wasn't sent.",
             description: "Send again when it's ready.",
           });
         }
