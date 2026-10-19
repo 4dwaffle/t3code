@@ -2103,6 +2103,8 @@ it.effect("a running session renews its bound profile but refuses a replacement 
 
 const makeRenewalBroker = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
+  const requestStarted = yield* Deferred.make<void>();
+  let listening = false;
   const oauthEntered = yield* Deferred.make<void>();
   const oauthRelease = yield* Deferred.make<void>();
   const commitEntered = yield* Deferred.make<void>();
@@ -2178,6 +2180,7 @@ const makeRenewalBroker = Effect.gen(function* () {
     const context = yield* Layer.buildWithScope(CodexManagedTokenBroker.layer, scope);
     const broker = Context.get(context, CodexManagedTokenBroker.CodexManagedTokenBroker);
     const endpoint = yield* broker.endpoint;
+    listening = true;
     yield* Effect.addFinalizer(() =>
       Deferred.succeed(oauthRelease, undefined).pipe(
         Effect.andThen(Deferred.succeed(commitRelease, undefined)),
@@ -2191,6 +2194,18 @@ const makeRenewalBroker = Effect.gen(function* () {
       endpoint,
       refreshTokens,
       request: { version: 1, instanceId, environmentId, profileKey },
+      requestStarted: Deferred.await(requestStarted),
+      holdSignIn: Effect.gen(function* () {
+        yield* auth.controller.start("owner", Effect.void, undefined, undefined, "client");
+        const waiting = yield* auth.controller.subscribe("owner").pipe(
+          Stream.filter((state) => state.phase === "waiting"),
+          Stream.runHead,
+          Effect.map(Option.getOrThrow),
+        );
+        const cancel = auth.controller.cancel("owner", waiting.flowId!);
+        yield* Effect.addFinalizer(() => cancel.pipe(Effect.ignoreCause));
+        return cancel;
+      }),
       oauthEntered,
       oauthRelease,
       commitEntered,
@@ -2205,7 +2220,11 @@ const makeRenewalBroker = Effect.gen(function* () {
     Effect.provideService(FileSystem.FileSystem, fileSystem),
     Effect.provideService(HttpClient.HttpClient, http),
     Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(environmentId),
+      getEnvironmentId: Effect.gen(function* () {
+        // After listener setup, identity is resolved when an admitted job constructs auth.
+        if (listening) yield* Deferred.succeed(requestStarted, undefined);
+        return environmentId;
+      }),
     }),
   );
 });
@@ -2242,14 +2261,46 @@ const provideBroker = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     ),
   );
 
-it.live.each(["oauth-disconnect", "commit-disconnect", "commit-shutdown"] as const)(
+it.effect("the broker retires a queued renewal while sign-in still holds the permit", () =>
+  provideBroker(
+    Effect.gen(function* () {
+      const h = yield* makeRenewalBroker;
+      yield* h.holdSignIn.pipe(Effect.asVoid);
+      const client = yield* brokerClient(h.endpoint, h.request);
+      yield* h.requestStarted;
+      const idle = yield* Deferred.make<void>();
+      yield* h.broker.awaitIdle.pipe(
+        Effect.andThen(Deferred.succeed(idle, undefined)),
+        Effect.forkChild,
+      );
+
+      yield* TestClock.adjust(80_001);
+      assert.isTrue(yield* Deferred.isDone(idle), "The admitted renewal outlived its helper");
+      yield* Scope.close(h.scope, Exit.void);
+      assert.equal(yield* Effect.promise(() => client.response), "");
+      const state = yield* h.auth.controller
+        .subscribe("owner")
+        .pipe(Stream.runHead, Effect.map(Option.getOrThrow));
+      assert.equal(state.phase, "waiting");
+      assert.deepEqual(h.refreshTokens, []);
+    }),
+  ),
+);
+
+it.effect.each(["oauth-disconnect", "commit-disconnect", "commit-shutdown"] as const)(
   "server-owned renewal persists rotated credentials after %s",
   (stage) =>
     provideBroker(
       Effect.gen(function* () {
         const h = yield* makeRenewalBroker;
         h.pause(stage === "oauth-disconnect" ? "oauth" : "commit");
+        const releaseSignIn = stage === "oauth-disconnect" ? yield* h.holdSignIn : undefined;
         const client = yield* brokerClient(h.endpoint, h.request);
+        if (releaseSignIn) {
+          yield* h.requestStarted;
+          yield* TestClock.adjust(70_000);
+          yield* releaseSignIn;
+        }
         yield* Deferred.await(stage === "oauth-disconnect" ? h.oauthEntered : h.commitEntered);
         const closing =
           stage === "commit-shutdown"
@@ -2257,6 +2308,8 @@ it.live.each(["oauth-disconnect", "commit-disconnect", "commit-shutdown"] as con
             : undefined;
         if (!closing) client.socket.destroy();
         yield* Effect.promise(() => client.response);
+        // Cross the broker deadline while still inside the exchange's own 20-second budget.
+        if (releaseSignIn) yield* TestClock.adjust(10_001);
         assert.equal(Option.getOrThrow(yield* h.auth.read).refreshToken, "single-use-refresh");
         yield* Deferred.succeed(h.oauthRelease, undefined);
         yield* Deferred.succeed(h.commitRelease, undefined);

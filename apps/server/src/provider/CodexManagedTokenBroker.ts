@@ -153,7 +153,10 @@ const acquireListener = Effect.gen(function* () {
                 instanceId: request.instanceId,
                 expectedProfileKey: request.profileKey,
               });
-              const credentials = yield* auth.access;
+              // Retire abandoned permit waits; access saves a started rotation before honoring interruption.
+              const credentials = yield* auth.access.pipe(
+                Effect.timeout(Protocol.COMMAND_TIMEOUT_MS),
+              );
               yield* Protocol.writeFrame(
                 socket,
                 encodeResponse({ token: credentials.accessToken }),
