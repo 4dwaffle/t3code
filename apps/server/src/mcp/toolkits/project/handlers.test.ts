@@ -300,6 +300,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
 );
 
 const clientLaunchHarness = (input: {
+  readonly sessionId?: string;
   readonly runtimeModeCeiling: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
@@ -315,10 +316,10 @@ const clientLaunchHarness = (input: {
     NodeCrypto.layer,
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
-      requestNamespace: "client:session-1",
+      requestNamespace: `client:${input.sessionId ?? "session-1"}`,
       thread: undefined,
       client: {
-        sessionId: "session-1",
+        sessionId: input.sessionId ?? "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
       },
@@ -402,42 +403,53 @@ it.effect("a client launches at its ceiling with the project's default model", (
   }),
 );
 
-it.effect("a launch retried with the same clientRequestId replays the first one", () =>
-  Effect.gen(function* () {
-    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-    const { projectId, dependencies } = clientLaunchHarness({
-      runtimeModeCeiling: "auto",
-      launched,
-    });
-    const toolkit = yield* ProjectToolkit.pipe(
-      Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
-      ),
-    );
-    const launch = (clientRequestId: string | undefined) =>
-      toolkit
-        .handle("t3_thread_launch", {
-          title: "Fix",
-          projectId,
-          message: "Fix the bug",
-          ...(clientRequestId === undefined ? {} : { clientRequestId }),
-        })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+it.effect.each(["fix:1", "key-\ud800"])(
+  "scopes launch retry identity to the caller for clientRequestId %j",
+  (clientRequestId) =>
+    Effect.gen(function* () {
+      const fresh: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      for (const sessionId of ["session-1", "session-2"]) {
+        const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+        const { projectId, dependencies } = clientLaunchHarness({
+          sessionId,
+          runtimeModeCeiling: "auto",
+          launched,
+        });
+        const toolkit = yield* ProjectToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+              Layer.provide(dependencies),
+            ),
+          ),
+        );
+        const launch = Effect.fnUntraced(function* (key: string | undefined) {
+          const result = yield* toolkit
+            .handle("t3_thread_launch", {
+              title: "Fix",
+              projectId,
+              message: "Fix the bug",
+              ...(key === undefined ? {} : { clientRequestId: key }),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          expect(result.at(-1)?.result).toMatchObject({ projectId });
+          return launched.at(-1)!;
+        });
 
-    yield* launch("fix-1");
-    yield* launch("fix-1");
-    yield* launch("fix-2");
-    yield* launch(undefined);
-    yield* launch(undefined);
-    const ids = launched.map((input) => [input.commandId, input.threadId]);
-    // The same key sends the same command and thread ids, which the launch
-    // service replays instead of starting a second thread.
-    expect(ids[0]).toEqual(ids[1]);
-    expect(ids[0]?.[0]).toContain("client%3Asession-1");
-    expect(ids[2]).not.toEqual(ids[0]);
-    // Without a key every launch is new.
-    expect(ids[3]).not.toEqual(ids[4]);
-  }),
+        const first = yield* launch(clientRequestId);
+        expect(yield* launch(clientRequestId)).toEqual(first);
+        fresh.push(
+          first,
+          yield* launch(`${clientRequestId}:other`),
+          yield* launch(undefined),
+          yield* launch(undefined),
+        );
+      }
+      expect(new Set(fresh.map((input) => input.commandId)).size).toBe(fresh.length);
+      expect(new Set(fresh.map((input) => input.threadId)).size).toBe(fresh.length);
+      expect(new Set(fresh.map((input) => input.initialMessage?.messageId)).size).toBe(
+        fresh.length,
+      );
+    }),
 );
 
 it.effect("a launch binds only an existing checkout that is one of the project's worktrees", () =>

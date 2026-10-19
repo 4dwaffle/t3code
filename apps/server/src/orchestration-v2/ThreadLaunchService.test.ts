@@ -2003,24 +2003,24 @@ it.effect("replays an accepted launch after the project disables the instance", 
   }).pipe(Effect.provide(harness.layer));
 });
 
-it.effect("an agent's launch never starts work above the modes it asks for", () => {
+it.effect("rejects a narrower agent retry before dispatching its initial message", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
-    // The first launch, at full access, creates the thread without a message.
-    const created = yield* launches.launch(
-      launchInput({ command: "command:launch:narrowed-retry", thread: "thread:narrowed" }),
-    );
-    // The same key comes back from a narrower agent, now carrying a message,
-    // as a retry or a concurrent launch that lost the create would.
+    const input = launchInput({
+      command: "command:launch:narrowed-retry",
+      thread: "thread:narrowed",
+    });
+    const created = yield* launches.launch(input);
     const failed = yield* launches
       .launch({
-        ...launchInput({
-          command: "command:launch:narrowed-retry",
-          thread: "thread:narrowed",
-          message: "Run this",
-        }),
+        ...input,
+        initialMessage: {
+          messageId: MessageId.make("message:narrowed"),
+          text: "Run this",
+          attachments: [],
+        },
         runtimeMode: "approval-required",
         interactionMode: "plan",
         createdBy: "agent",
@@ -2031,6 +2031,7 @@ it.effect("an agent's launch never starts work above the modes it asks for", () 
       assert.fail(`expected ThreadLaunchError, got ${failed._tag}`);
     }
     assert.equal(failed.operation, "dispatch-message");
+    assert.match(String(failed.cause), /above what this caller may change/u);
     const projection = yield* threads.getThreadProjection(created.threadId);
     assert.equal(projection.runs.length, 0);
     assert.equal(projection.messages.length, 0);
