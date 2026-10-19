@@ -286,7 +286,11 @@ it.effect("reads another thread checkout with selected and bounded diff sources"
     yield* Effect.gen(function* () {
       const toolkit = yield* WorktreeToolkit;
       const read = (
-        input: { source?: "working-tree" | "branch-range"; maxCharacters?: number } = {},
+        input: {
+          source?: "working-tree" | "branch-range";
+          baseRef?: string;
+          maxCharacters?: number;
+        } = {},
       ) =>
         toolkit.handle("t3_thread_diff", { threadId: targetId, baseRef: "main", ...input }).pipe(
           Stream.unwrap,
@@ -308,11 +312,32 @@ it.effect("reads another thread checkout with selected and bounded diff sources"
       expect(working.truncated).toBe(false);
       expect(branch.truncated).toBe(false);
       expect(yield* read({ source: "working-tree" })).toEqual({ ...all, sources: [working] });
+      expect(yield* read({ source: "working-tree", baseRef: "missing-base" })).toEqual({
+        ...all,
+        sources: [working],
+      });
+      expect(yield* read({ baseRef: "missing-base" })).toMatchObject({
+        code: "invalid_request",
+        message: "Could not find a common commit between 'missing-base' and HEAD.",
+      });
+      expect(yield* read({ source: "branch-range", baseRef: "missing-base" })).toMatchObject({
+        code: "invalid_request",
+        message: "Could not find a common commit between 'missing-base' and HEAD.",
+      });
       expect(yield* read({ source: "branch-range" })).toEqual({ ...all, sources: [branch] });
       expect(yield* read({ source: "branch-range", maxCharacters: 24 })).toEqual({
         ...all,
         sources: [{ ...branch, diff: branch.diff.slice(0, 24), truncated: true }],
       });
+      yield* Effect.forEach(
+        Array.from({ length: 500 }, (_, index) => index),
+        (index) => fs.writeFileString(`${checkout}/extra-${index}.txt`, "extra\n"),
+      );
+      const capped = yield* read({ source: "working-tree", maxCharacters: 100_000 });
+      if (!("sources" in capped)) throw new Error("Expected a diff result");
+      expect(capped.sources[0]!.files).toHaveLength(500);
+      expect(capped.sources[0]!.diff.length).toBeLessThan(100_000);
+      expect(capped.sources[0]!.truncated).toBe(true);
     }).pipe(
       Effect.provide(
         McpToolAccess.HandlersLayer.layer(WorktreeHandlers.layer).pipe(

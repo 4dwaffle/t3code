@@ -91,7 +91,7 @@ const MAX_DIFF_CHARACTERS = 100_000;
 
 const ThreadDiffTool = Tool.make("t3_thread_diff", {
   description:
-    "Show what a thread changed in its checkout (omit threadId for this thread), as the diff panel does. Returns working-tree (uncommitted changes vs HEAD) and branch-range (changes since the merge base with baseRef, or the detected base branch), each with per-file stats and a unified diff cut to maxCharacters (default 20,000), with truncated set when cut. Pass source to return one.",
+    "Show what a thread changed in its checkout (omit threadId for this thread), as the diff panel does. Returns working-tree (uncommitted changes vs HEAD) and branch-range (changes since the merge base with baseRef, or the detected base branch), each with stats for up to 500 files and a unified diff cut to maxCharacters (default 20,000), with truncated set when cut. Pass source to return one.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     baseRef: Schema.optional(TrimmedNonEmptyString),

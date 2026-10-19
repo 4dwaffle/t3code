@@ -11,6 +11,8 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
 import { WorktreeToolkit } from "./tools.ts";
 
+const MAX_DIFF_FILES = 500;
+
 const handlers = {
   t3_worktree_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
@@ -54,11 +56,16 @@ const handlers = {
         .getDiffPreview({
           cwd: thread.worktreePath ?? project.value.workspaceRoot,
           ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+          ...(input.source === undefined ? {} : { sourceKind: input.source }),
         })
         .pipe(
           Effect.mapError((error) =>
             error._tag === "VcsRepositoryDetectionError" ||
-            error._tag === "VcsUnsupportedOperationError"
+            error._tag === "VcsUnsupportedOperationError" ||
+            (error._tag === "GitCommandError" &&
+              input.baseRef !== undefined &&
+              error.operation === "GitVcsDriver.resolveReviewMergeBase" &&
+              error.exitCode !== undefined)
               ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.detail })
               : unavailable(),
           ),
@@ -72,16 +79,17 @@ const handlers = {
       return {
         threadId: thread.id,
         cwd: preview.cwd,
-        sources: preview.sources
-          .filter((source) => input.source === undefined || source.kind === input.source)
-          .map((source) => ({
-            kind: source.kind,
-            baseRef: source.baseRef,
-            headRef: source.headRef,
-            files: source.files ?? null,
-            diff: source.diff.slice(0, maxCharacters),
-            truncated: source.truncated || source.diff.length > maxCharacters,
-          })),
+        sources: preview.sources.map((source) => ({
+          kind: source.kind,
+          baseRef: source.baseRef,
+          headRef: source.headRef,
+          files: source.files?.slice(0, MAX_DIFF_FILES) ?? null,
+          diff: source.diff.slice(0, maxCharacters),
+          truncated:
+            source.truncated ||
+            source.diff.length > maxCharacters ||
+            (source.files?.length ?? 0) > MAX_DIFF_FILES,
+        })),
       };
     }),
   ),

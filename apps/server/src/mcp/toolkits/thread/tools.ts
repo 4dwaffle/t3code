@@ -154,6 +154,7 @@ const pendingRequest = Schema.Struct({
   kind: pendingRequestKind,
   questions: Schema.optional(Schema.Array(question)),
   prompt: Schema.optional(Schema.String),
+  promptTruncated: Schema.optional(Schema.Boolean),
   options: Schema.optional(Schema.Array(ProviderApprovalOption)),
 });
 const PendingRequestListTool = Tool.make("t3_pending_request_list", {

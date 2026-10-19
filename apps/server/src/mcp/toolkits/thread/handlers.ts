@@ -235,12 +235,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       if (item?.type === "user_input_request")
         return { requestId: input.requestId, kind: request.kind, questions: item.questions };
       const approval = item?.type === "approval_request" ? item : undefined;
+      const prompt = approval?.prompt === undefined ? undefined : Array.from(approval.prompt);
       return {
         requestId: input.requestId,
         kind: request.kind,
-        ...(approval?.prompt === undefined
-          ? {}
-          : { prompt: Array.from(approval.prompt).slice(0, 4000).join("") }),
+        ...(prompt === undefined ? {} : { prompt: prompt.slice(0, 4000).join("") }),
+        ...(prompt !== undefined && prompt.length > 4000 ? { promptTruncated: true } : {}),
         ...(approval?.options === undefined ? {} : { options: approval.options }),
       };
     }),

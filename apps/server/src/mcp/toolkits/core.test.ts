@@ -667,7 +667,8 @@ it.effect("lists, reads and resolves approvals with offered decisions and caller
         type: "approval_request",
         requestId,
         requestKind: "command",
-        prompt: "Run the command?",
+        prompt:
+          id === "approve-client" ? `${"🙂".repeat(3999)}🚀hidden warning` : "Run the command?",
         options,
       });
     }
@@ -700,6 +701,16 @@ it.effect("lists, reads and resolves approvals with offered decisions and caller
     expect(
       (yield* call("t3_pending_request_read", { requestId: "approve" })).structuredContent,
     ).toEqual({ requestId: "approve", kind: "command", prompt: "Run the command?", options });
+
+    const clipped = (yield* call("t3_pending_request_read", { requestId: "approve-client" }))
+      .structuredContent;
+    expect(clipped).toEqual({
+      requestId: "approve-client",
+      kind: "command",
+      prompt: `${"🙂".repeat(3999)}🚀`,
+      promptTruncated: true,
+      options,
+    });
 
     const respond = (
       requestId: string,
