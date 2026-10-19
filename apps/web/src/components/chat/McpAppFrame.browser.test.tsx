@@ -32,6 +32,7 @@ const refocusAndAsk = (source) => {
   void askFullscreen(source);
 };
 addEventListener("message", ({ data }) => {
+  if (data === "retry") return refocusAndAsk("retry");
   if (pending.has(data.id)) {
     pending.get(data.id)(data.result);
     pending.delete(data.id);
@@ -77,6 +78,7 @@ vi.mock(import("../../hooks/useHtmlRenderTheme"), async (original) => ({
 import { McpAppFrame } from "./McpAppFrame";
 
 let root: Root | undefined;
+let skew = 0;
 let answers: string[] = [];
 let answered: (() => void) | undefined;
 const onProbe = (event: MessageEvent) => {
@@ -99,6 +101,11 @@ const nextAnswer = async (action: () => Promise<unknown>) => {
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   answers = [];
+  answered = undefined;
+  skew = 0;
+  // Advance the host cooldown without manufacturing browser user activation.
+  const now = performance.now.bind(performance);
+  vi.spyOn(performance, "now").mockImplementation(() => now() + skew);
   window.addEventListener("message", onProbe);
 });
 afterEach(async () => {
@@ -112,12 +119,38 @@ afterEach(async () => {
 
 const isFullscreen = () => document.querySelector("[data-mcp-app-fullscreen]") !== null;
 
+const renderApp = async () => {
+  const container = document.body.appendChild(document.createElement("div"));
+  root = createRoot(container);
+  await act(async () =>
+    root?.render(
+      <McpAppFrame
+        environmentId={EnvironmentId.make("env")}
+        threadId={ThreadId.make("thread")}
+        conversationThreadId={ThreadId.make("thread")}
+        itemId={TurnItemId.make("item")}
+        revision="1"
+        app={{ attachmentId: "app", server: "srv", tool: "show", resourceUri: "ui://srv/app" }}
+        onSendMessage={undefined}
+      />,
+    ),
+  );
+};
+
+const retry = () =>
+  nextAnswer(async () => {
+    document.querySelector("iframe")!.contentWindow!.postMessage("retry", "*");
+  });
+
+it("keeps load and idle retries inline even after the page-input cooldown", async () => {
+  expect(await nextAnswer(renderApp)).toBe("load:inline");
+  skew += 5_000;
+  expect(await retry()).toBe("retry:inline");
+  expect(await retry()).toBe("retry:inline");
+  expect(isFullscreen()).toBe(false);
+});
+
 it("opens full screen only from a tap in the app, never from activation the page got elsewhere", async () => {
-  // Moving T3's clock on leaves the browser's activation running, so each
-  // request below reaches the host with the page still activated.
-  let skew = 0;
-  const now = performance.now.bind(performance);
-  vi.spyOn(performance, "now").mockImplementation(() => now() + skew);
   const appButton = page
     .frameLocator(page.getByTitle("srv app"))
     .getByRole("button", { name: "Open full screen" });
@@ -132,21 +165,7 @@ it("opens full screen only from a tap in the app, never from activation the page
   // The click that opens a thread still activates the page as its app loads.
   const load = nextAnswer(async () => {
     await userEvent.click(elsewhere);
-    const container = document.body.appendChild(document.createElement("div"));
-    root = createRoot(container);
-    await act(async () =>
-      root?.render(
-        <McpAppFrame
-          environmentId={EnvironmentId.make("env")}
-          threadId={ThreadId.make("thread")}
-          conversationThreadId={ThreadId.make("thread")}
-          itemId={TurnItemId.make("item")}
-          revision="1"
-          app={{ attachmentId: "app", server: "srv", tool: "show", resourceUri: "ui://srv/app" }}
-          onSendMessage={undefined}
-        />,
-      ),
-    );
+    await renderApp();
   });
   expect(await load).toBe("load:inline");
   expect(isFullscreen()).toBe(false);
