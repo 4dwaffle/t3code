@@ -331,14 +331,18 @@ const encodeUpsertInput = Schema.encodeSync(ScheduledTaskUpsertInput);
 const decodeUpsertInput = Schema.decodeUnknownSync(ScheduledTaskUpsertInput);
 
 describe("scheduled task partial edits", () => {
-  it.each([30_000, 120_000])(
-    "a stale rename preserves live fields and normalizes only a live sub-minute interval (%i ms)",
-    (everyMs) => {
+  it.each([
+    { opening: { type: "interval", everyMs: 30_000 }, everyMs: 30_000 },
+    { opening: { type: "interval", everyMs: 30_000 }, everyMs: 120_000 },
+    { opening: { type: "interval", everyMs: 120_000 }, everyMs: 30_000 },
+    { opening: { type: "webhook", signature: null }, everyMs: 30_000 },
+  ] as const)(
+    "a stale rename preserves live fields and normalizes only a live sub-minute interval ($opening -> $everyMs ms)",
+    ({ opening, everyMs }) => {
       const opened = taskToDraft({
         ...legacyTask,
-        schedule: { type: "interval", everyMs: 30_000 },
+        schedule: opening,
       });
-      expect(opened.intervalMinutes).toBe("1");
       const live: ScheduledTask = {
         ...legacyTask,
         schedule: { type: "interval", everyMs },
@@ -346,9 +350,14 @@ describe("scheduled task partial edits", () => {
         enabled: false,
         projectId: ProjectId.make("moved"),
         threadId: ThreadId.make("rebound"),
+        modelSelection: { instanceId: ProviderInstanceId.make("concurrent"), model: "live-model" },
       };
       const schedule =
         everyMs < 60_000 ? { type: "interval" as const, everyMs: 60_000 } : undefined;
+      expect(
+        buildEdit({ ...opened, scheduleMode: "interval", intervalMinutes: "3" }, opened, live)
+          ?.schedule,
+      ).toEqual({ type: "interval", everyMs: 180_000 });
       const patch = buildEdit({ ...opened, title: "Renamed" }, opened, live)!;
       const fallback = scheduledTaskLegacyUpsert(live, patch);
       expect(decodeUpsertInput(encodeUpsertInput(fallback))).toEqual(fallback);
@@ -406,26 +415,37 @@ describe("scheduled task partial edits", () => {
     expect(buildEdit(edited, opened, { ...live, workspaceStrategy: { type: "root" } })).toBeNull();
   });
 
-  it("a project move detaches only a binding outside the destination", () => {
-    const task: ScheduledTask = { ...legacyTask, threadId: ThreadId.make("bound") };
-    const opened = taskToDraft(task);
-    const destination = ProjectId.make("destination");
-    const edited = { ...opened, projectId: destination };
-    expect(buildEdit(edited, opened, task)).toEqual({
-      id: task.id,
-      projectId: task.projectId,
-      nextProjectId: destination,
-      threadId: null,
-    });
-    const rebound: ScheduledTask = {
-      ...task,
-      projectId: destination,
-      threadId: ThreadId.make("new-binding"),
-    };
-    expect(buildEdit(edited, opened, rebound)).toEqual({
-      id: task.id,
-      projectId: destination,
-      nextProjectId: destination,
-    });
-  });
+  it.each([false, true])(
+    "a project move detaches only a binding outside the destination and saves the effective model (fallback: %s)",
+    (useFallback) => {
+      const task: ScheduledTask = { ...legacyTask, threadId: ThreadId.make("bound") };
+      const opened = taskToDraft(task);
+      const destination = ProjectId.make("destination");
+      const edited = { ...opened, projectId: destination };
+      const effectiveModel = useFallback
+        ? {
+            instanceId: ProviderInstanceId.make("destination-provider"),
+            model: "destination-model",
+          }
+        : task.modelSelection;
+      expect(buildScheduledTaskUpdateInput(edited, opened, task, effectiveModel)).toEqual({
+        id: task.id,
+        projectId: task.projectId,
+        nextProjectId: destination,
+        threadId: null,
+        ...(useFallback ? { modelSelection: effectiveModel } : {}),
+      });
+      const rebound: ScheduledTask = {
+        ...task,
+        projectId: destination,
+        threadId: ThreadId.make("new-binding"),
+      };
+      expect(buildScheduledTaskUpdateInput(edited, opened, rebound, effectiveModel)).toEqual({
+        id: task.id,
+        projectId: destination,
+        nextProjectId: destination,
+        ...(useFallback ? { modelSelection: effectiveModel } : {}),
+      });
+    },
+  );
 });
