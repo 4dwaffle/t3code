@@ -541,7 +541,12 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     onEditorFocusChange?.(false);
   };
   const handleSend = async (followUp?: ActiveTurnComposerAction) => {
-    if (voiceInput.blocksSubmission || pendingPastedTextAttachmentCountRef.current > 0) return;
+    if (
+      voiceInput.blocksSubmission ||
+      pendingPastedTextAttachmentCountRef.current > 0 ||
+      pendingNativeImagePasteCountRef.current > 0
+    )
+      return;
     if (usageLimitsOffered && isUsageLimitsCommand(draftMessage) && draftAttachments.length === 0) {
       if (openUsageLimits()) onChangeDraftMessage("");
       return;
