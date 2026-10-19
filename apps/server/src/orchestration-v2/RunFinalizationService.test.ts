@@ -299,7 +299,7 @@ it.effect.each(
         expectDispatch: false,
       },
       {
-        // #11078 review: isDefaultRef only rules out a PR lookup for the
+        // isDefaultRef only rules out a PR lookup for the
         // default branch; it must not also skip the drift check itself, or
         // switching a dedicated worktree to the repo's default branch would
         // never reconcile.
@@ -310,7 +310,7 @@ it.effect.each(
         expectDispatch: true,
       },
       {
-        // #11078 review: followWorktreeMove runs first and may have just
+        // followWorktreeMove runs first and may have just
         // moved the thread out of the checkpoint cwd. That cwd's branch is
         // where the thread was, so it must not overwrite the new branch.
         label: "does not follow drift in a checkout the thread already moved out of",
@@ -371,7 +371,7 @@ it.effect.each(
     yield* observer.refresh({ cwd: "/repo", threadId, runId });
     assert.equal(dispatch.mock.calls.length, scenario.expectDispatch ? 1 : 0);
     // A followed drift re-resolves the PR so the cache stops pairing the new
-    // branch with the previous branch's PR (#11078 review).
+    // branch with the previous branch's PR.
     assert.deepEqual(refreshedPullRequests, scenario.expectDispatch ? ["/repo"] : []);
     const dispatched = dispatch.mock.calls[0]?.[0];
     if (scenario.expectDispatch && dispatched !== undefined) {
@@ -633,7 +633,7 @@ const makeSessionSelectionLayer = (input: {
     ),
   );
 
-// #11078 review: a thread can stay bound to sessions opened elsewhere, so the
+// a thread can stay bound to sessions opened elsewhere, so the
 // newest bound session is not necessarily where this thread's agent is.
 it.effect("follows the active provider thread's session, not another bound session", () => {
   const threadId = ThreadId.make("thread-worktree-move-own-session");

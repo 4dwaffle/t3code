@@ -496,7 +496,7 @@ const make = Effect.gen(function* () {
             // a real branch itself. Re-checking right before the git rename
             // (rather than trusting the stamp this task started with) keeps
             // the rename from rewriting a ref nothing has checked out
-            // anymore (#11078 review); the expectedBranch compare-and-swap
+            // anymore; the expectedBranch compare-and-swap
             // below is the same guard for the thread's metadata stamp. The
             // status cache can still hold the branch from before the switch.
             git.invalidateLocalStatus(worktreeCwd).pipe(

@@ -28,7 +28,7 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
  * otherwise. Never the message or a stringified cause/stack, which can
  * carry git/command output or, further upstream, credentials — the real
  * value stays in the error's own `cause` field for the error chain, not in
- * annotations (effect-service-conventions review).
+ * annotations.
  */
 function failureCategory(error: unknown): string {
   if (
@@ -371,7 +371,7 @@ export const layerObserver = Layer.effect(
           // isDefaultRef only rules out looking up a PR for the default
           // branch below; a dedicated worktree switching to that branch is
           // still drift and must still be followed, so this cannot bail
-          // before the drift check runs (#11078 review).
+          // before the drift check runs.
           if (local.refName === null) return;
           const thread = yield* projections.getThreadShell(threadId);
           if (!thread) return;

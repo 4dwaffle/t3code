@@ -134,8 +134,8 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.provide(layerReceipts),
   );
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
-  // The branch-rename flow re-checks this right before renaming (#11078
-  // review): this harness never actually runs git, so it is tracked here
+  // The branch-rename flow re-checks this right before renaming. This
+  // harness never actually runs git, so it is tracked here
   // instead, starting at the literal most tests give an existing_worktree
   // (no createWorktree call to learn it from otherwise) and updated to
   // match whatever a new worktree actually gets checked out on, including a
@@ -1507,7 +1507,7 @@ it.effect(
 );
 
 it.effect(
-  "skips the background branch rename itself once the worktree's real branch has already moved (#11078 review)",
+  "skips the background branch rename itself once the worktree's real branch has already moved",
   () =>
     Effect.gen(function* () {
       const branchNameStarted = yield* Deferred.make<void>();

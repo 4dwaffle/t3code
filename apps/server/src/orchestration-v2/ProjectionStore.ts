@@ -382,8 +382,8 @@ export interface ProjectionStoreV2Shape {
    * make "whose branch is it" ambiguous, so a drifted checkout is only
    * adopted while a thread is its sole owner.
    *
-   * This read is not part of the same atomic commit as the write it gates
-   * (#11078 review): the orchestrator serializes commands per thread
+   * This read is not part of the same atomic commit as the write it gates:
+   * the orchestrator serializes commands per thread
    * (KeyedSerialExecutor keyed by threadId), not globally, so two different
    * threads' commands can run this read and their own commit concurrently.
    * If both are the first to move into the same previously-unrecorded

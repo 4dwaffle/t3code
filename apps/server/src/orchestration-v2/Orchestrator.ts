@@ -2560,7 +2560,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // Resolved below, against the live projection at decision time rather
     // than by the caller before dispatch: a sibling thread can start sharing
     // this worktree between that earlier read and this command's turn to
-    // commit, and a stale read would miss it (#11078 review). `undefined`
+    // commit, and a stale read would miss it. `undefined`
     // means "no override, use command.branch as given" further down.
     let metadataBranchOverride: string | null | undefined = undefined;
     if (command.type === "thread.metadata.update" && command.requireExclusiveWorktree === true) {
