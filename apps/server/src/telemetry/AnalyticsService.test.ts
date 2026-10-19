@@ -16,7 +16,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
-import { getTelemetryIdentifier } from "./Identify.ts";
+import { getInstallIdentifier } from "./Identify.ts";
 import * as AnalyticsService from "./AnalyticsService.ts";
 
 interface RecordedBatchRequest {
@@ -57,7 +57,13 @@ const SentBatch = Schema.fromJsonString(
     batch: Schema.Array(
       Schema.Struct({
         uuid: Schema.String,
-        properties: Schema.Struct({ telemetryChannel: Schema.String }),
+        event: Schema.String,
+        distinct_id: Schema.String,
+        properties: Schema.Struct({
+          telemetryChannel: Schema.String,
+          ownerSource: Schema.optionalKey(Schema.String),
+          observedBy: Schema.optionalKey(Schema.String),
+        }),
       }),
     ),
   }),
@@ -81,11 +87,26 @@ const respondWithStatus =
   (request) =>
     Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status })));
 
+const recordTwentyEvents = Effect.gen(function* () {
+  const analytics = yield* AnalyticsService.AnalyticsService;
+  for (let index = 0; index < 20; index += 1) {
+    yield* analytics.record("test.retry", { index });
+  }
+});
+
 /**
- * Records 20 events, then lets ten minutes of background flushes run against
- * a client that answers every send with `respond`. Returns the sent batches.
+ * Runs `record` (20 events by default), then lets ten minutes of background
+ * flushes run against a client that answers every send with `respond`.
+ * Returns the sent batches.
  */
-const sendForTenMinutes = (respond: Respond) =>
+const sendForTenMinutes = (
+  respond: Respond,
+  record: Effect.Effect<
+    void,
+    never,
+    AnalyticsService.AnalyticsService | Effect.Services<typeof getInstallIdentifier>
+  > = recordTwentyEvents,
+) =>
   Effect.gen(function* () {
     const batches: Array<ReadonlyArray<SentEvent>> = [];
     const client = HttpClient.make((request) =>
@@ -122,10 +143,7 @@ const sendForTenMinutes = (respond: Respond) =>
     );
 
     yield* Effect.gen(function* () {
-      const analytics = yield* AnalyticsService.AnalyticsService;
-      for (let index = 0; index < 20; index += 1) {
-        yield* analytics.record("test.retry", { index });
-      }
+      yield* record;
       for (let second = 0; second < 600; second += 1) {
         yield* TestClock.adjust("1 second");
       }
@@ -181,6 +199,44 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllGlobals()))),
   );
 
+  it.effect("each owner is sent once per process, on events keyed by the install id", () =>
+    Effect.gen(function* () {
+      let installId: string | null = null;
+      const batches = yield* sendForTenMinutes(
+        respondWithStatus(204),
+        Effect.gen(function* () {
+          installId = yield* getInstallIdentifier;
+          const analytics = yield* AnalyticsService.AnalyticsService;
+          const connect = { source: "connect", ownerId: "a".repeat(64) } as const;
+          yield* analytics.recordOwner({ ...connect, observedBy: "server" });
+          yield* analytics.recordOwner({ ...connect, observedBy: "server" });
+          yield* analytics.recordOwner({ ...connect, observedBy: "client" });
+          yield* analytics.recordOwner({
+            source: "device",
+            ownerId: "b".repeat(64),
+            observedBy: "client",
+          });
+        }),
+      );
+      const events = batches.flat();
+
+      assert.deepEqual(
+        events.map((event) => [
+          event.event,
+          event.properties.ownerSource,
+          event.properties.observedBy,
+        ]),
+        [
+          ["install.owner_observed", "connect", "server"],
+          ["install.owner_observed", "connect", "client"],
+          ["install.owner_observed", "device", "client"],
+        ],
+      );
+      assert.isString(installId);
+      assert.isTrue(events.every((event) => event.distinct_id === installId));
+    }),
+  );
+
   it.effect("flush drains all buffered events across multiple batches", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];
@@ -227,7 +283,7 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
 
       yield* Effect.gen(function* () {
         yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
-        const telemetryIdentifier = yield* getTelemetryIdentifier;
+        const telemetryIdentifier = yield* getInstallIdentifier;
         assert.equal(telemetryIdentifier !== null, true);
         const analytics = yield* AnalyticsService.AnalyticsService;
 

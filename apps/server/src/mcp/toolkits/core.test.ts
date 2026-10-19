@@ -481,6 +481,7 @@ it.effect("records the calling agent and the agent a tool acted on", () => {
                   properties: properties ?? {},
                 }).pipe(Effect.asVoid),
               flush: Effect.void,
+              recordOwner: () => Effect.void,
             }),
           ),
         ),

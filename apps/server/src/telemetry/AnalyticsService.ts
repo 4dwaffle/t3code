@@ -24,7 +24,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
-import { getTelemetryIdentifier } from "./Identify.ts";
+import { getInstallIdentifier, type TelemetryOwner } from "./Identify.ts";
 
 interface BufferedAnalyticsEvent {
   readonly uuid: string;
@@ -47,6 +47,8 @@ const FLUSH_INTERVAL_MS = 10_000;
 const SEND_TIMEOUT = "10 seconds";
 const MAX_BATCH_ATTEMPTS = 5;
 const RETRY_BASE_DELAY_MS = 2_000;
+// A client could send any number of owner ids; past this many, new ones are not sent.
+const MAX_RECORDED_OWNERS = 1_000;
 const RETRY_MAX_DELAY_MS = 300_000;
 // The endpoint answers these when the batch itself is wrong (bad body, wrong
 // api_key, too large), so sending it again cannot help. 408 and 429 are not
@@ -91,6 +93,14 @@ export class AnalyticsService extends Context.Service<
     ) => Effect.Effect<void>;
 
     readonly flush: Effect.Effect<void>;
+
+    /**
+     * Records `install.owner_observed` for an owner of this install. Each owner
+     * is sent once per server process, so reconnects and repeated reads are free.
+     */
+    readonly recordOwner: (
+      owner: TelemetryOwner & { readonly observedBy: "server" | "client" },
+    ) => Effect.Effect<void>;
   }
 >()("t3/telemetry/AnalyticsService") {
   static readonly layerTest = Layer.succeed(
@@ -98,6 +108,7 @@ export class AnalyticsService extends Context.Service<
     AnalyticsService.of({
       record: () => Effect.void,
       flush: Effect.void,
+      recordOwner: () => Effect.void,
     }),
   );
 }
@@ -123,7 +134,7 @@ export const make = Effect.gen(function* () {
   const telemetryConfig = yield* TelemetryEnvConfig;
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
-  const identifier = yield* getTelemetryIdentifier;
+  const identifier = yield* getInstallIdentifier;
   const crypto = yield* Crypto.Crypto;
   const bufferRef = yield* Ref.make<ReadonlyArray<BufferedAnalyticsEvent>>([]);
   const deliveryRef = yield* Ref.make<DeliveryState>({
@@ -132,6 +143,7 @@ export const make = Effect.gen(function* () {
     failures: 0,
     retryAt: 0,
   });
+  const recordedOwnersRef = yield* Ref.make<ReadonlySet<string>>(new Set());
   // The background flush and the shutdown flush must not send the same batch at once.
   const flushLock = yield* Semaphore.make(1);
   const clientType = serverConfig.mode === "desktop" ? "desktop-app" : "cli-web-client";
@@ -284,13 +296,31 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const recordOwner: AnalyticsService["Service"]["recordOwner"] = ({
+    source,
+    ownerId,
+    observedBy,
+  }) =>
+    Ref.modify(recordedOwnersRef, (recorded) => {
+      const key = `${observedBy}:${source}:${ownerId}`;
+      return recorded.has(key) || recorded.size >= MAX_RECORDED_OWNERS
+        ? [false, recorded]
+        : [true, new Set(recorded).add(key)];
+    }).pipe(
+      Effect.flatMap((isNew) =>
+        isNew
+          ? record("install.owner_observed", { ownerSource: source, ownerId, observedBy })
+          : Effect.void,
+      ),
+    );
+
   yield* Effect.forever(Effect.sleep(FLUSH_INTERVAL_MS).pipe(Effect.flatMap(() => flushWhenDue)), {
     disableYield: true,
   }).pipe(Effect.forkScoped);
 
   yield* Effect.addFinalizer(() => flush);
 
-  return AnalyticsService.of({ record, flush });
+  return AnalyticsService.of({ record, flush, recordOwner });
 });
 
 export const layer = Layer.effect(AnalyticsService, make);
