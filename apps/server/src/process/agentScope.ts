@@ -171,7 +171,8 @@ export const make = Effect.gen(function* () {
       // older user managers still get scopes, without the OOM label.
       const stopOptions = [STOP_TIMEOUT_OPTION];
       const oomOptions = [...stopOptions, "--property=OOMPolicy=stop"];
-      const scopeOptions = (yield* probe(oomOptions))
+      const supportsOomPolicy = yield* probe(oomOptions);
+      const scopeOptions = supportsOomPolicy
         ? oomOptions
         : (yield* probe(stopOptions))
           ? stopOptions
@@ -197,19 +198,16 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo("Agent scopes are on", {
         slice: AGENT_SLICE,
         ...limits,
-        oomPolicy: scopeOptions.length > 0,
+        oomPolicy: supportsOomPolicy,
       });
       return {
         systemdRun,
         systemctl,
         runtimeDir,
         scopeOptions,
-        // A shared server keeps serving its other threads when the kernel
-        // kills one of its tools, so its scope keeps running instead.
-        sharedScopeOptions:
-          scopeOptions === oomOptions
-            ? [...stopOptions, "--property=OOMPolicy=continue"]
-            : scopeOptions,
+        sharedScopeOptions: supportsOomPolicy
+          ? [...stopOptions, "--property=OOMPolicy=continue"]
+          : scopeOptions,
       };
     }),
   );
