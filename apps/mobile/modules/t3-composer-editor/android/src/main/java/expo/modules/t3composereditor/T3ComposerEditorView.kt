@@ -22,6 +22,7 @@ import android.view.KeyCharacterMap
 import android.view.MotionEvent
 import android.view.KeyEvent
 import android.view.ViewGroup
+import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
@@ -678,7 +679,10 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
     val fromSoftKeyboard =
       event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
         (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
-    val canSubmit = submitEnabled && submitListener != null && !readOnly
+    // Return during IME composition (CJK on a hardware keyboard) commits the candidate, like
+    // iOS's marked-text guard, so the draft is never sent half-typed.
+    val composing = text?.let { BaseInputConnection.getComposingSpanStart(it) != -1 } == true
+    val canSubmit = submitEnabled && submitListener != null && !readOnly && isEnabled && !composing
     if (!isReturn || fromSoftKeyboard || !canSubmit) {
       return null
     }

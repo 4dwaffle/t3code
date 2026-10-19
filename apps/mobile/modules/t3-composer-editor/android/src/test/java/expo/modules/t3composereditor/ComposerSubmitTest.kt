@@ -3,6 +3,7 @@ package expo.modules.t3composereditor
 import android.text.InputType
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.inputmethod.BaseInputConnection
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -86,6 +87,25 @@ class ComposerSubmitTest {
 
     assertEquals(emptyList<Boolean>(), sends)
     assertEquals("\n", editor.text.toString())
+  }
+
+  @Test
+  fun returnDoesNotSendFromADisabledEditor() {
+    editor.isEnabled = false
+
+    pressReturn()
+
+    assertEquals(emptyList<Boolean>(), sends)
+  }
+
+  @Test
+  fun returnDoesNotSendWhileComposing() {
+    editor.setText("ni")
+    BaseInputConnection.setComposingSpans(editor.text)
+
+    pressReturn()
+
+    assertEquals(emptyList<Boolean>(), sends)
   }
 
   @Test
