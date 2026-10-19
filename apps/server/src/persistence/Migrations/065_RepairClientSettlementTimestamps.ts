@@ -132,7 +132,7 @@ export default Effect.gen(function* () {
           json_extract(payload_json, '$.session.updatedAt') AS session_updated_at,
           json_extract(payload_json, '$.checkpointTurnCount') AS checkpoint,
           json_extract(payload_json, '$.turnCount') AS turn_count
-        FROM orchestration_events
+        FROM orchestration_events INDEXED BY idx_orch_events_stream_sequence
         WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
           AND application_event_version = 1 AND sequence > ${afterSequence}
           AND event_type IN (
