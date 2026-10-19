@@ -5,11 +5,12 @@ workspaces skip this flow.
 
 The hosted app at app.t3.codes does not open setup. With no computer connected,
 it asks you to sign in to T3 Connect, then to run `npx t3 connect` on your
-computer. It adds the computers linked to your account and opens the app.
+computer. From home, it adds compatible computers linked to your account and
+opens the app.
 
-Close setup at any step to go straight to the app. You can connect computers
-and agents later from Settings, or open `/welcome` to run setup again. Direct links,
-such as Settings, open normally before setup is done.
+Close setup while no import is running to go straight to the app. You can connect
+computers and agents later from Settings, or open `/welcome` to run setup again.
+Direct links, such as Settings, open normally before setup is done.
 
 ## Connect your computers
 

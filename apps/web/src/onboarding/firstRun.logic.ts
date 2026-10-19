@@ -63,11 +63,7 @@ export function transitionFirstRunGateState(
     return state.decision === "pending" && !state.stalled ? { ...state, stalled: true } : state;
   }
 
-  if (
-    state.decision === "wizard" ||
-    event.decision === "pending" ||
-    (state.decision === "app" && event.decision !== "wizard")
-  ) {
+  if (event.decision === "pending" || state.decision === event.decision) {
     return state;
   }
 

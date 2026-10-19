@@ -256,21 +256,38 @@ describe("transitionFirstRunGateState", () => {
     },
   );
 
-  it("keeps recovery visible while evidence remains pending", () => {
-    const state = { decision: "pending", stalled: true } as const;
+  it.each([
+    { decision: "pending", stalled: true },
+    { decision: "wizard", stalled: false },
+  ] as const)("retains $decision while evidence remains pending", (state) => {
     expect(transitionFirstRunGateState(state, { type: "evidence", decision: "pending" })).toBe(
       state,
     );
   });
 
-  it("allows authoritative wizard evidence to replace an app decision", () => {
-    expect(
-      transitionFirstRunGateState(
-        { decision: "app", stalled: false },
-        { type: "evidence", decision: "wizard" },
-      ),
-    ).toEqual({ decision: "wizard", stalled: false });
-  });
+  it.each([
+    { previous: "app", workspaceFresh: true, decision: "wizard" },
+    { previous: "wizard", workspaceFresh: false, decision: "app" },
+  ] as const)(
+    "updates $previous to $decision when authoritative workspace evidence changes",
+    ({ previous, workspaceFresh, decision }) => {
+      const evidence = resolveFirstRunDecision({ ...freshWorkspace, workspaceFresh });
+      expect(
+        transitionFirstRunGateState(
+          { decision: previous, stalled: false },
+          { type: "evidence", decision: evidence.decision },
+        ),
+      ).toEqual({ decision, stalled: false });
+    },
+  );
+
+  it.each(["pending", "app", "wizard"] as const)(
+    "preserves state identity for unchanged %s evidence",
+    (decision) => {
+      const state = { decision, stalled: false };
+      expect(transitionFirstRunGateState(state, { type: "evidence", decision })).toBe(state);
+    },
+  );
 });
 
 describe("resolveHostedFirstRunDecision", () => {

@@ -139,7 +139,7 @@ export function FirstRunGate({
         threadCount,
       });
 
-  if (decision !== "wizard" && hydrated) {
+  if (hydrated) {
     const transitioned = transitionFirstRunGateState(gateState, {
       type: "evidence",
       decision: nextDecision,
