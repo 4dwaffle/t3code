@@ -389,7 +389,7 @@ export const make = Effect.gen(function* () {
       projectId: first.thread.projectId,
       ...identityOf(first.link),
       webUrl:
-        first.link.repositoryWebUrl ?? (first.link.source === "agent" ? undefined : first.link.url),
+        first.link.repositoryWebUrl ?? (first.link.source === "agent" ? null : first.link.url),
     };
   };
 

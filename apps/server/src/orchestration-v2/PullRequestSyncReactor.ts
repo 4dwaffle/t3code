@@ -278,8 +278,7 @@ export const make = Effect.gen(function* () {
         repository: first.link.repository,
         number: first.link.number,
         webUrl:
-          first.link.repositoryWebUrl ??
-          (first.link.source === "agent" ? undefined : first.link.url),
+          first.link.repositoryWebUrl ?? (first.link.source === "agent" ? null : first.link.url),
       };
       const generation = requested.get(key);
       // A held merged summary is served without asking the host, so a snapshot still missing its

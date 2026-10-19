@@ -97,7 +97,8 @@ import * as PullRequestReadCache from "./PullRequestReadCache.ts";
 import * as PullRequestProviderRegistry from "./PullRequestProviderRegistry.ts";
 import * as ViewedFiles from "./pullRequestViewedFiles.ts";
 
-type WithWebUrl<I> = I & Pick<ProviderRepositoryRef, "webUrl">;
+// Null keeps raw API selectors from inheriting an HTTP checkout's URL.
+type WithWebUrl<I> = I & { readonly webUrl?: string | null | undefined };
 export type PullRequestRef = WithWebUrl<ContractPullRequestRef>;
 
 export interface PullRequestMergeEvent extends PullRequestRef {
@@ -314,7 +315,7 @@ export interface SupportedProject {
   readonly api: PullRequestProviderApi;
   readonly repository: string;
   readonly host: string;
-  readonly webUrl?: string | undefined;
+  readonly webUrl?: string | null | undefined;
   /**
    * Unique where `repository` is not: Azure's is a bare name that repeats across an organisation.
    */
@@ -334,7 +335,7 @@ const providerRef = (project: SupportedProject): ProviderRepositoryRef => ({
   cwd: project.project.workspaceRoot,
   repository: project.repository,
   host: project.host,
-  ...(project.webUrl === undefined ? {} : { webUrl: project.webUrl }),
+  ...(project.webUrl == null ? {} : { webUrl: project.webUrl }),
 });
 
 interface WorkspaceProjects {
@@ -804,7 +805,9 @@ export const make = Effect.gen(function* () {
           if (host === undefined || host === own.host)
             return Effect.succeed({
               ...own,
-              ...(ref.webUrl === undefined ? {} : { webUrl: withoutUrlCredentials(ref.webUrl) }),
+              ...(ref.webUrl === undefined
+                ? {}
+                : { webUrl: ref.webUrl === null ? null : withoutUrlCredentials(ref.webUrl) }),
             });
         }
         if (host === undefined) {
@@ -863,7 +866,9 @@ export const make = Effect.gen(function* () {
                       host,
                       ...(ref.webUrl === undefined
                         ? {}
-                        : { webUrl: withoutUrlCredentials(ref.webUrl) }),
+                        : {
+                            webUrl: ref.webUrl === null ? null : withoutUrlCredentials(ref.webUrl),
+                          }),
                       remote: normalizeGitRemoteUrl(`https://${host}/${repository}`),
                       repositoryKey: null,
                     };
@@ -883,7 +888,9 @@ export const make = Effect.gen(function* () {
                   ? sameRepository
                     ? route.webUrl
                     : undefined
-                  : withoutUrlCredentials(ref.webUrl),
+                  : ref.webUrl === null
+                    ? null
+                    : withoutUrlCredentials(ref.webUrl),
               remote: sameRepository
                 ? route.remote
                 : normalizeGitRemoteUrl(`https://${host}/${repository}`),
@@ -2558,10 +2565,10 @@ export const make = Effect.gen(function* () {
       ref.number,
       ref.expectedAccountId ?? null,
       ref[credentialNamespace] ?? null,
-      ref.webUrl ?? null,
+      { webUrl: ref.webUrl },
     ]);
   const refOfCacheKey = (key: string): PullRequestRef => {
-    const [, projectId, host, repository, number, expectedAccountId, fingerprint, webUrl] =
+    const [, projectId, host, repository, number, expectedAccountId, fingerprint, urlReference] =
       JSON.parse(key) as [
         number,
         string,
@@ -2570,14 +2577,14 @@ export const make = Effect.gen(function* () {
         number,
         string | null,
         string | null,
-        string | null,
+        Pick<PullRequestRef, "webUrl">,
       ];
     return {
       projectId,
       ...(host === null ? {} : { host }),
       ...(expectedAccountId === null ? {} : { expectedAccountId }),
       ...(fingerprint === null ? {} : { [credentialNamespace]: fingerprint }),
-      ...(webUrl === null ? {} : { webUrl }),
+      ...urlReference,
       repository,
       number,
     } as PullRequestRef;
