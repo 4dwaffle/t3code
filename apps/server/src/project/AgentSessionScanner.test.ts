@@ -24,7 +24,6 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
-import * as NodeTranscriptFileSystem from "./NodeTranscriptFileSystem.ts";
 
 const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => ({
   id: ProjectId.make("project-1"),
@@ -54,7 +53,6 @@ interface ScannerTestInput {
 
 const layerScannerTest = (input: ScannerTestInput) =>
   AgentSessionScanner.layer.pipe(
-    Layer.provide(NodeTranscriptFileSystem.layer),
     Layer.provide(
       Layer.mergeAll(
         ServerSettings.layerTest({
