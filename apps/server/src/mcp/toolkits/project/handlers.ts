@@ -85,11 +85,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
-        const readProject = Project.ProjectService.pipe(
-          Effect.flatMap((projects) => projects.getById(projectId)),
-          Effect.mapError(unavailable),
-          Effect.map(Option.getOrUndefined),
-        );
         yield* ThreadLaunch.ThreadLaunchService.pipe(
           Effect.flatMap((launches) =>
             launches.checkWorkspace({
@@ -115,11 +110,16 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             });
           }),
         );
-        const modelSelection =
-          input.modelSelection ??
-          caller?.modelSelection ??
-          (yield* readProject)?.defaultModelSelection ??
-          undefined;
+        const modelSelection = yield* ThreadLaunch.ThreadLaunchService.pipe(
+          Effect.flatMap((launches) =>
+            launches.resolveModelSelection({
+              commandId,
+              projectId,
+              modelSelection: input.modelSelection ?? caller?.modelSelection,
+            }),
+          ),
+          Effect.mapError(unavailable),
+        );
         if (modelSelection === undefined)
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",

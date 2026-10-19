@@ -14,6 +14,7 @@ import {
   ChatAttachmentId,
   ComposerContextId,
   type ChatAttachment,
+  type ModelSelection,
   CommandId,
   EnvironmentId,
   DEFAULT_SERVER_SETTINGS,
@@ -122,6 +123,7 @@ interface HarnessOptions {
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
   readonly gitDriver?: Layer.Layer<GitVcsDriver.GitVcsDriver>;
   readonly workspaceRoot?: string;
+  readonly getProject?: ProjectService.ProjectService["Service"]["getById"];
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -174,17 +176,19 @@ function makeHarness(options: HarnessOptions = {}) {
       bootstrap: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
-      getById: (id) =>
-        Effect.succeed(
-          id === projectId
-            ? Option.some({
-                ...project,
-                workspaceRoot: options.workspaceRoot ?? project.workspaceRoot,
-              })
-            : id === otherProjectId
-              ? Option.some(otherProject)
-              : Option.none(),
-        ),
+      getById:
+        options.getProject ??
+        ((id) =>
+          Effect.succeed(
+            id === projectId
+              ? Option.some({
+                  ...project,
+                  workspaceRoot: options.workspaceRoot ?? project.workspaceRoot,
+                })
+              : id === otherProjectId
+                ? Option.some(otherProject)
+                : Option.none(),
+          )),
       getByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
       snapshot: Effect.die("unused"),
       getShell: () => Effect.die("unused"),
@@ -2483,6 +2487,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
             ),
           ),
         checkWorkspace: launches.checkWorkspace,
+        resolveModelSelection: launches.resolveModelSelection,
         retryPreparation: launches.retryPreparation,
         prepareRun: launches.prepareRun,
       }),
@@ -3223,7 +3228,7 @@ it.effect.each(
 );
 
 it.effect.each(["worktree", "existing_worktree"] as const)(
-  "replays an accepted MCP launch after its %s input disappears, but validates fresh launches",
+  "replays an accepted MCP launch after its model default and %s input disappear, but validates fresh launches",
   (type) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -3252,8 +3257,15 @@ it.effect.each(["worktree", "existing_worktree"] as const)(
         "init",
       ]);
       yield* git(["worktree", "add", "-b", "feature", worktree]);
+      let defaultModelSelection: ModelSelection | null = modelSelection;
       const harness = makeHarness({
         workspaceRoot: repo,
+        getProject: (id) =>
+          Effect.succeed(
+            id === projectId
+              ? Option.some({ ...project, workspaceRoot: repo, defaultModelSelection })
+              : Option.none(),
+          ),
         gitDriver: gitDriverLayer,
         hasCommit: ({ refName }) =>
           git(["rev-parse", "--verify", `${refName}^{commit}`]).pipe(
@@ -3291,13 +3303,18 @@ it.effect.each(["worktree", "existing_worktree"] as const)(
           type === "worktree"
             ? { type, baseRef: "feature", startFromOrigin: false }
             : { type, worktreePath: worktree };
-        const handle = (clientRequestId: string, strategy = workspaceStrategy) =>
+        const handle = (
+          clientRequestId: string,
+          strategy: ThreadLaunch.ThreadLaunchWorkspaceStrategy = workspaceStrategy,
+          message?: string,
+        ) =>
           toolkit
             .handle("t3_thread_launch", {
               title: "Replay",
               projectId,
               clientRequestId,
               workspaceStrategy: strategy,
+              ...(message === undefined ? {} : { message }),
             })
             .pipe(
               Stream.unwrap,
@@ -3312,9 +3329,32 @@ it.effect.each(["worktree", "existing_worktree"] as const)(
         }
         const first = yield* handle("accepted");
         assert.property(first, "threadId");
+        assert.deepInclude(first, { modelSelection });
+        assert.include(
+          yield* handle(
+            "accepted",
+            { type: "existing_worktree", worktreePath: directory },
+            "Run setup",
+          ),
+          { code: "invalid_request" },
+        );
+        const created = (yield* threads.listProjectThreads({
+          projectId,
+          includeSubagents: true,
+        }))[0]!;
+        const unchanged = yield* threads.getThreadProjection(created.id);
+        assert.isEmpty(unchanged.messages);
+        assert.isEmpty(unchanged.runs);
         yield* git(["worktree", "remove", worktree]);
         yield* git(["branch", "-D", "feature"]);
+        defaultModelSelection = null;
         assert.deepEqual(yield* handle("accepted"), first);
+        const missingModel = yield* handle("fresh-no-model", { type: "root" });
+        assert.include(missingModel, { code: "invalid_request" });
+        assert.include(
+          (missingModel as { message: string }).message,
+          "project has no default model",
+        );
         const fresh = yield* handle("fresh");
         assert.include(fresh, { code: "invalid_request" });
         if (type === "worktree")

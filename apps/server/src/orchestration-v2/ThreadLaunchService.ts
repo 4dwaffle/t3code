@@ -178,6 +178,11 @@ export class ThreadLaunchService extends Context.Service<
       ThreadLaunchResult,
       ThreadLaunchError | ThreadManagement.ThreadManagementProviderInstanceDisabledError
     >;
+    readonly resolveModelSelection: (
+      input: Pick<ThreadLaunchInput, "commandId" | "projectId"> & {
+        readonly modelSelection?: ModelSelection | undefined;
+      },
+    ) => Effect.Effect<ModelSelection | undefined, ThreadLaunchError>;
     /**
      * Refuse invalid workspaces before creating a thread, while allowing an
      * accepted launch to replay after its original workspace changes.
@@ -234,7 +239,11 @@ const make = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
 
   const mapError =
-    (input: PreparationInput, operation: ThreadLaunchError["operation"], threadId?: ThreadId) =>
+    (
+      input: Pick<ThreadLaunchInput, "commandId" | "projectId">,
+      operation: ThreadLaunchError["operation"],
+      threadId?: ThreadId,
+    ) =>
     (cause: unknown) =>
       new ThreadLaunchError({
         operation,
@@ -273,19 +282,51 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const readAcceptedLaunchThread = Effect.fn("ThreadLaunchService.readAcceptedLaunchThread")(
+    function* (input: Pick<ThreadLaunchInput, "commandId" | "projectId">) {
+      const receipt = yield* receipts
+        .getByCommandId(input.commandId)
+        .pipe(Effect.mapError(mapError(input, "read-receipt")));
+      if (
+        Option.isNone(receipt) ||
+        receipt.value.status !== "accepted" ||
+        receipt.value.commandType !== "thread.create"
+      )
+        return;
+      const threadId = receipt.value.threadId;
+      const shell = yield* threads
+        .getThreadShell(threadId)
+        .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
+      if (shell === null)
+        return yield* mapError(input, "create-thread", threadId)("Thread not found.");
+      if (shell.projectId !== input.projectId)
+        return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
+      return shell;
+    },
+  );
+
+  const resolveModelSelection: ThreadLaunchService["Service"]["resolveModelSelection"] = Effect.fn(
+    "ThreadLaunchService.resolveModelSelection",
+  )(function* (input) {
+    const accepted = yield* readAcceptedLaunchThread(input);
+    if (accepted !== undefined) return accepted.modelSelection;
+    if (input.modelSelection !== undefined) return input.modelSelection;
+    const project = yield* projects
+      .getById(input.projectId)
+      .pipe(Effect.mapError(mapError(input, "resolve-project")));
+    return Option.getOrUndefined(project)?.defaultModelSelection ?? undefined;
+  });
+
   const checkWorkspace: ThreadLaunchService["Service"]["checkWorkspace"] = Effect.fn(
     "ThreadLaunchService.checkWorkspace",
   )(function* (input) {
-    const receipt = yield* receipts
-      .getByCommandId(input.commandId)
-      .pipe(Effect.mapError(mapError(input, "read-receipt")));
+    const accepted = yield* readAcceptedLaunchThread(input);
+    const strategy = input.workspaceStrategy;
     if (
-      Option.isSome(receipt) &&
-      receipt.value.status === "accepted" &&
-      receipt.value.commandType === "thread.create"
+      accepted !== undefined &&
+      (strategy.type !== "existing_worktree" || accepted.worktreePath === strategy.worktreePath)
     )
       return;
-    const strategy = input.workspaceStrategy;
     if (strategy.type === "existing_worktree") {
       const project = Option.getOrUndefined(
         yield* projects
@@ -1168,7 +1209,13 @@ const make = Effect.gen(function* () {
     );
   };
 
-  return ThreadLaunchService.of({ launch, checkWorkspace, retryPreparation, prepareRun });
+  return ThreadLaunchService.of({
+    launch,
+    resolveModelSelection,
+    checkWorkspace,
+    retryPreparation,
+    prepareRun,
+  });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);

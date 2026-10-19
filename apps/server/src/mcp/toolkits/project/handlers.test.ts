@@ -66,6 +66,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         checkWorkspace: () => Effect.void,
+        resolveModelSelection: () => Effect.succeed(modelSelection),
         launch: (input) => {
           launchedSender = input.initialMessage?.senderThreadId;
           return Effect.succeed({
@@ -167,6 +168,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
         checkWorkspace: () => Effect.void,
+        resolveModelSelection: () => Effect.succeed(modelSelection),
         launch: Effect.fnUntraced(function* (input) {
           launched.push(input);
           const folder = yield* folders
@@ -375,6 +377,7 @@ const clientLaunchHarness = (input: {
     Layer.mock(ThreadManagement.ThreadManagementService)({}),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorkspace: () => Effect.void,
+      resolveModelSelection: () => Effect.succeed(modelSelection),
       launch: (launch) => {
         input.launched.push(launch);
         return Effect.succeed({
