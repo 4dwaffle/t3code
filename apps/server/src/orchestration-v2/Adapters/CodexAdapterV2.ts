@@ -1481,9 +1481,9 @@ export function makeCodexAppServerProtocolLogger(input: {
   };
 }
 
-function redactCodexProtocolValue(value: unknown): unknown {
+function redactCodexProtocolValue(value: unknown, context?: "mcp" | "values"): unknown {
   if (Array.isArray(value)) {
-    return value.map(redactCodexProtocolValue);
+    return value.map((nested) => redactCodexProtocolValue(nested, context));
   }
   if (value === null || typeof value !== "object") {
     if (typeof value !== "string") {
@@ -1503,7 +1503,10 @@ function redactCodexProtocolValue(value: unknown): unknown {
     }
     try {
       return JSON.stringify(
-        redactCodexProtocolValue(boundProviderEventForLogging(JSON.parse(trimmed) as unknown)),
+        redactCodexProtocolValue(
+          boundProviderEventForLogging(JSON.parse(trimmed) as unknown),
+          context,
+        ),
       );
     } catch {
       return value;
@@ -1512,7 +1515,16 @@ function redactCodexProtocolValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, nested]) => [
       key,
-      isSensitiveCodexProtocolKey(key) ? "[REDACTED]" : redactCodexProtocolValue(nested),
+      context === "values" || isSensitiveCodexProtocolKey(key)
+        ? "[REDACTED]"
+        : redactCodexProtocolValue(
+            nested,
+            key === "mcp_servers"
+              ? "mcp"
+              : context === "mcp" && (key === "env" || key === "http_headers")
+                ? "values"
+                : context,
+          ),
     ]),
   );
 }

@@ -1164,6 +1164,88 @@ describe("CodexAdapterV2 native protocol logging", () => {
           },
         },
       });
+
+      const params = CodexAdapterV2.codexThreadRuntimeParams({
+        mcpSession: {
+          environmentId: EnvironmentId.make("environment-logger"),
+          threadId,
+          providerSessionId: "mcp-session-logger",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer t3-token",
+          browserToolsAvailable: false,
+          tools: {
+            servers: [
+              {
+                name: "local",
+                transport: {
+                  type: "stdio",
+                  command: "node",
+                  args: ["mcp.js"],
+                  env: [
+                    { name: "AWS_SECRET_ACCESS_KEY", value: "aws-credential", sensitive: true },
+                    { name: "DATABASE_URL", value: "database-credential", sensitive: true },
+                    { name: "PRIVATE_KEY", value: "private-credential", sensitive: true },
+                  ],
+                },
+              },
+              {
+                name: "remote",
+                transport: {
+                  type: "http",
+                  url: "https://example.com/mcp",
+                  headers: [
+                    { name: "X-Auth-Key", value: "header-credential", sensitive: true },
+                    { name: "Cookie", value: "cookie-credential", sensitive: true },
+                  ],
+                },
+              },
+            ],
+            disabledSkills: [],
+            fingerprint: "logger-tools",
+          },
+        },
+      });
+      const redactedServers = {
+        local: {
+          command: "node",
+          args: ["mcp.js"],
+          env: {
+            AWS_SECRET_ACCESS_KEY: "[REDACTED]",
+            DATABASE_URL: "[REDACTED]",
+            PRIVATE_KEY: "[REDACTED]",
+          },
+        },
+        remote: {
+          url: "https://example.com/mcp",
+          http_headers: { "X-Auth-Key": "[REDACTED]", Cookie: "[REDACTED]" },
+        },
+        "t3-code": {
+          url: "http://127.0.0.1:43123/mcp",
+          tool_timeout_sec: 3_900,
+          http_headers: { Authorization: "[REDACTED]" },
+        },
+      };
+      for (const method of ["thread/start", "thread/resume"]) {
+        yield* protocolLogger({
+          direction: "outgoing",
+          stage: "decoded",
+          payload: { method, params, configJson: JSON.stringify(params.config) },
+        });
+        const logged = writes.at(-1)?.event;
+        assert.nestedPropertyVal(logged, "event.payload.method", method);
+        assert.deepNestedPropertyVal(
+          logged,
+          "event.payload.params.config.mcp_servers",
+          redactedServers,
+        );
+        assert.deepNestedPropertyVal(
+          logged,
+          "event.payload.configJson",
+          JSON.stringify({ ...params.config, mcp_servers: redactedServers }),
+        );
+      }
+      assert.equal(writes.length, 3);
     }),
   );
 
