@@ -1275,23 +1275,55 @@ export const make = Effect.gen(function* () {
     }
     return lastKnown.pr;
   };
+  // Whether one commit descends from another never changes, so a definite
+  // answer is kept. A head that was never fetched is not cached: it can arrive.
+  const descendsFromByCommits = new Map<string, boolean>();
   /**
    * A reused branch (like `develop` after a release) has moved past a merged or
-   * closed PR once its tip is no longer that PR's head commit. Comparing commits
-   * rather than dates keeps squash and rebase merges working. Unknown when the
-   * host reports no head commit or the branch has no local tip, so the PR stays.
+   * closed PR once its tip builds on that PR's head commit. Comparing commits
+   * rather than dates keeps squash and rebase merges working. A tip behind the
+   * head, such as after "Update branch" on the host, has not moved past it.
+   * Unknown when the host reports no head commit, the branch has no local tip,
+   * or the head was never fetched, so the PR stays.
    */
   const branchMovedPastPullRequest = (
+    cwd: string,
     tipOid: string | null,
     pr: Pick<PullRequestInfo, "state" | "headSha">,
   ) => {
     const headSha = pr.headSha?.trim().toLowerCase() ?? "";
     const tip = tipOid?.trim().toLowerCase() ?? "";
-    return pr.state !== "open" && headSha.length > 0 && tip.length > 0 && tip !== headSha;
+    if (pr.state === "open" || headSha.length === 0 || tip.length === 0 || tip === headSha) {
+      return Effect.succeed(false);
+    }
+    const key = `${cwd}\u0000${headSha}\u0000${tip}`;
+    const known = descendsFromByCommits.get(key);
+    if (known !== undefined) return Effect.succeed(known);
+    return gitCore
+      .execute({
+        operation: "GitManager.branchMovedPastPullRequest",
+        cwd,
+        args: ["merge-base", "--is-ancestor", headSha, tip],
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+      })
+      .pipe(
+        Effect.map((result) => {
+          // 0 is ancestor and 1 is not; anything else is a failed probe.
+          if (result.exitCode !== 0 && result.exitCode !== 1) return false;
+          if (descendsFromByCommits.size >= PR_LOOKUP_CACHE_CAPACITY) {
+            const oldestKey = descendsFromByCommits.keys().next().value;
+            if (oldestKey !== undefined) descendsFromByCommits.delete(oldestKey);
+          }
+          descendsFromByCommits.set(key, result.exitCode === 0);
+          return result.exitCode === 0;
+        }),
+        Effect.orElseSucceed(() => false),
+      );
   };
   /**
    * Status reads the checked-out branch, so HEAD is its tip. Only a terminal
-   * PR with a known head commit costs this one read.
+   * PR with a known head commit costs this read.
    */
   const statusMovedPastPullRequest = (
     cwd: string,
@@ -1307,10 +1339,9 @@ export const make = Effect.gen(function* () {
             allowNonZeroExit: true,
           })
           .pipe(
-            Effect.map((result) =>
-              branchMovedPastPullRequest(result.exitCode === 0 ? result.stdout : null, pr),
-            ),
-            Effect.orElseSucceed(() => false),
+            Effect.map((result) => (result.exitCode === 0 ? result.stdout : null)),
+            Effect.orElseSucceed(() => null),
+            Effect.flatMap((tipOid) => branchMovedPastPullRequest(cwd, tipOid, pr)),
           );
   const lookupStatusPr = Effect.fn("lookupStatusPr")(function* (
     cwd: string,
@@ -2671,7 +2702,7 @@ export const make = Effect.gen(function* () {
       // The returned PR URL names the repository that actually owns it.
       repositoryKey: pullRequestRepositoryKey(latest.url),
     };
-    if (branchMovedPastPullRequest(tipOid, latest)) {
+    if (yield* branchMovedPastPullRequest(cacheCwd, tipOid, latest)) {
       return options.includeMovedPast === true
         ? { ...pullRequest, movedPast: true as const }
         : null;

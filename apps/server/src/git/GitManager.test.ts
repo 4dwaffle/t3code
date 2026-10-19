@@ -2636,6 +2636,53 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
+  it.effect("a merged PR stays while the local branch is behind its head commit", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/updated-on-host"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/updated-on-host"]);
+      // The host added a commit before merging (for example "Update branch"),
+      // and the local branch never pulled it.
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.writeFileString(NodePath.join(repoDir, "host.md"), "host\n");
+      yield* runGit(repoDir, ["add", "host.md"]);
+      yield* runGit(repoDir, ["commit", "-m", "Commit added on the host"]);
+      yield* runGit(repoDir, ["push", "origin", "feature/updated-on-host"]);
+      const mergedHead = yield* runGit(repoDir, ["rev-parse", "HEAD"]);
+      yield* runGit(repoDir, ["reset", "--hard", "HEAD~1"]);
+
+      const merged = encodeCliJson([
+        {
+          number: 217,
+          title: "Updated on the host",
+          url: "https://github.com/pingdotgg/t3code/pull/217",
+          baseRefName: "main",
+          headRefName: "feature/updated-on-host",
+          headRefOid: mergedHead.stdout.trim(),
+          state: "MERGED",
+          mergedAt: "2026-04-02T15:00:00Z",
+          updatedAt: "2026-04-02T15:00:00Z",
+        },
+      ]);
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: [merged, merged] },
+      });
+
+      const status = yield* manager.status({ cwd: repoDir });
+      const pullRequest = yield* manager.branchPullRequest({
+        cwd: repoDir,
+        branch: "feature/updated-on-host",
+      });
+
+      expect(status.pr?.number).toBe(217);
+      expect(pullRequest?.number).toBe(217);
+    }),
+  );
+
   it.effect(
     "status re-checks the local tip instead of reusing a stale moved-past verdict for minutes",
     () =>
