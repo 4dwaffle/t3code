@@ -299,9 +299,10 @@ it.effect("returns one adapter per instance build, and a new one after a rebuild
     const first = yield* registry.get(personalId);
     assert.strictEqual(yield* registry.get(personalId), first);
 
-    // A settings change rebuilds the instance with a new adapter.
     current = { ...instances[0], orchestrationAdapter: makeAdapter(personalId), auth };
-    assert.notStrictEqual(yield* registry.get(personalId), first);
+    const second = yield* registry.get(personalId);
+    assert.notStrictEqual(second, first);
+    assert.strictEqual(yield* registry.get(personalId), second);
   }),
 );
 
