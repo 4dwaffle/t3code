@@ -4317,7 +4317,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         ) {
           const context = yield* Ref.get(activeTurn);
           const update = notification.update;
-          if (yield* followNativeChild(notification, context)) return;
+          if (
+            followsAgentWorkState &&
+            flavor.extractSubagentSessionEvent !== undefined &&
+            notification.sessionId !== (yield* Ref.get(activeSessionId)) &&
+            (yield* Ref.get(stoppedRunQuarantine))
+          )
+            return;
           if (yield* projectAgentTerminalUpdate(notification, context)) return;
           if (
             update.sessionUpdate === "usage_update" ||
@@ -4377,6 +4383,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }
             if (update.sessionUpdate !== "state_update") return;
           }
+          if (yield* followNativeChild(notification, context)) return;
           if (
             followsAgentWorkState &&
             !(yield* Ref.get(stoppedRunQuarantine)) &&
@@ -5587,14 +5594,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           rawNotification: EffectAcpSchema.SessionNotification,
         ) =>
           Effect.gen(function* () {
-            if (clientTerminals !== undefined) {
-              const embedded = embeddedTerminalIdsFromSessionUpdate(rawNotification);
-              if (embedded !== undefined) {
-                rememberEmbeddedTerminals({
-                  ...embedded,
-                  sessionId: rawNotification.sessionId,
-                });
-              }
+            const embedded = embeddedTerminalIdsFromSessionUpdate(rawNotification);
+            if (embedded !== undefined) {
+              rememberEmbeddedTerminals({
+                ...embedded,
+                sessionId: rawNotification.sessionId,
+              });
             }
             const notification =
               clientTerminals === undefined
