@@ -128,7 +128,8 @@ export const make = Effect.gen(function* () {
           deviceId: registration.deviceId,
           label: registration.label,
           platform: registration.platform,
-          iosMajorVersion: registration.iosMajorVersion,
+          iosMajorVersion: registration.iosMajorVersion ?? null,
+          androidApiLevel: registration.androidApiLevel ?? null,
           appVersion: registration.appVersion ?? null,
           bundleId: registration.bundleId ?? null,
           apsEnvironment: registration.apsEnvironment ?? null,
@@ -143,7 +144,8 @@ export const make = Effect.gen(function* () {
           set: {
             platform: registration.platform,
             label: registration.label,
-            iosMajorVersion: registration.iosMajorVersion,
+            iosMajorVersion: registration.iosMajorVersion ?? null,
+            androidApiLevel: registration.androidApiLevel ?? null,
             appVersion: registration.appVersion ?? null,
             // Preserve routing from newer app builds when an older build
             // re-registers without these fields.
@@ -177,8 +179,6 @@ export const make = Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan({
         "relay.mobile.device_id": input.deviceId,
       });
-      // Same proxy-chain constraint as register above: db chains must be
-      // consumed via `yield*`, never passed to Effect.all.
       yield* db
         .delete(relayLiveActivities)
         .where(
@@ -225,6 +225,7 @@ export const make = Effect.gen(function* () {
           label: relayMobileDevices.label,
           platform: relayMobileDevices.platform,
           iosMajorVersion: relayMobileDevices.iosMajorVersion,
+          androidApiLevel: relayMobileDevices.androidApiLevel,
           appVersion: relayMobileDevices.appVersion,
           preferences: relayMobileDevices.preferencesJson,
           updatedAt: relayMobileDevices.updatedAt,
@@ -241,6 +242,7 @@ export const make = Effect.gen(function* () {
         label: row.label,
         platform: row.platform,
         iosMajorVersion: row.iosMajorVersion,
+        androidApiLevel: row.androidApiLevel,
         appVersion: row.appVersion,
         notifications: {
           enabled: row.preferences.notificationsEnabled,

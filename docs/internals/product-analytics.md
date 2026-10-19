@@ -1,6 +1,6 @@
 # Product analytics
 
-The server owns PostHog delivery, opt-out, and identity for every connected client.
+The server owns analytics delivery, opt-out, and identity for every connected client.
 [Identity selection](../../apps/server/src/telemetry/Identify.ts) hashes an available
 provider account ID, falling back to an installation-scoped ID. This identity can
 span several clients; it does not identify a browser session. Clients do not load
@@ -40,6 +40,16 @@ lets small-input turns dominate.
 Unknown counts stay absent. Partial usage contains valid observed counts but
 cannot establish a whole-turn total. Keep these distinctions when changing token
 normalization or building reports.
+
+## Delivery
+
+The server sends batches to the ingest endpoint at `ingest.t3.codes`, which archives
+every event and forwards some of them to PostHog. A send can fail after the endpoint
+has stored the batch, so every retry is a copy.
+[Delivery](../../apps/server/src/telemetry/AnalyticsService.ts) gives each event a
+uuid when it is recorded (the endpoint rejects events without one), backs off after
+a failed send, and drops a batch after a few tries. Without these limits, one stuck
+batch was sent every second for days.
 
 ## Collection boundary
 

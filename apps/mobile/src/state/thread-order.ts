@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect } from "react";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 import {
   reconcilePendingThreadOrder,
@@ -11,6 +11,10 @@ import { appAtomRegistry } from "./atom-registry";
 import { environmentServerConfigsAtom } from "./server";
 import { environmentThreadShells } from "./threads";
 import { queuedThreadKeysAtom } from "./use-thread-outbox";
+
+export const threadArrangementOpenAtom = Atom.make(false).pipe(Atom.keepAlive);
+
+export const threadDropBusyAtom = Atom.make(false).pipe(Atom.keepAlive);
 
 export const pendingThreadOrderAtom = Atom.make<PendingThreadOrder | null>(null).pipe(
   Atom.keepAlive,
@@ -28,7 +32,6 @@ export function usePendingThreadOrder(nowMinute: string, snoozeWakeTick: number)
 
 let refreshPendingOrder: (() => void) | undefined;
 
-/** Shared by Home and the navigation sidebar, including their action guards. */
 export function getPendingThreadOrder(): PendingThreadOrder | null {
   refreshPendingOrder?.();
   return appAtomRegistry.get(pendingThreadOrderAtom);
