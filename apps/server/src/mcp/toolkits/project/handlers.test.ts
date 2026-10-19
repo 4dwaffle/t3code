@@ -11,7 +11,6 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -23,7 +22,7 @@ import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
-import * as VcsProcess from "../../../vcs/VcsProcess.ts";
+import * as GitWorkflow from "../../../git/GitWorkflowService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ProjectHandlers from "./handlers.ts";
@@ -66,6 +65,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
         getThreadShell: () => Effect.succeed(caller),
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
+        checkWorkspace: () => Effect.void,
         launch: (input) => {
           launchedSender = input.initialMessage?.senderThreadId;
           return Effect.succeed({
@@ -118,6 +118,34 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       archivedAt: null,
       deletedAt: null,
     } as OrchestrationV2ThreadShell;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-launch-scratch-" });
+    const folders = yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
+      Effect.provide(
+        ManagedProjectFolders.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              ServerConfig.layerTest(process.cwd(), baseDir).pipe(
+                Layer.provide(NodeServices.layer),
+              ),
+              NodeCrypto.layer,
+              NodeServices.layer,
+              Layer.mock(GitWorkflow.GitWorkflowService)({
+                isRepository: () => Effect.succeed(false),
+              }),
+              Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+              Layer.mock(Project.ProjectService)({
+                getById: () =>
+                  Effect.succeed(
+                    Option.some({ workspaceRoot: `${baseDir}/scratch` } as ProjectRecord),
+                  ),
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    const paths: Array<string> = [];
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const layerDependencies = Layer.mergeAll(
       ServerSettings.layerTest(),
@@ -138,17 +166,26 @@ it.effect("launches a scratch thread into the Scratch project", () =>
         getThreadShell: () => Effect.succeed(caller),
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
-        launch: (input) => {
+        checkWorkspace: () => Effect.void,
+        launch: Effect.fnUntraced(function* (input) {
           launched.push(input);
-          return Effect.succeed({
+          const folder = yield* folders
+            .folderForThread({
+              projectId: input.projectId,
+              threadId: input.threadId!,
+              text: input.title,
+            })
+            .pipe(Effect.orDie);
+          paths.push(Option.getOrThrow(folder));
+          return {
             threadId: input.threadId,
             projection: {
               thread: { id: input.threadId, projectId: input.projectId, modelSelection },
               runs: [],
             },
             resumed: false,
-          } as unknown as ThreadLaunch.ThreadLaunchResult);
-        },
+          } as unknown as ThreadLaunch.ThreadLaunchResult;
+        }),
       }),
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
@@ -179,14 +216,25 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       [scratchProjectId, { type: "root" }],
     ]);
 
+    for (const prefix of ["a", "b"]) {
+      const result = yield* handle({
+        title: "Notes",
+        scratch: true,
+        clientRequestId: `${prefix.repeat(251)}tail`,
+      });
+      expect(result.at(-1)?.result).toMatchObject({ projectId: scratchProjectId });
+    }
+    expect(new Set(paths).size).toBe(3);
+    for (const folder of paths) expect(yield* fileSystem.exists(folder)).toBe(true);
+
     const rejected = yield* handle({
       title: "Notes",
       scratch: true,
       projectId: caller.projectId,
     });
     expect(rejected.at(-1)?.result).toMatchObject({ code: "invalid_request" });
-    expect(launched).toHaveLength(1);
-  }),
+    expect(launched).toHaveLength(3);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("starts a project from just a title when workspaceRoot is omitted", () =>
@@ -303,8 +351,6 @@ const clientLaunchHarness = (input: {
   readonly sessionId?: string;
   readonly runtimeModeCeiling: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
-  readonly workspaceRoot?: string;
-  readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -328,7 +374,7 @@ const clientLaunchHarness = (input: {
     }),
     Layer.mock(ThreadManagement.ThreadManagementService)({}),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
-      checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
+      checkWorkspace: () => Effect.void,
       launch: (launch) => {
         input.launched.push(launch);
         return Effect.succeed({
@@ -351,7 +397,7 @@ const clientLaunchHarness = (input: {
           id === projectId
             ? Option.some({
                 id,
-                workspaceRoot: input.workspaceRoot ?? "/projects/client-target",
+                workspaceRoot: "/projects/client-target",
                 defaultModelSelection: modelSelection,
               } as unknown as ProjectRecord)
             : Option.none(),
@@ -360,8 +406,7 @@ const clientLaunchHarness = (input: {
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     NodeServices.layer,
   ).pipe(
-    Layer.provideMerge(GitVcsDriver.layer),
-    Layer.provideMerge(VcsProcess.layer),
+    Layer.provideMerge(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-client-launch-" }).pipe(
         Layer.provide(NodeServices.layer),
@@ -437,6 +482,9 @@ it.effect.each(["fix:1", "key-\ud800"])(
 
         const first = yield* launch(clientRequestId);
         expect(yield* launch(clientRequestId)).toEqual(first);
+        if (clientRequestId.includes("\ud800")) {
+          fresh.push(yield* launch(clientRequestId.replace("\ud800", "\ufffd")));
+        }
         fresh.push(
           first,
           yield* launch(`${clientRequestId}:other`),
@@ -450,107 +498,4 @@ it.effect.each(["fix:1", "key-\ud800"])(
         fresh.length,
       );
     }),
-);
-
-it.effect("a launch binds only an existing checkout that is one of the project's worktrees", () =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-launch-worktree-" });
-    const repo = path.join(root, "repo");
-    const worktree = path.join(root, "feature");
-    const outside = path.join(root, "outside");
-    yield* fileSystem.makeDirectory(repo);
-    yield* fileSystem.makeDirectory(outside);
-
-    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-    const { projectId, dependencies } = clientLaunchHarness({
-      runtimeModeCeiling: "auto",
-      launched,
-      workspaceRoot: repo,
-    });
-    const git = yield* GitVcsDriver.GitVcsDriver.pipe(Effect.provide(dependencies));
-    for (const args of [
-      ["init", "-b", "main"],
-      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"],
-      ["worktree", "add", "-b", "feature", worktree],
-    ]) {
-      yield* git.execute({ operation: "test.setupRepo", cwd: repo, args });
-    }
-    const toolkit = yield* ProjectToolkit.pipe(
-      Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
-      ),
-    );
-    const launchInto = (worktreePath: string) =>
-      toolkit
-        .handle("t3_thread_launch", {
-          title: "Fix",
-          projectId,
-          workspaceStrategy: { type: "existing_worktree", worktreePath },
-        })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
-
-    expect((yield* launchInto(worktree)).at(-1)?.result).toMatchObject({ projectId });
-    expect((yield* launchInto(repo)).at(-1)?.result).toMatchObject({ projectId });
-    for (const elsewhere of [outside, path.join(worktree, "..", "outside"), "/"]) {
-      expect((yield* launchInto(elsewhere)).at(-1)?.result).toMatchObject({
-        code: "invalid_request",
-      });
-    }
-    expect(launched.map((launch) => launch.workspaceStrategy)).toEqual([
-      { type: "existing_worktree", worktreePath: worktree },
-      { type: "existing_worktree", worktreePath: repo },
-    ]);
-
-    yield* fileSystem.remove(worktree, { recursive: true });
-    yield* fileSystem.makeDirectory(worktree);
-    expect((yield* launchInto(worktree)).at(-1)?.result).toMatchObject({
-      code: "invalid_request",
-    });
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);
-
-it.effect("a launch into a new worktree creates nothing when its base ref has no commit", () =>
-  Effect.gen(function* () {
-    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-    const { projectId, dependencies } = clientLaunchHarness({
-      runtimeModeCeiling: "auto",
-      launched,
-      checkWorktreeBase: ({ projectId, workspaceStrategy }) =>
-        workspaceStrategy.type === "worktree" && workspaceStrategy.baseRef === "t3/renamed"
-          ? Effect.fail(
-              new ThreadLaunch.ThreadLaunchBaseRefError({
-                projectId,
-                projectTitle: "Client target",
-                workspaceRoot: "/projects/client-target",
-                baseRef: workspaceStrategy.baseRef,
-              }),
-            )
-          : Effect.void,
-    });
-    const toolkit = yield* ProjectToolkit.pipe(
-      Effect.provide(
-        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
-      ),
-    );
-    const launchFrom = (baseRef: string) =>
-      toolkit
-        .handle("t3_thread_launch", {
-          title: "Fix",
-          projectId,
-          workspaceStrategy: { type: "worktree", baseRef, startFromOrigin: false },
-        })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
-
-    const refused = (yield* launchFrom("t3/renamed")).at(-1)?.result;
-    expect(refused).toMatchObject({ code: "invalid_request" });
-    expect((refused as { message: string }).message).toContain(
-      'Base ref "t3/renamed" does not resolve to a commit in project "Client target" (/projects/client-target). No thread was created.',
-    );
-    expect(launched).toHaveLength(0);
-
-    expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
-    expect(launched).toHaveLength(1);
-  }),
 );

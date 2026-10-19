@@ -6,23 +6,28 @@ import {
   ProjectId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
+import * as Crypto from "effect/Crypto";
+import * as Hex from "effect/encoding/Hex";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
-import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
-const encodeLaunchRequest = Schema.encodeSync(
-  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String])),
-);
+function launchCommandId(namespace: string, key: string) {
+  // JSON preserves lone surrogates and separates the caller from the key.
+  const bytes = new TextEncoder().encode(JSON.stringify([namespace, key]));
+  return Crypto.Crypto.pipe(
+    Effect.flatMap((crypto) => crypto.digest("SHA-256", bytes)),
+    Effect.map((hash) => CommandId.make(`mcp:launch:${Hex.encode(hash)}`)),
+    Effect.mapError(unavailable),
+  );
+}
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -35,28 +40,6 @@ function projectFailure(error: Project.ProjectServiceError) {
   return new OrchestratorMcpFailure({ code: "invalid_request", message });
 }
 
-/**
- * Without this check a launch could point an agent at any directory on the machine.
- */
-const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
-  workspaceRoot: string,
-  worktreePath: string,
-) {
-  const git = yield* GitVcsDriver.GitVcsDriver;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const real = (path: string) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path));
-  const worktrees = yield* git.listWorktreePaths(workspaceRoot).pipe(
-    Effect.flatMap((paths) => Effect.forEach(paths, real)),
-    Effect.orElseSucceed((): ReadonlyArray<string> => []),
-  );
-  if (!worktrees.includes(yield* real(worktreePath)))
-    return yield* new OrchestratorMcpFailure({
-      code: "invalid_request",
-      message:
-        "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.",
-    });
-});
-
 const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
@@ -68,13 +51,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller, scope } = context;
-        // JSON preserves lone surrogates and separates the caller from the key.
         const commandId =
           input.clientRequestId === undefined
             ? yield* newCommandId()
-            : CommandId.make(
-                `mcp:launch:${encodeURIComponent(encodeLaunchRequest([scope.requestNamespace, input.clientRequestId]))}`,
-              );
+            : yield* launchCommandId(scope.requestNamespace, input.clientRequestId);
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
         const attachments = input.attachments ?? [];
@@ -110,35 +90,31 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           Effect.mapError(unavailable),
           Effect.map(Option.getOrUndefined),
         );
-        if (input.workspaceStrategy?.type === "existing_worktree") {
-          const project = yield* readProject;
-          if (project === undefined)
-            return yield* new OrchestratorMcpFailure({
+        yield* ThreadLaunch.ThreadLaunchService.pipe(
+          Effect.flatMap((launches) =>
+            launches.checkWorkspace({
+              commandId,
+              projectId,
+              workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
+            }),
+          ),
+          Effect.mapError((error) => {
+            if (error._tag === "ThreadLaunchError") return unavailable();
+            if (error._tag === "ProjectNotFoundError") return projectFailure(error);
+            const strategy = input.workspaceStrategy;
+            return new OrchestratorMcpFailure({
               code: "invalid_request",
-              message: "The project was not found.",
+              message:
+                error._tag === "ThreadLaunchBaseRefError"
+                  ? `${error.message} No thread was created. Pass a branch, tag, or commit that exists there${
+                      strategy?.type === "worktree" && strategy.startFromOrigin === true
+                        ? "; the project has no origin remote to fetch it from."
+                        : ", or set startFromOrigin:true if it exists only on origin."
+                    }`
+                  : error.message,
             });
-          yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
-        }
-        // A launch is accepted before its worktree is provisioned, so a base
-        // ref that cannot resolve is refused while the agent can still act on it.
-        const strategy = input.workspaceStrategy;
-        if (strategy?.type === "worktree")
-          yield* ThreadLaunch.ThreadLaunchService.pipe(
-            Effect.flatMap((launches) =>
-              launches.checkWorktreeBase({ projectId, workspaceStrategy: strategy }),
-            ),
-            Effect.mapError(
-              (error) =>
-                new OrchestratorMcpFailure({
-                  code: "invalid_request",
-                  message: `${error.message} No thread was created. Pass a branch, tag, or commit that exists there${
-                    strategy.startFromOrigin === true
-                      ? "; the project has no origin remote to fetch it from."
-                      : ", or set startFromOrigin:true if it exists only on origin."
-                  }`,
-                }),
-            ),
-          );
+          }),
+        );
         const modelSelection =
           input.modelSelection ??
           caller?.modelSelection ??

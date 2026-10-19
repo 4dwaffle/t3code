@@ -61,6 +61,11 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as McpToolAccess from "../mcp/McpToolAccess.ts";
+import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -115,6 +120,8 @@ interface HarnessOptions {
   readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
+  readonly gitDriver?: Layer.Layer<GitVcsDriver.GitVcsDriver>;
+  readonly workspaceRoot?: string;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -158,6 +165,7 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
+    NodeServices.layer,
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: closeTerminal }),
@@ -169,7 +177,10 @@ function makeHarness(options: HarnessOptions = {}) {
       getById: (id) =>
         Effect.succeed(
           id === projectId
-            ? Option.some(project)
+            ? Option.some({
+                ...project,
+                workspaceRoot: options.workspaceRoot ?? project.workspaceRoot,
+              })
             : id === otherProjectId
               ? Option.some(otherProject)
               : Option.none(),
@@ -213,6 +224,7 @@ function makeHarness(options: HarnessOptions = {}) {
         layerThreadManagement,
         layerReceipts,
         IdAllocator.layer,
+        options.gitDriver ?? Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       ),
     ),
   );
@@ -2063,30 +2075,34 @@ it.effect("rejects a server-allocated launch replay with a mismatching thread id
   }).pipe(Effect.provide(harness.layer));
 });
 
-it.effect("rejects a server-allocated launch receipt from another project", () => {
-  const harness = makeHarness();
-  return Effect.gen(function* () {
-    const launches = yield* ThreadLaunch.ThreadLaunchService;
-    const { threadId: _unusedThreadId, ...rest } = launchInput({
-      command: "command:launch:allocated-wrong-project",
-      thread: "unused",
-      message: "Wrong project",
-    });
-    const first = yield* launches.launch(rest);
-    const failed = yield* launches
-      .launch({
-        ...rest,
-        projectId: otherProjectId,
-      })
-      .pipe(Effect.flip);
-    if (failed._tag !== "ThreadLaunchError") {
-      assert.fail(`expected ThreadLaunchError, got ${failed._tag}`);
-    }
-    assert.equal(failed.operation, "resolve-project");
-    assert.equal(failed.threadId, first.threadId);
-    assert.equal(failed.cause, "Project identity changed.");
-  }).pipe(Effect.provide(harness.layer));
-});
+it.effect.each([false, true])(
+  "rejects a launch receipt from another project (supplied id: %s)",
+  (suppliedId) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const { threadId: _unusedThreadId, ...rest } = launchInput({
+        command: "command:launch:allocated-wrong-project",
+        thread: "unused",
+        message: "Wrong project",
+      });
+      const input = { ...rest, ...(suppliedId ? { threadId: ThreadId.make("supplied-id") } : {}) };
+      const first = yield* launches.launch(input);
+      const failed = yield* launches
+        .launch({
+          ...input,
+          projectId: otherProjectId,
+        })
+        .pipe(Effect.flip);
+      if (failed._tag !== "ThreadLaunchError") {
+        assert.fail(`expected ThreadLaunchError, got ${failed._tag}`);
+      }
+      assert.equal(failed.operation, "resolve-project");
+      assert.equal(failed.threadId, first.threadId);
+      assert.equal(failed.cause, "Project identity changed.");
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect("rejects a server-allocated launch retry after the thread is deleted", () => {
   const harness = makeHarness();
@@ -2466,7 +2482,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
               }),
             ),
           ),
-        checkWorktreeBase: launches.checkWorktreeBase,
+        checkWorkspace: launches.checkWorkspace,
         retryPreparation: launches.retryPreparation,
         prepareRun: launches.prepareRun,
       }),
@@ -2800,7 +2816,8 @@ it.effect.each([
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const error = yield* launches
-        .checkWorktreeBase({
+        .checkWorkspace({
+          commandId: CommandId.make("check-workspace"),
           projectId,
           workspaceStrategy: {
             type: "worktree",
@@ -2859,7 +2876,8 @@ it.effect.each([
     });
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
-      yield* launches.checkWorktreeBase({
+      yield* launches.checkWorkspace({
+        commandId: CommandId.make("check-workspace"),
         projectId,
         workspaceStrategy: {
           type: "worktree",
@@ -3202,4 +3220,109 @@ it.effect.each(
         }
       }).pipe(Effect.provide(Layer.merge(harness.layer, layerService)));
     }),
+);
+
+it.effect.each(["worktree", "existing_worktree"] as const)(
+  "replays an accepted MCP launch after its %s input disappears, but validates fresh launches",
+  (type) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-launch-replay-" });
+      const repo = `${directory}/repo`;
+      const worktree = `${directory}/feature`;
+      yield* fileSystem.makeDirectory(repo);
+      const gitDriverLayer = GitVcsDriver.layer.pipe(
+        Layer.provide(VcsProcess.layer),
+        Layer.provide(ServerConfig.layerTest(repo, directory)),
+        Layer.provide(NodeServices.layer),
+        Layer.orDie,
+      );
+      const driver = yield* GitVcsDriver.GitVcsDriver.pipe(Effect.provide(gitDriverLayer));
+      const git = (args: string[]) =>
+        driver.execute({ operation: "test.launchReplay", cwd: repo, args });
+      yield* git(["init", "-b", "main"]);
+      yield* git([
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "init",
+      ]);
+      yield* git(["worktree", "add", "-b", "feature", worktree]);
+      const harness = makeHarness({
+        workspaceRoot: repo,
+        gitDriver: gitDriverLayer,
+        hasCommit: ({ refName }) =>
+          git(["rev-parse", "--verify", `${refName}^{commit}`]).pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          ),
+        git: { hasRefNamed: () => Effect.succeed(false) },
+      });
+      const dependencies = Layer.mergeAll(
+        harness.layer,
+        gitDriverLayer,
+        NodeCrypto.layer,
+        ServerConfig.layerTest(repo, { prefix: "t3-mcp-launch-replay-" }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+        Layer.succeed(McpInvocationContext.McpInvocationContext, {
+          environmentId: EnvironmentId.make("environment"),
+          requestNamespace: "client:launch-replay",
+          thread: undefined,
+          client: { sessionId: "launch-replay", label: "Test", access: "full-access" },
+          issuedAt: 0,
+          capabilities: new Set(["orchestration" as const]),
+        }),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const toolkit = yield* ProjectToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+              Layer.provide(dependencies),
+            ),
+          ),
+        );
+        const workspaceStrategy =
+          type === "worktree"
+            ? { type, baseRef: "feature", startFromOrigin: false }
+            : { type, worktreePath: worktree };
+        const handle = (clientRequestId: string, strategy = workspaceStrategy) =>
+          toolkit
+            .handle("t3_thread_launch", {
+              title: "Replay",
+              projectId,
+              clientRequestId,
+              workspaceStrategy: strategy,
+            })
+            .pipe(
+              Stream.unwrap,
+              Stream.runCollect,
+              Effect.map((items) => items.at(-1)?.result),
+              Effect.provide(dependencies),
+            );
+        if (type === "existing_worktree") {
+          assert.include(yield* handle("outside", { type, worktreePath: directory }), {
+            code: "invalid_request",
+          });
+        }
+        const first = yield* handle("accepted");
+        assert.property(first, "threadId");
+        yield* git(["worktree", "remove", worktree]);
+        yield* git(["branch", "-D", "feature"]);
+        assert.deepEqual(yield* handle("accepted"), first);
+        const fresh = yield* handle("fresh");
+        assert.include(fresh, { code: "invalid_request" });
+        if (type === "worktree")
+          assert.include((fresh as { message: string }).message, "No thread was created.");
+        assert.equal(
+          (yield* threads.listProjectThreads({ projectId, includeSubagents: true })).length,
+          1,
+        );
+      }).pipe(Effect.provide(dependencies));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
