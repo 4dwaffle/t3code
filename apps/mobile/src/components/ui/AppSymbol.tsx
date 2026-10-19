@@ -103,6 +103,7 @@ import IconPlus from "@tabler/icons-react-native/IconPlus";
 import IconQrcode from "@tabler/icons-react-native/IconQrcode";
 import IconRefresh from "@tabler/icons-react-native/IconRefresh";
 import IconSearch from "@tabler/icons-react-native/IconSearch";
+import IconShare from "@tabler/icons-react-native/IconShare";
 import IconServer from "@tabler/icons-react-native/IconServer";
 import IconSettings from "@tabler/icons-react-native/IconSettings";
 import IconSparkles from "@tabler/icons-react-native/IconSparkles";
@@ -217,7 +218,6 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "line.3.horizontal.decrease": IconFilter,
   "line.3.horizontal.decrease.circle": IconFilter,
   "line.3.horizontal.decrease.circle.fill": IconFilterFilled,
-  // Tabler has no Apple desktops; the closest silhouettes stand in on Android.
   macmini: IconServer,
   macstudio: IconDeviceDesktop,
   magnifyingglass: IconSearch,
@@ -245,6 +245,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "sidebar.left": IconLayoutSidebar,
   "sidebar.right": IconLayoutSidebarRight,
   "slider.horizontal.3": IconAdjustmentsHorizontal,
+  "square.and.arrow.up": IconShare,
   "square.and.pencil": IconEdit,
   "square.on.square": IconCopy,
   "square.grid.2x2": IconApps,
@@ -286,10 +287,6 @@ const SF_ICON_LOOKUP: Partial<
   >
 > = ANDROID_ICON_BY_SF_SYMBOL;
 
-// Callers can pass `{ ios, android }` names where `android` is a Material
-// icon name (the raw expo-symbols contract). Resolve those here too so the
-// android key keeps working through this wrapper — it wins over the SF map
-// when both match (e.g. folder vs folder_open for expanded project groups).
 const ANDROID_ICON_BY_MATERIAL_NAME = {
   auto_awesome: IconSparkles,
   bolt: IconBolt,
@@ -357,10 +354,4 @@ function AppSymbolView(props: AppSymbolViewProps) {
   );
 }
 
-/**
- * expo-symbols and the Android Tabler fallback both expose tint as a native
- * prop rather than a React Native style. Keep that third-party boundary here
- * so callers can use Uniwind's `tintColorClassName` instead of subscribing to
- * theme variables in every parent component.
- */
 export const SymbolView = withUniwind(AppSymbolView);
