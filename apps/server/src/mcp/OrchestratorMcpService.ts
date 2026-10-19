@@ -98,7 +98,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
-  clientModeCeiling,
+  clientRuntimeModeCeiling,
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
@@ -1025,7 +1025,10 @@ const make = Effect.gen(function* () {
       if (scope.thread === undefined) {
         return {
           parent: undefined,
-          limits: clientModeCeiling(scope.client),
+          limits: {
+            runtimeMode: clientRuntimeModeCeiling(scope.client),
+            interactionMode: "default",
+          } satisfies { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
         } as const;
       }
       const parent = yield* loadProjection(scope.thread.threadId);

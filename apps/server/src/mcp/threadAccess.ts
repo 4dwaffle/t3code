@@ -68,7 +68,10 @@ export const loadCaller = Effect.fn("mcp.loadCaller")(function* () {
       scope,
       threads,
       caller: undefined,
-      limits: McpInvocationContext.clientModeCeiling(scope.client),
+      limits: {
+        runtimeMode: McpInvocationContext.clientRuntimeModeCeiling(scope.client),
+        interactionMode: "default",
+      },
     } satisfies Caller;
   }
   const caller = yield* threads
