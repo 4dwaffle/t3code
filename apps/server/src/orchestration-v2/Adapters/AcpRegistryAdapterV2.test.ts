@@ -757,7 +757,23 @@ describe("AcpRegistryAdapterV2", () => {
             }),
             label: "child-output",
           },
-          claudeFrames.childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+          update("child-1", {
+            sessionUpdate: "usage_update",
+            used: 2_500,
+            size: 10_000,
+            cost: { amount: 0.42, currency: "USD" },
+          }),
+          update("child-1", {
+            sessionUpdate: "session_info_update",
+            title: "Child review",
+            updatedAt: "2026-10-19T00:00:00Z",
+          }),
+          update("child-1", {
+            sessionUpdate: "state_update",
+            state: "idle",
+            stopReason: "end_turn",
+            usage: { totalTokens: 3_000, inputTokens: 2_500, outputTokens: 500, thoughtTokens: 0 },
+          }),
           claudeMarker("child output"),
           {
             ...update(CLAUDE_ROOT_SESSION, {
@@ -791,9 +807,26 @@ describe("AcpRegistryAdapterV2", () => {
           event.type === "message.updated" && event.message.text === "Found the regression.",
       );
       assert.isDefined(message, "child output survives foreground completion");
-      if (message?.type === "message.updated") {
-        assert.notEqual(message.message.threadId, session.turnInput(1).threadId);
-      }
+      if (message?.type !== "message.updated") throw new Error("Missing child output");
+      assert.notEqual(message.message.threadId, session.turnInput(1).threadId);
+      const childThreads = childOutput.flatMap((event) =>
+        event.type === "provider_thread.updated" &&
+        event.providerThread.appThreadId === message.message.threadId
+          ? [event.providerThread]
+          : [],
+      );
+      assert.deepEqual(
+        childThreads.map((thread) => thread.contextUsage),
+        [
+          { usedTokens: 2_500, maxTokens: 10_000, cost: { amount: 0.42, currency: "USD" } },
+          { usedTokens: 2_500, maxTokens: 10_000, cost: { amount: 0.42, currency: "USD" } },
+          { usedTokens: 3_000 },
+        ],
+      );
+      assert.deepEqual(childThreads.at(-1)?.nativeMetadata, {
+        title: "Child review",
+        updatedAt: "2026-10-19T00:00:00Z",
+      });
       assert.isFalse(childOutput.some((event) => event.type === "turn.terminal"));
       assert.isTrue(
         childOutput.some(
@@ -1025,16 +1058,40 @@ describe("AcpRegistryAdapterV2", () => {
             idle("end_turn"),
             {
               ...update("grandchild", {
-                sessionUpdate: "tool_call_update",
-                toolCallId: "nested-tool",
-                name: "Bash",
-                title: "Read nested package",
-                kind: "execute",
-                status: "in_progress",
-                rawInput: { command: "cat nested/package.json" },
+                sessionUpdate: "terminal_update",
+                terminalId: "nested-terminal",
+                command: "/usr/bin/node /srv/t3/bin.ts acp-mcp-call orchestrator_capabilities {}",
               }),
               label: "nested-output",
             },
+            update("grandchild", {
+              sessionUpdate: "terminal_output_chunk",
+              terminalId: "nested-terminal",
+              data: Buffer.from("{}\n").toString("base64"),
+            }),
+            update("grandchild", {
+              sessionUpdate: "terminal_update",
+              terminalId: "nested-terminal",
+              exitStatus: { exitCode: 0 },
+            }),
+            update("grandchild", {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "terminal-tool",
+              name: "Bash",
+              title: "Run nested command",
+              kind: "execute",
+              status: "in_progress",
+              content: [{ type: "terminal", terminalId: "nested-terminal" }],
+            }),
+            update("grandchild", {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "nested-tool",
+              name: "Bash",
+              title: "Read nested package",
+              kind: "execute",
+              status: "in_progress",
+              rawInput: { command: "cat nested/package.json" },
+            }),
             update("grandchild", {
               sessionUpdate: "agent_message_chunk",
               messageId: "nested-reply",
@@ -1124,6 +1181,18 @@ describe("AcpRegistryAdapterV2", () => {
           if (nestedTool.turnItem.type === "dynamic_tool")
             assert.deepEqual(nestedTool.turnItem.input, { command: "cat nested/package.json" });
         }
+        assert.isTrue(
+          nested.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.nativeItemRef?.nativeId ===
+                "agent-1:session:grandchild:tool:terminal-tool" &&
+              event.turnItem.threadId === row.subagent.childThreadId &&
+              event.turnItem.toolName === "t3-code.orchestrator_capabilities",
+          ),
+          "embedded agent-terminal commands preserve nested MCP identity",
+        );
         assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
         gate.release("nested-idle");
         const finished = yield* session.throughMarker("nested idle");
