@@ -2,7 +2,7 @@ import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScroll
 import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
 import * as Dialog from "../../components/ui/Dialog";
-import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
 import {
   isAtomCommandInterrupted,
@@ -10,13 +10,17 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { Atom } from "effect/reactivity";
-import { useContext, useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { projectEnvironment } from "../../state/projects";
 import { useThreadShells } from "../../state/entities";
+import {
+  readEnvironmentScope,
+  useEnvironmentScope,
+  useEnvironmentsWithScope,
+} from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
@@ -78,18 +82,13 @@ function ProjectOverviewContent(props: {
   const [isSaving, setIsSaving] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
   const removalPending = useRef(false);
-  const registry = useContext(RegistryContext);
   const threads = useThreadShells();
-  const canRemoveGroup = useAtomValue(
-    useMemo(
-      () =>
-        Atom.make((get) =>
-          props.members.every((member) =>
-            get(projectEnvironment.delete.permissionAtom(member.environmentId)),
-          ),
-        ),
-      [props.members],
-    ),
+  const removableEnvironments = useEnvironmentsWithScope(
+    props.members,
+    AuthOrchestrationOperateScope,
+  );
+  const canRemoveGroup = props.members.every((member) =>
+    removableEnvironments.has(member.environmentId),
   );
   const deleteProject = useAtomCommand(projectEnvironment.delete, { reportFailure: false });
   const updateProject = useAtomCommand(projectEnvironment.update, {
@@ -101,7 +100,7 @@ function ProjectOverviewContent(props: {
 
   const checkRemovalAccess = (members: readonly EnvironmentProject[]) => {
     const denied = members.find(
-      (member) => !registry.get(projectEnvironment.delete.permissionAtom(member.environmentId)),
+      (member) => !readEnvironmentScope(member.environmentId, AuthOrchestrationOperateScope),
     );
     if (!denied) return true;
     const environment = props.environments.find(
@@ -303,9 +302,7 @@ function RemoveCheckoutAction(props: {
   readonly disabled: boolean;
   readonly onPress: () => void;
 }) {
-  const canRemove = useAtomValue(
-    projectEnvironment.delete.permissionAtom(props.member.environmentId),
-  );
+  const canRemove = useEnvironmentScope(props.member.environmentId, AuthOrchestrationOperateScope);
   return (
     <Pressable
       accessibilityRole="button"

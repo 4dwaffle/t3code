@@ -160,9 +160,8 @@ export function createProjectEnvironmentAtoms<R, E>(
       scheduler: projectScheduler,
       concurrency: projectConcurrency,
     }),
-    delete: createEnvironmentRpcCommand(runtime, {
+    delete: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:project:delete",
-      tag: WS_METHODS.projectsMutate,
       execute: (input: DeleteProjectInput) => deleteProject(input),
       scheduler: projectScheduler,
       concurrency: projectConcurrency,

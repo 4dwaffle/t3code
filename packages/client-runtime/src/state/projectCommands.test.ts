@@ -1,12 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   AuthFilesystemWriteScope,
-  AuthOrchestrationOperateScope,
   EnvironmentId,
   ProjectId,
   ThreadId,
   type AuthSessionState,
-  type ProjectMutation,
   type ScopedProjectRef,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -43,7 +41,6 @@ const PROJECT = {
 } as EnvironmentProject;
 
 const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
-  const mutations: ProjectMutation[] = [];
   const metadataRequests: string[][] = [];
   const file = { byteLength: 5 };
   const readResponse = { wait: Effect.void as Effect.Effect<void> };
@@ -52,11 +49,6 @@ const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
     session: yield* SubscriptionRef.make(
       Option.some({
         client: {
-          [WS_METHODS.projectsMutate]: (mutation: ProjectMutation) =>
-            Effect.sync(() => {
-              mutations.push(mutation);
-              return PROJECT;
-            }),
           [WS_METHODS.projectsEnsureScratch]: () => Effect.succeed({ projectId: PROJECT_ID }),
           [WS_METHODS.projectsReadFile]: () =>
             Effect.gen(function* () {
@@ -130,15 +122,7 @@ const makeHarness = Effect.fn("TestProjectCommands.makeHarness")(function* () {
   const openScratch = Effect.promise(() =>
     commands.openScratch.run(registry, { environmentId: ENVIRONMENT_ID, input: {} }),
   );
-  return {
-    registry,
-    storedProject,
-    openScratch,
-    commands,
-    metadataRequests,
-    readResponse,
-    mutations,
-  };
+  return { registry, storedProject, openScratch, commands, metadataRequests, readResponse };
 });
 
 describe("writeFile metadata", () => {
@@ -256,53 +240,6 @@ describe("openScratch", () => {
       registry.set(storedProject, PROJECT);
       const result = yield* Fiber.join(opening);
       expect(result).toMatchObject({ _tag: "Success", value: PROJECT });
-    }).pipe(Effect.scoped),
-  );
-});
-
-describe("delete", () => {
-  it.effect("uses the destination grant and preserves the forced deletion payload", () =>
-    Effect.gen(function* () {
-      const h = yield* makeHarness();
-      expect(h.registry.get(h.commands.delete.permissionAtom(ENVIRONMENT_ID))).toBe(false);
-      const session = h.registry.get(sessions(ENVIRONMENT_ID));
-      if (session._tag !== "Success") throw new Error("Missing test session");
-      h.registry.set(
-        sessions(ENVIRONMENT_ID),
-        AsyncResult.success({
-          ...session.value,
-          scopes: [AuthOrchestrationOperateScope],
-          permissions: [AuthOrchestrationOperateScope],
-        }),
-      );
-      expect(h.registry.get(h.commands.delete.permissionAtom(ENVIRONMENT_ID))).toBe(true);
-      expect(h.registry.get(h.commands.delete.permissionAtom(EnvironmentId.make("other")))).toBe(
-        false,
-      );
-      const result = yield* Effect.promise(() =>
-        h.commands.delete.run(h.registry, {
-          environmentId: ENVIRONMENT_ID,
-          input: { projectId: PROJECT_ID, force: true },
-        }),
-      );
-      expect(result._tag).toBe("Success");
-      expect(h.mutations).toEqual([
-        {
-          type: "project.delete",
-          commandId: "00000000-0000-4000-8000-000000000000",
-          projectId: PROJECT_ID,
-          force: true,
-        },
-      ]);
-      h.registry.set(sessions(ENVIRONMENT_ID), session);
-      const denied = yield* Effect.promise(() =>
-        h.commands.delete.run(h.registry, {
-          environmentId: ENVIRONMENT_ID,
-          input: { projectId: PROJECT_ID, force: true },
-        }),
-      );
-      expect(denied._tag).toBe("Failure");
-      expect(h.mutations).toHaveLength(1);
     }).pipe(Effect.scoped),
   );
 });
