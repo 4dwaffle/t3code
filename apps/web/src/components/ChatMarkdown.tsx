@@ -57,7 +57,7 @@ import {
   type ThreadPullRequestKey,
 } from "@t3tools/contracts";
 import { faviconUrlForOrigin } from "@t3tools/shared/favicon";
-import { githubMediaFetchUrl } from "@t3tools/shared/githubMedia";
+import { pullRequestMediaResource } from "@t3tools/client-runtime/pull-request-markdown";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -242,7 +242,7 @@ interface ChatMarkdownProps {
   renderContextReference?: ((reference: ChatMarkdownContextReference) => ReactNode) | undefined;
   /** Loads GitHub-hosted media through `cwd`'s GitHub credential, which a private repository's
       uploads need; without it those images and videos load unauthenticated and 404. */
-  githubMedia?: boolean | undefined;
+  pullRequestMedia?: boolean | undefined;
   headingLevelOffset?: number | undefined;
 }
 
@@ -1558,6 +1558,7 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
         | "workspace-file"
         | "media-file"
         | "github-media"
+        | "azure-devops-media"
         | "tool-output-image";
     }
   >;
@@ -2341,7 +2342,7 @@ function useChatMarkdownState({
   onImageExpand,
   renderContextReference,
   headingLevelOffset = 0,
-  githubMedia = false,
+  pullRequestMedia = false,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const markdownRef = useRef<HTMLDivElement>(null);
@@ -2408,6 +2409,8 @@ function useChatMarkdownState({
       resolvedFilePath,
       cwd,
       threadRef,
+      environmentId: environmentId ?? undefined,
+      pullRequestMedia,
       // Read at click time: a reconnect replaces the prepared connection, and
       // subscribing would hand every rendered markdown element a new context.
       httpBaseUrl:
@@ -2723,7 +2726,7 @@ function useChatMarkdownState({
     environmentId,
     expandMedia,
     fileLinkChip,
-    githubMedia,
+    pullRequestMedia,
     renderContextReference,
     headingLevelOffset,
     imageBaseDir,
@@ -3173,7 +3176,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       expandMedia,
       cwd,
       environmentId,
-      githubMedia,
+      pullRequestMedia,
       imageBaseDir,
       threadRef,
       workspaceMutationId,
@@ -3205,19 +3208,21 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const imageSource = classifyMarkdownImageSource(classifiedSrc, imageBaseDir ?? cwd);
     const kind = mediaKindFromPath(classifiedSrc) ?? "image";
     const directUri = imageSource._tag === "Direct" ? imageSource.uri : null;
-    const githubMediaUrl =
-      directUri === null ? null : githubMediaFetchUrl(resolveProtocolRelativeMediaUrl(directUri));
+    const mediaResource =
+      directUri === null || cwd === undefined
+        ? null
+        : pullRequestMediaResource(resolveProtocolRelativeMediaUrl(directUri), cwd);
     if (
-      githubMedia &&
+      pullRequestMedia &&
       cwd !== undefined &&
       environmentId !== null &&
       directUri !== null &&
-      githubMediaUrl !== null
+      mediaResource !== null
     ) {
       return (
         <ChatMarkdownAssetImage
           environmentId={environmentId}
-          resource={{ _tag: "github-media", cwd, url: githubMediaUrl }}
+          resource={mediaResource}
           alt={altText}
           kind={kind}
           copyMarkdown={copyMarkdown}
@@ -3228,7 +3233,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           srcFragment={markdownImageSourceFragment(classifiedSrc)}
           originalUrl={resolveProtocolRelativeMediaUrl(directUri)}
           framed={false}
-          fallbackSrc={githubMediaUrl}
+          fallbackSrc={mediaResource.url}
           onImageExpand={imageExpand}
         />
       );

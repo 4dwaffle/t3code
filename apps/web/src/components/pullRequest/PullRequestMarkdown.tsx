@@ -1,6 +1,6 @@
 import { ExternalLinkIcon, PaperclipIcon } from "lucide-react";
 import { markdownImageSourceFragment } from "@t3tools/client-runtime/markdown-images";
-import { githubMediaFetchUrl } from "@t3tools/shared/githubMedia";
+import { pullRequestMediaResource } from "@t3tools/client-runtime/pull-request-markdown";
 import type { AssetResource, EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { createContext, useContext } from "react";
 import type { Options as ReactMarkdownOptions } from "react-markdown";
@@ -18,22 +18,19 @@ export const PullRequestMarkdownContext = createContext<{
   threadRef: ScopedThreadRef | null;
 } | null>(null);
 
-function PullRequestGitHubVideo({
+function PullRequestAssetVideo({
   environmentId,
-  cwd,
   url,
-  fetchUrl,
+  resource,
 }: {
   environmentId: EnvironmentId;
-  cwd: string;
   url: string;
-  fetchUrl: string;
+  resource: Extract<AssetResource, { _tag: "github-media" | "azure-devops-media" }>;
 }) {
-  const resource: AssetResource = { _tag: "github-media", cwd, url: fetchUrl };
   const assetUrl = useAssetUrlState(environmentId, resource);
   const refreshAssetUrl = useAssetUrlRefresh(environmentId, resource);
   const src =
-    assetUrl._tag === "Success" ? assetUrl.url : assetUrl._tag === "Failure" ? fetchUrl : null;
+    assetUrl._tag === "Success" ? assetUrl.url : assetUrl._tag === "Failure" ? resource.url : null;
   return (
     <MediaVideoPlayer
       src={src === null ? null : src + markdownImageSourceFragment(url)}
@@ -85,19 +82,19 @@ export function PullRequestMarkdown({
               pullRequestPanelRef={resolvedThreadRef ?? PULL_REQUESTS_PANEL_REF}
               environmentId={environmentId}
               extraRemarkPlugins={extraRemarkPlugins}
-              githubMedia
+              pullRequestMedia
             />
           );
         }
-        const githubMediaUrl = segment.media === "video" ? githubMediaFetchUrl(segment.url) : null;
-        if (githubMediaUrl !== null) {
+        const resource =
+          segment.media === "video" ? pullRequestMediaResource(segment.url, cwd) : null;
+        if (resource !== null) {
           return (
-            <PullRequestGitHubVideo
+            <PullRequestAssetVideo
               key={`${segment.id}:${segment.url}`}
               environmentId={environmentId}
-              cwd={cwd}
               url={segment.url}
-              fetchUrl={githubMediaUrl}
+              resource={resource}
             />
           );
         }

@@ -1,7 +1,9 @@
+import { azureDevOpsMediaLocation } from "@t3tools/shared/azureDevOpsMedia";
 import type { AssetResource } from "@t3tools/contracts";
 import {
   AssetAttachmentNotFoundError,
   AssetGitHubMediaUrlValidationError,
+  AssetAzureDevOpsMediaUrlValidationError,
   AssetPreviewTypeValidationError,
   AssetProjectFaviconInspectionError,
   AssetProjectFaviconNotFoundError,
@@ -159,7 +161,16 @@ const AssetClaimsSchema = Schema.Union([
   Schema.Struct({
     version: Schema.Literal(1),
     kind: Schema.Literal("github-media"),
-    /** Already narrowed to a GitHub media host at mint time; the signature is what keeps it there. */
+    /** Already narrowed to a provider media endpoint at mint time; the signature is what keeps it there. */
+    url: Schema.String,
+    cwd: Schema.String,
+    expiresAt: Schema.Number,
+  }),
+
+  Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal("azure-devops-media"),
+    /** Already narrowed to a provider media endpoint at mint time; the signature is what keeps it there. */
     url: Schema.String,
     cwd: Schema.String,
     expiresAt: Schema.Number,
@@ -187,7 +198,7 @@ export type ResolvedAsset =
       readonly mimeType: string;
     }
   | {
-      readonly kind: "github-media";
+      readonly kind: "github-media" | "azure-devops-media";
       readonly url: string;
       readonly cwd: string;
       readonly expiresAt: number;
@@ -765,14 +776,20 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       fileName = "native-app-icon.png";
       break;
     }
-    case "github-media": {
-      const fetchUrl = githubMediaFetchUrl(input.resource.url);
+    case "github-media":
+    case "azure-devops-media": {
+      const azure = input.resource._tag === "azure-devops-media";
+      const fetchUrl = azure
+        ? (azureDevOpsMediaLocation(input.resource.url)?.fetchUrl ?? null)
+        : githubMediaFetchUrl(input.resource.url);
       if (fetchUrl === null) {
-        return yield* new AssetGitHubMediaUrlValidationError({});
+        return yield* azure
+          ? new AssetAzureDevOpsMediaUrlValidationError({})
+          : new AssetGitHubMediaUrlValidationError({});
       }
       claims = {
         version: 1,
-        kind: "github-media",
+        kind: input.resource._tag,
         url: fetchUrl,
         cwd: input.resource.cwd,
         expiresAt,
@@ -889,7 +906,15 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
 
   if (claims.kind === "github-media") {
     return {
-      kind: "github-media",
+      kind: claims.kind,
+      url: claims.url,
+      cwd: claims.cwd,
+      expiresAt: claims.expiresAt,
+    } satisfies ResolvedAsset;
+  }
+  if (claims.kind === "azure-devops-media") {
+    return {
+      kind: claims.kind,
       url: claims.url,
       cwd: claims.cwd,
       expiresAt: claims.expiresAt,

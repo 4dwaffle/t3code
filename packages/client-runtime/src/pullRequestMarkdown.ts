@@ -1,3 +1,15 @@
+import type { AssetResource } from "@t3tools/contracts";
+import { githubMediaFetchUrl } from "@t3tools/shared/githubMedia";
+import { azureDevOpsMediaLocation } from "@t3tools/shared/azureDevOpsMedia";
+
+export function pullRequestMediaResource(url: string, cwd: string) {
+  const azure = azureDevOpsMediaLocation(url);
+  if (azure)
+    return { _tag: "azure-devops-media", cwd, url: azure.fetchUrl } satisfies AssetResource;
+  const github = githubMediaFetchUrl(url);
+  return github ? ({ _tag: "github-media", cwd, url: github } satisfies AssetResource) : null;
+}
+
 /** `id` is positional on purpose: the same attachment can be embedded twice in one body. */
 export type PullRequestBodySegment =
   | { readonly id: string; readonly kind: "markdown"; readonly text: string }
