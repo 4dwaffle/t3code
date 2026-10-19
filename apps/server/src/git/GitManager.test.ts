@@ -2403,7 +2403,6 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
       yield* runGit(repoDir, ["checkout", "-b", "develop"]);
       yield* runGit(repoDir, ["push", "-u", "origin", "develop"]);
-      // The commit the release PR was opened from.
       const releasedHead = yield* runGit(repoDir, ["rev-parse", "HEAD"]);
 
       // `develop` is an integration branch, so work continues on it after the
@@ -2582,20 +2581,21 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           branch: "develop",
           pullRequest: { number: Number(url.split("/").at(-1)), url },
         });
-      const outgrown = yield* superseded("https://github.com/pingdotgg/t3code/pull/3");
-      // An older release PR from the same branch is behind it too.
-      const olderRelease = yield* superseded("https://github.com/pingdotgg/t3code/pull/1");
       // A newer PR is not judged by an older one that was merely updated later.
       const newerRelease = yield* superseded("https://github.com/pingdotgg/t3code/pull/9");
       // Numbers repeat across repositories, so another repository's PR is not.
       const otherRepository = yield* superseded("https://github.com/acme/t3code/pull/3");
+      // A "no", which repeats every sweep, reuses the branch lookup's git reads.
+      expect(gitCommands).toEqual([]);
+      const outgrown = yield* superseded("https://github.com/pingdotgg/t3code/pull/3");
+      // An older release PR from the same branch is behind it too.
+      const olderRelease = yield* superseded("https://github.com/pingdotgg/t3code/pull/1");
 
       expect(pullRequest).toBeNull();
-      expect(outgrown).toBe(true);
-      expect(olderRelease).toBe(true);
       expect(newerRelease).toBe(false);
       expect(otherRepository).toBe(false);
-      expect(gitCommands).toEqual([]);
+      expect(outgrown).toBe(true);
+      expect(olderRelease).toBe(true);
     }),
   );
 
@@ -2673,15 +2673,23 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
+      const superseded = () =>
+        manager.branchSupersededPullRequest({
+          cwd: repoDir,
+          branch: "main",
+          pullRequest: { number: 5, url: "https://github.com/pingdotgg/t3code/pull/5" },
+        });
       const pullRequest = yield* manager.branchPullRequest({ cwd: repoDir, branch: "main" });
-      const superseded = yield* manager.branchSupersededPullRequest({
-        cwd: repoDir,
-        branch: "main",
-        pullRequest: { number: 5, url: "https://github.com/pingdotgg/t3code/pull/5" },
-      });
+      const movedOn = yield* superseded();
+      // Reset outside T3, so the remembered tip is stale; clearing the saved
+      // reference still waits for fresh git state.
+      yield* runGit(repoDir, ["reset", "--hard", releasedHead.stdout.trim()]);
+      yield* manager.branchPullRequest({ cwd: repoDir, branch: "main" });
+      const backOnRelease = yield* superseded();
 
       expect(pullRequest).toBeNull();
-      expect(superseded).toBe(true);
+      expect(movedOn).toBe(true);
+      expect(backOnRelease).toBe(false);
     }),
   );
 

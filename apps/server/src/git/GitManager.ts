@@ -148,7 +148,8 @@ export class GitManager extends Context.Service<
      * is why `branchPullRequest` reports nothing for it, and `pullRequest` is
      * that PR or an older one from the same repository. Link discovery uses it
      * so it does not restore a reference the branch outgrew. Call it after
-     * `branchPullRequest` for the same branch: it reuses that call's git reads.
+     * `branchPullRequest` for the same branch: a "no" reuses that call's git
+     * reads, and only a "yes" reads git state again.
      */
     readonly branchSupersededPullRequest: (input: {
       readonly cwd: string;
@@ -1274,9 +1275,10 @@ export const make = Effect.gen(function* () {
     }
     return lastKnown.pr;
   };
-  // Whether one commit descends from another never changes, so a definite
-  // answer is kept. A head that was never fetched is not cached: it can arrive.
-  const descendsFromByCommits = new Map<string, boolean>();
+  // Once one commit is known to descend from another, that never changes. A
+  // "no" is not kept: a shallow clone or a head that was never fetched can
+  // turn into a "yes" after a fetch.
+  const descendsFromByCommits = new Set<string>();
   /**
    * A reused branch (like `develop` after a release) has moved past a merged or
    * closed PR once its tip builds on that PR's head commit. Comparing commits
@@ -1296,8 +1298,7 @@ export const make = Effect.gen(function* () {
       return Effect.succeed(false);
     }
     const key = `${cwd}\u0000${headSha}\u0000${tip}`;
-    const known = descendsFromByCommits.get(key);
-    if (known !== undefined) return Effect.succeed(known);
+    if (descendsFromByCommits.has(key)) return Effect.succeed(true);
     return gitCore
       .execute({
         operation: "GitManager.branchMovedPastPullRequest",
@@ -1308,14 +1309,14 @@ export const make = Effect.gen(function* () {
       })
       .pipe(
         Effect.map((result) => {
-          // 0 is ancestor and 1 is not; anything else is a failed probe.
-          if (result.exitCode !== 0 && result.exitCode !== 1) return false;
+          // 0 is ancestor; 1 is not, and anything else is a failed probe.
+          if (result.exitCode !== 0) return false;
           if (descendsFromByCommits.size >= PR_LOOKUP_CACHE_CAPACITY) {
-            const oldestKey = descendsFromByCommits.keys().next().value;
+            const oldestKey = descendsFromByCommits.values().next().value;
             if (oldestKey !== undefined) descendsFromByCommits.delete(oldestKey);
           }
-          descendsFromByCommits.set(key, result.exitCode === 0);
-          return result.exitCode === 0;
+          descendsFromByCommits.add(key);
+          return true;
         }),
         Effect.orElseSucceed(() => false),
       );
@@ -2733,21 +2734,27 @@ export const make = Effect.gen(function* () {
   const branchSupersededPullRequest: GitManager["Service"]["branchSupersededPullRequest"] =
     Effect.fn("branchSupersededPullRequest")(function* ({ cwd, branch, pullRequest }) {
       const cacheCwd = yield* normalizeStatusCacheKey(cwd);
-      const latest = yield* lookupBranchPullRequest(cacheCwd, branch, {
-        refresh: false,
-        freshGitState: false,
-        includeMovedPast: true,
-        includeDefaultBranch: true,
-      });
-      // "Latest" means most recently updated, so a comment on an old PR can
-      // make it latest. Numbers only grow within a repository, so a newer saved
-      // PR is not judged by an older one.
-      return (
-        latest !== null &&
-        "movedPast" in latest &&
-        latest.repositoryKey === pullRequestRepositoryKey(pullRequest.url) &&
-        pullRequest.number <= latest.number
-      );
+      const supersedes = (freshGitState: boolean) =>
+        lookupBranchPullRequest(cacheCwd, branch, {
+          refresh: false,
+          freshGitState,
+          includeMovedPast: true,
+          includeDefaultBranch: true,
+        }).pipe(
+          // "Latest" means most recently updated, so a comment on an old PR can
+          // make it latest. Numbers only grow within a repository, so a newer
+          // saved PR is not judged by an older one.
+          Effect.map(
+            (latest) =>
+              latest !== null &&
+              "movedPast" in latest &&
+              latest.repositoryKey === pullRequestRepositoryKey(pullRequest.url) &&
+              pullRequest.number <= latest.number,
+          ),
+        );
+      // Clearing a saved reference is final, so a remembered tip that says the
+      // branch moved on is checked against fresh git state first.
+      return (yield* supersedes(false)) && (yield* supersedes(true));
     });
   const invalidateLocalStatus: GitManager["Service"]["invalidateLocalStatus"] = Effect.fn(
     "invalidateLocalStatus",
