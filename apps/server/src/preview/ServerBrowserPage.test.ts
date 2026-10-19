@@ -7,6 +7,7 @@ import {
 } from "playwright-core";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vite-plus/test";
 
+import { presentAsChrome } from "./ServerBrowserContexts.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 
 describe("server browser element refs", () => {
@@ -123,6 +124,60 @@ describe("server browser element refs", () => {
     expect(await page.getByRole("textbox", { name: "parent" }).inputValue()).toBe("");
   });
 
+  it("shows dotted fields as dots wherever their value appears, keeping text values and refs", async () => {
+    await page.setContent(`
+      <table><tr><td>password:</td><td><input id="pw" type="password" aria-label="Password"></td></tr></table>
+      <input aria-label="Username" value="maria">
+      <input type="password" aria-label='saved" [ref=e2]: x' placeholder="hint" value="saved-pass">
+      <input type="password" role="combobox" aria-label="Code" value="role-pass">
+      <input aria-label="PIN" style="-webkit-text-security: disc" value="styled-pass">
+      <div contenteditable style="-webkit-text-security: disc">editable-pass</div>
+      <iframe srcdoc="<input type=password aria-label=child value=frame-pass>"></iframe>
+      <iframe id="blank" src="javascript:false"></iframe>
+      <p>Order styled-pass-2</p>
+      <script>
+        // A frame that never commits a document, filled by its parent.
+        blank.contentDocument.body.innerHTML = "<input type=password aria-label=blank value=blank-pass>";
+        // Page script can't change the value the snapshot sees.
+        Object.defineProperty(HTMLInputElement.prototype, "value", { get: () => "" });
+      </script>`);
+    await page.frameLocator("iframe[srcdoc]").getByRole("textbox").waitFor();
+    await ServerBrowserPage.type(page, { locator: "#pw", text: "typed-pass" });
+    const result = await takeSnapshot();
+    const tree = String(result.accessibilityTree);
+    expect(tree).toContain('textbox "blank"');
+    expect(tree).not.toMatch(
+      /typed-pass|saved-pass|role-pass|styled-pass|editable-pass|frame-pass|blank-pass/,
+    );
+    expect(result.visibleText).not.toContain("editable-pass");
+    // Page text masks the same values, so it can't be compared against the tree.
+    expect(result.visibleText).toContain("Order ••••••••-2");
+    expect(tree).toMatch(/row "password: •+"/);
+    expect(tree).toMatch(/textbox "Username" [^\n]*: maria$/m);
+    const line = tree.split("\n").find((line) => line.includes('textbox "Password"'));
+    expect(line).toMatch(/: •+$/);
+    await ServerBrowserPage.type(page, { locator: locators(line)[0]!, text: "next", clear: true });
+    expect(await page.locator("#pw").inputValue()).toBe("next");
+  });
+
+  it("masks dotted values in page text next to punctuation, with odd spaces, and at the cut", async () => {
+    await page.setContent(`
+      <input type="password" aria-label="PIN" value="123">
+      <input type="password" aria-label="Phrase" value="open&nbsp;sesame">
+      <p>PIN: 123. Code (123) id 1234</p>
+      <p>open&nbsp;sesame</p>`);
+    const text = (await takeSnapshot()).visibleText;
+    expect(text).toContain("PIN: ••••••••. Code (••••••••) id 1234");
+    expect(text).not.toMatch(/open|sesame/);
+    await page.setContent(`
+      <p>${"x".repeat(19_995)}long-secret</p>
+      <input type="password" aria-label="Long" value="long-secret">`);
+    const cut = (await takeSnapshot()).visibleText;
+    expect(cut.length).toBe(20_000);
+    // Masked before the cut, so no prefix of the value is left.
+    expect(cut.slice(-8)).toBe("xxx•••••");
+  });
+
   it("rejects refs from another tab", async () => {
     await page.setContent("<button>same label</button>");
     const locator = buttonLocator((await takeSnapshot()).accessibilityTree, "same label");
@@ -204,7 +259,6 @@ describe("server browser element refs", () => {
     await ServerBrowserPage.click(page, { locator: "#target", clickCount: 2 });
     await ServerBrowserPage.hover(page, { locator: "#hover" });
     expect(await page.isVisible("#menu")).toBe(true);
-    // A visible label selects the same option as its value.
     expect(await ServerBrowserPage.select(page, { locator: "#size", values: ["Large"] })).toEqual({
       selected: ["l"],
     });
@@ -244,5 +298,74 @@ describe("server browser element refs", () => {
       "move@270,140 after 2",
     ]);
     expect(await page.evaluate("window.seen")).toEqual(["click", "hover", "drop"]);
+  });
+
+  it("presents a headless page as Chrome, with client hints that agree", async () => {
+    await presentAsChrome(cdp, { platform: "linux", arch: "x64" });
+    // userAgentData exists only in secure contexts; https comes from a route.
+    let secChUa: string | undefined;
+    await page.route("https://example.test/", (route) => {
+      secChUa = route.request().headers()["sec-ch-ua"];
+      return route.fulfill({ contentType: "text/html", body: "<p>hi</p>" });
+    });
+    await page.goto("https://example.test/");
+    const identity = (await page.evaluate(`(async () => ({
+      userAgent: navigator.userAgent,
+      brands: navigator.userAgentData.brands.map((brand) => brand.brand),
+      full: (await navigator.userAgentData.getHighEntropyValues(["fullVersionList"]))
+        .fullVersionList.map((brand) => brand.brand),
+    }))()`)) as { userAgent: string; brands: string[]; full: string[] };
+    expect(identity.userAgent).not.toContain("Headless");
+    expect(identity.userAgent).toMatch(/ Chrome\/\d+\.0\.0\.0 /);
+    expect(identity.brands).toContain("Google Chrome");
+    expect([...identity.brands, ...identity.full].join()).not.toContain("Headless");
+    expect(secChUa).toContain('"Google Chrome"');
+    expect(secChUa).not.toContain("Headless");
+  });
+
+  it("stops an evaluation at its deadline so the page answers the next one", async () => {
+    await expect(
+      ServerBrowserPage.evaluate(cdp, { expression: "for (;;) {}" }, 200),
+    ).rejects.toMatchObject({ tag: "PreviewAutomationTimeoutError" });
+    expect(await ServerBrowserPage.evaluate(cdp, { expression: "1 + 1" }, 2_000)).toBe(2);
+  });
+});
+
+describe("server browser drag", () => {
+  it("fails the drag, not the server, when it times out while the cursor is still moving", async () => {
+    const timedOut = new Error("locator.dragTo: Timeout 30000ms exceeded.");
+    const box = { x: 0, y: 0, width: 20, height: 20 };
+    const targetBox = Promise.withResolvers<typeof box>();
+    const page = {
+      locator: (selector: string) =>
+        selector === "#card"
+          ? {
+              scrollIntoViewIfNeeded: async () => {},
+              boundingBox: async () => box,
+              dragTo: () => Promise.reject(timedOut),
+            }
+          : { boundingBox: () => targetBox.promise },
+    } as unknown as Page;
+    const unobserved: Array<unknown> = [];
+    const onUnhandled = (reason: unknown) => unobserved.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let finished = false;
+      const settled = ServerBrowserPage.drag(page, { source: "#card", target: "#lane" }).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      void settled.then(() => (finished = true));
+      // Two macrotask turns: Node reports a rejection nobody observed after the first.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(finished).toBe(false);
+      targetBox.resolve(box);
+
+      expect(await settled).toBe(timedOut);
+      expect(unobserved).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

@@ -32,6 +32,7 @@ const layerElectronApp = Layer.succeed(ElectronApp.ElectronApp, {
   name: Effect.succeed("T3 Code"),
   systemLocale: Effect.succeed("en-US"),
   whenReady: Effect.void,
+  requestSingleInstanceLock: Effect.succeed(true),
   quit: Effect.void,
   exit: () => Effect.void,
   relaunch: () => Effect.void,
@@ -87,6 +88,8 @@ const layerDesktopWindow = (selectedAction: Deferred.Deferred<string>) =>
     dispatchSnapShotEvent: () => Effect.void,
     zoomMain: (direction) =>
       Deferred.succeed(selectedAction, `zoom-${direction}`).pipe(Effect.asVoid),
+    runMainContentsCommand: (command) =>
+      Deferred.succeed(selectedAction, `main-${command}`).pipe(Effect.asVoid),
     syncAppearance: Effect.void,
   } satisfies DesktopWindow.DesktopWindow["Service"]);
 
@@ -103,6 +106,7 @@ const layerElectronMenu = (
 const configureMenu = (
   selectedAction: Deferred.Deferred<string>,
   applicationMenuTemplate: Deferred.Deferred<readonly Electron.MenuItemConstructorOptions[]>,
+  environment: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
 ) =>
   Effect.gen(function* () {
     const menu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
@@ -116,7 +120,7 @@ const configureMenu = (
         Layer.provideMerge(layerElectronDialog),
         Layer.provideMerge(layerElectronApp),
         Layer.provideMerge(
-          DesktopEnvironment.layer(environmentInput).pipe(
+          DesktopEnvironment.layer({ ...environmentInput, ...environment }).pipe(
             Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({}))),
           ),
         ),
@@ -125,6 +129,39 @@ const configureMenu = (
   );
 
 describe("DesktopApplicationMenu", () => {
+  it.effect("keeps display branding in the macOS application menu", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const applicationMenuTemplate =
+        yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+      yield* configureMenu(selectedAction, applicationMenuTemplate, {
+        platform: "darwin",
+        appVersion: "0.0.43-nightly.20260929.2428",
+      });
+
+      const template = yield* Deferred.await(applicationMenuTemplate);
+      const applicationMenu = template[0];
+      assert.isDefined(applicationMenu);
+      assert.equal(applicationMenu.label, "T3 Code (Nightly)");
+      if (!Array.isArray(applicationMenu.submenu)) {
+        throw new Error("Expected application menu submenu to be an array.");
+      }
+      assert.equal(
+        applicationMenu.submenu.find((item) => item.role === "about")?.label,
+        "About T3 Code (Nightly)",
+      );
+      assert.equal(
+        applicationMenu.submenu.find((item) => item.role === "hide")?.label,
+        "Hide T3 Code (Nightly)",
+      );
+      assert.equal(
+        applicationMenu.submenu.find((item) => item.role === "quit")?.label,
+        "Quit T3 Code (Nightly)",
+      );
+    }),
+  );
+
   it.effect("installs the native menu and routes Settings through DesktopWindow", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
@@ -181,8 +218,6 @@ describe("DesktopApplicationMenu", () => {
     }),
   );
 
-  // Chromium pastes as plain text for the accelerator on its own. Dispatching
-  // the action as well injects a second paste, which doubles the pasted text.
   it.effect("leaves the accelerator to Chromium instead of injecting a paste", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
@@ -212,9 +247,6 @@ describe("DesktopApplicationMenu", () => {
     }),
   );
 
-  // Zoom must route through DesktopWindow.zoomMain instead of the Electron
-  // zoom roles: the roles zoom whichever webContents has focus, which breaks
-  // app zoom while an embedded preview WebContentsView holds focus.
   it.effect("routes View menu zoom to the main window instead of zoom roles", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
@@ -231,7 +263,9 @@ describe("DesktopApplicationMenu", () => {
       }
 
       assert.isUndefined(
-        viewMenu.submenu.find((item) => item.role?.toLowerCase().includes("zoom")),
+        viewMenu.submenu.find((item) =>
+          ["zoom", "reload", "devtools"].some((role) => item.role?.toLowerCase().includes(role)),
+        ),
       );
 
       const zoomIn = viewMenu.submenu.find((item) => item.label === "Zoom In");
@@ -243,6 +277,61 @@ describe("DesktopApplicationMenu", () => {
 
       zoomIn.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
       assert.equal(yield* Deferred.await(selectedAction), "zoom-in");
+    }),
+  );
+
+  it.effect("zooms from the numeric keypad without listing the commands twice", () =>
+    Effect.gen(function* () {
+      for (const [accelerator, expected] of [
+        ["CmdOrCtrl+numadd", "zoom-in"],
+        ["CmdOrCtrl+numsub", "zoom-out"],
+        ["CmdOrCtrl+num0", "zoom-reset"],
+      ] as const) {
+        const selectedAction = yield* Deferred.make<string>();
+        const applicationMenuTemplate =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+        yield* configureMenu(selectedAction, applicationMenuTemplate);
+
+        const template = yield* Deferred.await(applicationMenuTemplate);
+        const viewMenu = template.find((item) => item.label === "View");
+        if (!viewMenu || !Array.isArray(viewMenu.submenu)) {
+          throw new Error("Expected View menu submenu to be an array.");
+        }
+        const item = viewMenu.submenu.find((entry) => entry.accelerator === accelerator);
+        assert.isDefined(item);
+        assert.isFalse(item.visible);
+        if (typeof item.click !== "function") {
+          throw new Error(`Expected ${accelerator} menu item to have a click handler.`);
+        }
+
+        item.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+        assert.equal(yield* Deferred.await(selectedAction), expected);
+      }
+    }),
+  );
+
+  it.effect("reloads the main window even while a browser page has focus", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const applicationMenuTemplate =
+        yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+      yield* configureMenu(selectedAction, applicationMenuTemplate);
+
+      const template = yield* Deferred.await(applicationMenuTemplate);
+      const viewMenu = template.find((item) => item.label === "View");
+      if (!Array.isArray(viewMenu?.submenu)) {
+        throw new Error("Expected View menu submenu to be an array.");
+      }
+      const reload = viewMenu.submenu.find((item) => item.label === "Reload");
+      assert.equal(reload?.accelerator, "CmdOrCtrl+R");
+      if (typeof reload?.click !== "function") {
+        throw new Error("Expected Reload menu item to have a click handler.");
+      }
+
+      reload.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+      assert.equal(yield* Deferred.await(selectedAction), "main-reload");
     }),
   );
 });

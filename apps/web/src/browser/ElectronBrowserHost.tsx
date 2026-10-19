@@ -1,55 +1,53 @@
 "use client";
 
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
-import { AuthPreviewOperateScope, FILL_PREVIEW_VIEWPORT } from "@t3tools/contracts";
+import {
+  AuthPreviewOperateScope,
+  type DesktopPreviewOpenLinkEvent,
+  FILL_PREVIEW_VIEWPORT,
+} from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { type ComponentProps, useEffect, useMemo } from "react";
+import { type ComponentProps, useEffect, useEffectEvent, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 
 import { isElectron } from "~/env";
-import { useTheme } from "~/hooks/useTheme";
+import { useClientSettingsHydrated } from "~/hooks/useSettings";
 import { useActivePreviewSessions } from "~/previewStateStore";
+import { previewEnvironment } from "~/state/preview";
 import { useEnvironmentScope } from "~/state/session";
+import { useAtomCommand } from "~/state/use-atom-command";
 
 import { readPreviewAnnotationTheme } from "./annotationTheme";
+import { useBrowserDefaults } from "./browserDefaults";
 import { useBrowserPointerStore } from "./browserPointerStore";
 import { HostedBrowserWebview } from "./HostedBrowserWebview";
+import { openUrlInPreview } from "./openFileInPreview";
 import { rendersServerTabNatively } from "./previewRuntime";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
 
 export function ElectronBrowserHost() {
-  const { resolvedTheme } = useTheme();
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
-  const sessions = useMemo(
-    () =>
-      Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
-        const threadRef = parseScopedThreadKey(threadKey);
-        // Server tabs of other environments stream; this desktop's own server tabs render here.
-        return threadRef
-          ? Object.values(previewState.sessions)
-              .filter(
-                (snapshot) =>
-                  snapshot.runtime !== "server" ||
-                  rendersServerTabNatively(threadRef.environmentId, primaryEnvironmentId, snapshot),
-              )
-              .map((snapshot) => ({
-                threadRef,
-                snapshot,
-                runtimeTabId: previewRuntimeTabId(
-                  threadRef,
-                  previewState.serverEpoch,
-                  snapshot.tabId,
-                ),
-                pictureInPicture:
-                  previewState.desktopByTabId[snapshot.tabId]?.pictureInPicture ?? false,
-                zoomFactor: previewState.desktopByTabId[snapshot.tabId]?.zoomFactor ?? 1,
-              }))
-          : [];
-      }),
-    [previewByThreadKey, primaryEnvironmentId],
-  );
+  const sessions = Object.entries(previewByThreadKey).flatMap(([threadKey, previewState]) => {
+    const threadRef = parseScopedThreadKey(threadKey);
+    return threadRef
+      ? Object.values(previewState.sessions)
+          .filter(
+            (snapshot) =>
+              snapshot.runtime !== "server" ||
+              rendersServerTabNatively(threadRef.environmentId, primaryEnvironmentId, snapshot),
+          )
+          .map((snapshot) => ({
+            threadRef,
+            snapshot,
+            runtimeTabId: previewRuntimeTabId(threadRef, previewState.serverEpoch, snapshot.tabId),
+            pictureInPicture:
+              previewState.desktopByTabId[snapshot.tabId]?.pictureInPicture ?? false,
+            zoomFactor: previewState.desktopByTabId[snapshot.tabId]?.zoomFactor ?? 1,
+          }))
+      : [];
+  });
 
   useEffect(() => {
     const preview = window.desktopBridge?.preview;
@@ -82,7 +80,7 @@ export function ElectronBrowserHost() {
       observer.disconnect();
       headObserver.disconnect();
     };
-  }, [resolvedTheme]);
+  }, []);
 
   useEffect(() => {
     const preview = window.desktopBridge?.preview;
@@ -90,6 +88,24 @@ export function ElectronBrowserHost() {
     return preview.onPointerEvent((event) => {
       useBrowserPointerStore.getState().apply(event);
     });
+  }, []);
+
+  const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: true });
+  const onOpenLink = useEffectEvent(({ tabId, url, background }: DesktopPreviewOpenLinkEvent) => {
+    const source = sessions.find((session) => session.runtimeTabId === tabId);
+    if (!source) return;
+    void openUrlInPreview({
+      threadRef: source.threadRef,
+      url,
+      openPreview,
+      profileId: source.snapshot.profileId,
+      background,
+    });
+  });
+  useEffect(() => {
+    const preview = window.desktopBridge?.preview;
+    if (!preview) return;
+    return preview.onOpenLink(onOpenLink);
   }, []);
 
   if (!isElectron) return null;
@@ -129,5 +145,20 @@ function AuthorizedBrowserWebview(props: ComponentProps<typeof HostedBrowserWebv
     props.threadRef.environmentId,
     AuthPreviewOperateScope,
   );
-  return canOperatePreview ? <HostedBrowserWebview {...props} /> : null;
+  const profileId = useTabProfileId(props.profileId);
+  return canOperatePreview ? <HostedBrowserWebview {...props} profileId={profileId} /> : null;
+}
+
+/**
+ * It is latched once settings load: Electron fixes the partition when the guest attaches, so a
+ * later settings change must not move a live tab.
+ */
+function useTabProfileId(profileId: string | undefined): string | undefined {
+  const hydrated = useClientSettingsHydrated();
+  const defaultProfileId = useBrowserDefaults().profileId;
+  const [fallback, setFallback] = useState<string | undefined>(undefined);
+  if (profileId === undefined && hydrated && fallback === undefined) {
+    setFallback(defaultProfileId);
+  }
+  return profileId ?? fallback;
 }
