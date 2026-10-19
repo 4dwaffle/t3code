@@ -152,9 +152,7 @@ const pendingRequestKind = OrchestrationV2RuntimeRequest.fields.kind;
 const pendingRequest = Schema.Struct({
   requestId: RuntimeRequestId,
   kind: pendingRequestKind,
-  /** Present for user questions. */
   questions: Schema.optional(Schema.Array(question)),
-  /** Present for approvals when the provider supplied them. */
   prompt: Schema.optional(Schema.String),
   options: Schema.optional(Schema.Array(ProviderApprovalOption)),
 });

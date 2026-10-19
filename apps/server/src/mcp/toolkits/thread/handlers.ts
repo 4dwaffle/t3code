@@ -56,7 +56,6 @@ const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
 });
 
 const isApprovalKind = Schema.is(ProviderRequestKind);
-/** Pending requests a caller can act on: user questions and approvals. */
 const isPendingRequest = (request: OrchestrationV2ThreadProjection["runtimeRequests"][number]) =>
   request.status === "pending" && (request.kind === "user_input" || isApprovalKind(request.kind));
 const DEFAULT_APPROVAL_DECISIONS: ReadonlyArray<ProviderApprovalDecision> = [
@@ -249,21 +248,30 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   t3_pending_request_respond: writesThread((input) =>
     Effect.gen(function* () {
       const { threads, projection, request, item } = yield* readPendingRequest(input);
-      const invalid = (message: string) =>
-        new OrchestratorMcpFailure({ code: "invalid_request", message });
       let response;
       if (request.kind === "user_input") {
-        if (input.answers === undefined) return yield* invalid("User questions need answers.");
+        if (input.answers === undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "User questions need answers.",
+          });
         response = { answers: input.answers };
       } else {
         const decision = input.decision;
-        if (decision === undefined) return yield* invalid("Approvals need a decision.");
+        if (decision === undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "Approvals need a decision.",
+          });
         const offered =
           item?.type === "approval_request"
             ? item.options?.map((option) => option.decision)
             : undefined;
         if (!(offered ?? DEFAULT_APPROVAL_DECISIONS).includes(decision))
-          return yield* invalid("That decision was not offered for this approval.");
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "That decision was not offered for this approval.",
+          });
         if (decision !== "decline" && decision !== "cancel")
           yield* assertFullAccess(
             yield* loadCaller(),
@@ -369,19 +377,13 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         case "mark_unread":
           command = { ...common, type: "thread.mark-unread" };
           break;
-        case "mark_read": {
-          // The reverse of mark_unread: visit up to the thread's current state, as a client does.
-          const shell = yield* threads
-            .getThreadShell(projection.thread.id)
-            .pipe(Effect.mapError(unavailable));
-          if (shell === null) return yield* unavailable();
+        case "mark_read":
           command = {
             ...common,
             type: "thread.visit",
-            visitedAt: DateTime.formatIso(shell.updatedAt),
+            visitedAt: DateTime.formatIso(projection.thread.updatedAt),
           };
           break;
-        }
         default:
           command = { ...common, type: `thread.${input.action}` };
       }

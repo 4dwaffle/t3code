@@ -51,13 +51,10 @@ const handlers = {
         });
       const review = yield* Review.ReviewService;
       const preview = yield* review
-        .getDiffPreview(
-          {
-            cwd: thread.worktreePath ?? project.value.workspaceRoot,
-            ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-          },
-          project.value.workspaceRoot,
-        )
+        .getDiffPreview({
+          cwd: thread.worktreePath ?? project.value.workspaceRoot,
+          ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+        })
         .pipe(
           Effect.mapError((error) =>
             error._tag === "VcsRepositoryDetectionError" ||
