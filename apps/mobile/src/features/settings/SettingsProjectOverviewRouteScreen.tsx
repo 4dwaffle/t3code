@@ -139,30 +139,28 @@ function ProjectOverviewContent(props: {
       onConfirm: () => {
         void (async () => {
           setIsRemoving(true);
-          try {
-            if (!checkRemovalAccess(members)) return;
-            for (const member of members) {
-              if (!checkRemovalAccess([member])) return;
-              const result = await deleteProject({
-                environmentId: member.environmentId,
-                input: { projectId: member.id, force: true },
-              });
-              if (result._tag === "Failure") {
-                if (!isAtomCommandInterrupted(result)) {
-                  const error = squashAtomCommandFailure(result);
-                  Dialog.alert(
-                    `Failed to remove "${member.title}"`,
-                    error instanceof Error ? error.message : "An error occurred.",
-                  );
-                }
-                return;
+          if (!checkRemovalAccess(members)) return;
+          for (const member of members) {
+            if (!checkRemovalAccess([member])) return;
+            const result = await deleteProject({
+              environmentId: member.environmentId,
+              input: { projectId: member.id, force: true },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                const error = squashAtomCommandFailure(result);
+                Dialog.alert(
+                  `Failed to remove "${member.title}"`,
+                  error instanceof Error ? error.message : "An error occurred.",
+                );
               }
+              return;
             }
-          } finally {
-            removalPending.current = false;
-            setIsRemoving(false);
           }
-        })();
+        })().finally(() => {
+          removalPending.current = false;
+          setIsRemoving(false);
+        });
       },
     });
   };
