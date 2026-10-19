@@ -90,6 +90,7 @@ export function shouldPublishAgentAwarenessEvent(
     case "thread.archived":
     case "thread.unarchived":
     case "thread.deleted":
+    case "thread.settled":
     case "thread.metadata-updated":
     case "thread.pull-request-link-updated":
     case "thread.pull-request-synced":
@@ -101,7 +102,6 @@ export function shouldPublishAgentAwarenessEvent(
     case "subagent.updated":
     case "provider-thread.updated":
       return true;
-    case "thread.settled":
     case "thread.unsettled":
     case "thread.snoozed":
     case "thread.unsnoozed":
