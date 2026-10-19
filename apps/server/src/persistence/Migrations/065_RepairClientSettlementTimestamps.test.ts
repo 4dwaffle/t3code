@@ -102,12 +102,95 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
           1,
           "server",
         );
+        if (status === "running") {
+          for (let index = 0; index < 500; index++) {
+            yield* insertEvent(
+              "sweep-2",
+              "thread.turn-start-requested",
+              "invalid",
+              {
+                createdAt: "invalid",
+              },
+              1,
+              "server",
+            );
+          }
+        }
       }
       for (let index = 0; index < 10; index++) {
         yield* insertSettlement(
           `sweep-${index}`,
           plusSeconds(sweptAt, index * 2),
           `0.0.${35 + (index % 4)}`,
+        );
+      }
+      // Completed or reverted turns must not be finished again by an idle restart.
+      for (const [id, eventType, at, payload] of [
+        [
+          "sweep-5",
+          "thread.message-sent",
+          userMessageAt,
+          {
+            turnId: "finished",
+            role: "assistant",
+            streaming: true,
+            createdAt: userMessageAt,
+          },
+        ],
+        [
+          "sweep-5",
+          "thread.message-sent",
+          finishedAt,
+          {
+            turnId: "finished",
+            role: "assistant",
+            streaming: false,
+            createdAt: userMessageAt,
+            updatedAt: finishedAt,
+          },
+        ],
+        [
+          "sweep-6",
+          "thread.session-set",
+          "invalid",
+          {
+            session: { status: "running", activeTurnId: "invalid-start", updatedAt: "invalid" },
+          },
+        ],
+        [
+          "sweep-6",
+          "thread.session-set",
+          finishedAt,
+          {
+            session: { status: "ready", activeTurnId: null, updatedAt: "invalid" },
+          },
+        ],
+        [
+          "sweep-7",
+          "thread.session-set",
+          userMessageAt,
+          {
+            session: { status: "running", activeTurnId: "discarded", updatedAt: userMessageAt },
+          },
+        ],
+        ["sweep-7", "thread.reverted", finishedAt, { turnCount: 0 }],
+      ] as const) {
+        yield* insertEvent(id, eventType, at, payload, 1, "server");
+      }
+      for (const id of ["sweep-5", "sweep-6", "sweep-7"]) {
+        yield* insertEvent(
+          id,
+          "thread.session-set",
+          "2026-06-03T00:00:00.000Z",
+          {
+            session: {
+              status: "stopped",
+              activeTurnId: null,
+              updatedAt: "2026-06-03T00:00:00.000Z",
+            },
+          },
+          1,
+          "server",
         );
       }
       yield* sql`
@@ -197,6 +280,18 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
           settledOverride: index === 4 ? "active" : "settled",
           settledAt: index === 4 ? null : index === 3 ? manualAt : badStamp,
         };
+        if (index === 4) {
+          yield* insertEvent(
+            id,
+            "thread.metadata-updated",
+            badStamp,
+            {
+              ...thread,
+              settledOverride: "active",
+            },
+            2,
+          );
+        }
         if (index !== 2) yield* insertEvent(id, "thread.metadata-updated", manualAt, current, 2);
         yield* sql`
           INSERT INTO orchestration_v2_projection_threads (
@@ -232,7 +327,16 @@ layer("065_RepairClientSettlementTimestamps", (it) => {
           settled_at:
             index === 4
               ? null
-              : ([userMessageAt, createdAt, finishedAt, manualAt][index] ?? createdAt),
+              : ([
+                  userMessageAt,
+                  createdAt,
+                  finishedAt,
+                  manualAt,
+                  null,
+                  finishedAt,
+                  finishedAt,
+                  userMessageAt,
+                ][index] ?? createdAt),
         })),
       );
       assert.deepEqual(yield* untouched, untouchedBefore);
