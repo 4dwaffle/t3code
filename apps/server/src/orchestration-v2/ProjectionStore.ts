@@ -1385,7 +1385,6 @@ function visibleTurnItemsThroughRun(input: {
 function buildVisibleTurnItems(input: {
   readonly projection: OrchestrationV2ThreadProjection;
   readonly sourceProjection: OrchestrationV2ThreadProjection | null;
-  /** Inherited rows a window counted instead of reading; positions start after them. */
   readonly inheritedRowCount?: number;
 }): Array<OrchestrationV2ProjectedTurnItem> {
   const forkedFrom = input.projection.thread.forkedFrom;
@@ -2742,10 +2741,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ),
       );
 
-    // The rows a bounded window keeps for one thread: the newest user turns up
-    // to the limit (rows up to the limit when nothing starts a turn), the
-    // interrupt requests they depend on, and the latest row. Ends with the
-    // `retained` CTE so a read can fetch the payloads or only count the rows.
+    // Share selection so counting discarded ancestry preserves payload-read positions.
     const retainedWindowRows = (
       threadId: ThreadId,
       window: {
@@ -3553,12 +3549,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 };
               });
 
-        // A fork whose own turns fill its first page shows no inherited row
-        // there, but the inherited count still sets the page's positions and
-        // history cursor. Count the parent's retained rows instead of reading
-        // and decoding their bodies. The count mirrors visibleTurnItemsThroughRun
-        // for a parent with no inherited rows of its own: a parent that is itself
-        // a run fork returns NULL and keeps the full ancestry read.
+        // Filled local pages need only the inherited count for cursor positions.
+        // Run-forked parents still need the recursive read to include their ancestry.
         if (
           window?.userTurnLimit !== undefined &&
           window.historyAnchor === undefined &&
