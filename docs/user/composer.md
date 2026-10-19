@@ -170,10 +170,14 @@ changes and requires provider support for conversation rollback.
 Repeat the same request key to read its outcome. `REQUESTED` means accepted;
 `APPLIED` means completed. `FAILED` means the restore did not complete. `PARTIAL`
 means the provider or files may have changed and need inspection; the request will
-not run again. A rejected key stays rejected; use a new key for a new attempt.
+not run again. If the server cannot durably record completion, it conservatively
+reports `PARTIAL` even when the restore may have finished. A rejected key stays
+rejected; use a new key for a new attempt.
 Edits or queued work between acceptance and execution reject the restore. Stop
 external editors and other processes that write to the worktree before restoring:
 T3 serializes its own work, but cannot prevent external writes during restoration.
+T3 hashes every tracked and untracked non-ignored file at admission and again
+before execution, which can be slow in large worktrees.
 
 ## Prompt stash
 

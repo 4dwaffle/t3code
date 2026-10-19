@@ -46,7 +46,7 @@ const diff = Tool.make("t3_checkpoint_diff", {
   .annotate(Tool.Idempotent, true);
 const restore = Tool.make("t3_checkpoint_restore", {
   description:
-    "Restore an idle thread to an exact checkpoint from t3_checkpoint_list, discarding workspace changes. Requires discardChanges:true and a stable clientRequestId. REQUESTED is acceptance, not completion: repeat the same request to read APPLIED, FAILED or PARTIAL. A partial restore is never replayed. Only isolated worktrees and providers supporting conversation rollback and snapshots are supported.",
+    "Restore an idle thread to an exact checkpoint from t3_checkpoint_list, discarding workspace changes. Thread callers must pass another idle threadId because their own thread is running. Requires discardChanges:true and a stable clientRequestId. REQUESTED is acceptance, not completion: repeat the same request to read APPLIED, FAILED or PARTIAL. A partial restore is never replayed. Only isolated worktrees and providers supporting conversation rollback and snapshots are supported.",
   parameters: CheckpointMcpRestoreInput,
   success: CheckpointMcpRestoreResult,
   failure,

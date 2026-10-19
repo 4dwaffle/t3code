@@ -619,7 +619,7 @@ const make = Effect.gen(function* () {
       ));
     let accepted: CommandReceiptStore.CommandReceiptV2 | undefined;
     if (!supported || targetScope === undefined) {
-      // Persist business rejection too: fixing the target does not silently reuse an old key.
+      // Preflight bypasses command admission, but rejected keys must stay bound after target repairs.
       yield* receipts
         .insertIfAbsent({
           commandId,
