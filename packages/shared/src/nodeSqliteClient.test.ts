@@ -1570,9 +1570,9 @@ it.effect("keeps automatic checkpoints when mutation classification is unavailab
   ),
 );
 
-it.effect.skipIf(!supportsNoopCheckpoint)(
-  "lets the event loop run while draining queued writes",
-  () =>
+it.effect.each(["successful", "failed"] as const)(
+  "lets the event loop run while draining queued writes (%s)",
+  (outcome) =>
     withCheckpointClient((sql, filename) =>
       Effect.gen(function* () {
         const worker = startedWorkers.at(-1)!;
@@ -1599,7 +1599,16 @@ it.effect.skipIf(!supportsNoopCheckpoint)(
         for (let value = 0; value < 20; value++) {
           writes.push(
             yield* Effect.forkChild(
-              sql`INSERT INTO entries VALUES (${value})`.pipe(
+              sql`INSERT INTO entries VALUES (${outcome === "failed" ? "invalid" : value})`.pipe(
+                Effect.match({
+                  onSuccess: () => assert.equal(outcome, "successful"),
+                  onFailure: (error) => {
+                    assert.equal(outcome, "failed");
+                    assert.equal(error._tag, "SqlError");
+                    assert.equal(error.reason.operation, "execute");
+                    assert.include(String(error.reason.cause), "datatype mismatch");
+                  },
+                }),
                 Effect.tap(() =>
                   Effect.sync(() => {
                     if (++completed === 1) setImmediate(() => resolveHeartbeat(completed));
@@ -1615,9 +1624,17 @@ it.effect.skipIf(!supportsNoopCheckpoint)(
         assert.equal(completed, 0);
         reader.exec("ROLLBACK");
         checkpointRequests.release();
-        assert.isBelow(yield* Effect.promise(() => heartbeat), writes.length);
+        const completedAtHeartbeat = yield* Effect.promise(() => heartbeat);
         for (const write of writes) yield* Fiber.join(write);
-        assert.deepEqual(yield* sql`SELECT COUNT(*) AS count FROM entries`, [{ count: 20 }]);
+        assert.equal(completed, writes.length);
+        assert.deepEqual(
+          yield* sql`SELECT value FROM entries ORDER BY value`,
+          outcome === "failed"
+            ? []
+            : Array.from({ length: writes.length }, (_, value) => ({ value })),
+        );
+        assert.isBelow(completedAtHeartbeat, writes.length);
       }),
     ),
+  { skip: !supportsNoopCheckpoint },
 );
