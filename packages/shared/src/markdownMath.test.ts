@@ -156,6 +156,27 @@ describe("chat math parsing", () => {
     expect(formulas("Pay \\$$x$ now.")).toEqual([["inline", "x"]]);
   });
 
+  it.each([
+    ["$a`$HOME`", "$HOME"],
+    ["\\(a`\\)`", "\\)"],
+    ["\\(a\\alpha`\\)`", "\\)"],
+    ["text \\[a`\\]`", "\\]"],
+  ])("preserves an adjacent code span in %s", (source, code) => {
+    expect(formulas(source)).toEqual([]);
+    expect(collect(parse(source)).find((node) => node.type === "inlineCode")).toMatchObject({
+      value: code,
+    });
+  });
+
+  it.each([
+    ["$$ $$", ""],
+    ["$$  $$", ""],
+    ["$$\n$\n$$", "$"],
+    ["$$\n$$\n", ""],
+  ])("parses display math without empty content tokens in %j", (source, tex) => {
+    expect(formulas(source)).toEqual([["display", tex]]);
+  });
+
   it("keeps TeX escapes inside formulas", () => {
     expect(formulas("Cost $a\\$b$ and \\(\\left(x\\right)\\).")).toEqual([
       ["inline", "a\\$b"],

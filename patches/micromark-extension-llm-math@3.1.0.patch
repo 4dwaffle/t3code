@@ -18,7 +18,7 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
  
    return start
  
-@@ -79,7 +80,33 @@
+@@ -79,7 +80,32 @@
      }
  
      effects.exit('mathFlowFenceSequence')
@@ -48,12 +48,26 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
 +      return ok(code)
 +    }
 +
-+    effects.enter('mathFlowValue')
-+    return contentChunk(code)
++    return beforeContentChunk(code)
    }
  
    /**
-@@ -252,8 +279,65 @@
+@@ -230,6 +256,14 @@
+       )(code)
+     }
+ 
++    if (code === codes.dollarSign) {
++      return effects.attempt(
++        {tokenize: tokenizeInlineClosingFence, partial: true},
++        after,
++        resumeContentAfterFailedClose
++      )(code)
++    }
++
+     effects.enter('mathFlowValue')
+     return contentChunk(code)
+   }
+@@ -252,8 +286,65 @@
        return beforeContentChunk(code)
      }
  
@@ -119,7 +133,7 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
    }
  
    /**
-@@ -269,6 +353,7 @@
+@@ -269,6 +360,7 @@
     * @type {State}
     */
    function after(code) {
@@ -127,7 +141,7 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
      effects.exit('mathFlow')
      return ok(code)
    }
-@@ -357,6 +442,7 @@
+@@ -357,6 +449,7 @@
      function afterSequenceClose(code) {
        if (code === codes.eof || markdownLineEnding(code)) {
          effects.exit('mathFlowFence')
@@ -190,15 +204,16 @@ diff --git a/dev/lib/math-tex-text.js b/dev/lib/math-tex-text.js
        return nok(code)
      }
  
-@@ -124,6 +125,7 @@
+@@ -124,6 +125,8 @@
     * @type {State}
     */
    function data(code) {
++    if (code === codes.graveAccent) return nok(code)
 +    if (code !== codes.backslash && code !== codes.eof && code !== codes.space && code !== codes.comma && !markdownLineEnding(code) && !(code >= codes.digit0 && code <= codes.digit9)) substantive = true
      if (
        code === codes.eof ||
        code === codes.space ||
-@@ -155,6 +157,7 @@
+@@ -155,6 +158,7 @@
          ? codes.rightParenthesis
          : codes.rightSquareBracket
      if (code === closeSequenceCode) {
@@ -256,10 +271,11 @@ diff --git a/dev/lib/math-text.js b/dev/lib/math-text.js
          return sequenceClose(code)
        }
  
-@@ -144,6 +162,15 @@
+@@ -144,6 +162,16 @@
       * @type {State}
       */
      function data(code) {
++      if (code === codes.graveAccent) return nok(code)
 +      if (code === codes.dollarSign && slashes % 2 === 1) {
 +        slashes = 0
 +        effects.consume(code)
@@ -272,7 +288,7 @@ diff --git a/dev/lib/math-text.js b/dev/lib/math-text.js
        if (
          code === codes.eof ||
          code === codes.space ||
-@@ -179,9 +206,26 @@
+@@ -179,9 +207,26 @@
  
        // Done!
        if (size === sizeOpen) {
