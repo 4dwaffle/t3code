@@ -307,6 +307,7 @@ describe("idle compaction timing", () => {
       { ...providerTurn(value, {}, 0), id: ProviderTurnId.make("cached-turn"), ordinal: 2 },
     ];
     expect(idleCompactionCandidate(value, true, NOW_MS)?.promptCacheTtlMs).toBe(5 * MINUTE_MS);
+    expect(idleCompactionCandidate(value, true, NOW_MS + 5 * MINUTE_MS)).toBeNull();
     expect(idleCompactionCandidate(projection(), true, NOW_MS)?.promptCacheTtlMs).toBe(
       30 * MINUTE_MS,
     );

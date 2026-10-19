@@ -156,7 +156,13 @@ export function idleCompactionCandidate(
     providerThread.driver,
     usages.find((usage) => usage.promptCacheTtlMs !== undefined)?.promptCacheTtlMs,
   );
-  if (promptCacheTtlMs === null) return null;
+  // Dispatch rechecks this under the thread lock, so a delivery that waited past
+  // the TTL cannot compact a cold cache. The dev delay override only shortens it.
+  if (
+    promptCacheTtlMs === null ||
+    nowMs >= DateTime.toEpochMillis(latestRun.completedAt) + promptCacheTtlMs
+  )
+    return null;
   const usedTokens = usages[0]?.usedTokens ?? providerThread.contextUsage?.usedTokens;
   if (
     usedTokens === undefined ||
