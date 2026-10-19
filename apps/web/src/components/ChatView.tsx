@@ -6543,6 +6543,9 @@ export default function ChatView(props: ChatViewProps) {
       // the user sent.
       const attachmentIdsAtSend = composerAttachmentsSnapshot.map((attachment) => attachment.id);
       const draftChangedSinceSend = () => {
+        // A direct annotation send writes its image and reference into the draft as it sends,
+        // so the live draft trails the message by design.
+        if (directAnnotation) return false;
         const sendContext = composerRef.current?.getSendContext();
         const attachmentIds = sendContext
           ? [...sendContext.images, ...sendContext.files].map((attachment) => attachment.id)
