@@ -48,6 +48,9 @@ const fullscreenSupported =
   typeof HTMLElement !== "undefined" && "popover" in HTMLElement.prototype;
 
 const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+// How long a click or key press anywhere on the page activates it: 5 seconds
+// in Chromium, Firefox and WebKit.
+const PAGE_ACTIVATION_MS = 5_000;
 
 function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
@@ -167,6 +170,22 @@ export function McpAppFrame(props: {
   useEffect(() => {
     latest.current = live;
   });
+
+  // Input inside the app's frame never reaches this window, so this records
+  // only the reader's clicks and keys elsewhere in T3. It starts at mount
+  // because the click that opened the thread may still activate the page.
+  const lastPageInputAt = useRef(Number.NEGATIVE_INFINITY);
+  useEffect(() => {
+    const note = () => {
+      lastPageInputAt.current = performance.now();
+    };
+    note();
+    const types = ["pointerdown", "pointerup", "touchend", "keydown"] as const;
+    for (const type of types) window.addEventListener(type, note, true);
+    return () => {
+      for (const type of types) window.removeEventListener(type, note, true);
+    };
+  }, []);
 
   useEffect(() => {
     const box = boxRef.current;
@@ -342,12 +361,15 @@ export function McpAppFrame(props: {
       requestDisplayMode: async (mode) => {
         // Full screen opens only right after the reader used this frame, as
         // links do: an app that asks on load or on every retry would otherwise
-        // take the page back each time the reader leaves.
+        // take the page back each time the reader leaves. An app can focus its
+        // own frame, so activation left by a click elsewhere in T3, such as
+        // the one that left full screen, has to run out before a tap counts.
         const otherFullscreen = document.querySelector("[data-mcp-app-fullscreen]");
         if (
           mode === "fullscreen" &&
           (document.activeElement !== frameRef.current ||
             !navigator.userActivation?.isActive ||
+            performance.now() - lastPageInputAt.current < PAGE_ACTIVATION_MS ||
             latest.current.props.awaitingUser === true ||
             isConfirmDialogActive() ||
             (otherFullscreen !== null && otherFullscreen !== boxRef.current))
