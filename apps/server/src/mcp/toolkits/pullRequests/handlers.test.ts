@@ -450,8 +450,8 @@ describe("pull request toolkit handlers", () => {
       const watched = yield* harness.call("watch_pull_request", target);
       expect([linked.url, watched.url]).toEqual([url, url]);
       expect(yield* Ref.get(harness.detailRequests)).toEqual([
-        { projectId: PROJECT_ID, host: "code.example", ...target },
-        { projectId: PROJECT_ID, host: "code.example", ...target },
+        { projectId: PROJECT_ID, host: "code.example", ...target, webUrl: null },
+        { projectId: PROJECT_ID, host: "code.example", ...target, webUrl: null },
       ]);
       expect(yield* Ref.get(harness.commands)).toMatchObject([
         { type: "thread.pull-request.link", ...target, url, repositoryWebUrl: url },
@@ -464,7 +464,7 @@ describe("pull request toolkit handlers", () => {
     }),
   );
 
-  it.effect("does not link or watch a GitLab MR when resolving its actual URL fails", () =>
+  it.effect("requires GitLab URL resolution only when creating a link or watch", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         project: gitlabProject,
@@ -483,6 +483,28 @@ describe("pull request toolkit handlers", () => {
         _tag: "Failure",
         failure: { _tag: "PullRequestWatchFailedError" },
       });
+
+      const url = "http://code.example:8924/gitlab/gitlab/team/subgroup/project/-/merge_requests/1";
+      const existing = yield* makeHarness({
+        project: gitlabProject,
+        thread: makeThread([
+          makeLink(1, { ...target, host: "code.example", url, repositoryWebUrl: url }),
+        ]),
+        detail: () =>
+          Effect.fail(new PullRequestOperationError({ operation: "detail", detail: "host down" })),
+      });
+      const result = yield* existing.call("watch_pull_request", target).pipe(Effect.result);
+      expect(yield* Ref.get(existing.detailRequests)).toEqual([]);
+      expect(yield* Ref.get(existing.commands)).toMatchObject([
+        {
+          type: "thread.pull-request.watch",
+          threadId: THREAD_ID,
+          host: "code.example",
+          ...target,
+          watching: true,
+        },
+      ]);
+      expect(result).toMatchObject({ _tag: "Success", success: { url } });
     }),
   );
 

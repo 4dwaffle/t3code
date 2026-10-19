@@ -524,7 +524,7 @@ describe("PullRequestSyncReactor", () => {
             yield* reactor.drain;
             assert.strictEqual(
               (yield* Ref.get(fixture.summaryCalls)).at(-1)?.webUrl,
-              repositoryWebUrl,
+              repositoryWebUrl ?? null,
             );
           }
         }).pipe(Effect.provide(fixture.layer));

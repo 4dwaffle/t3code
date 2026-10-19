@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 import type {
   OrchestrationProjectShell,
   ProjectId,
+  PullRequestRef,
   PullRequestReviewCapabilities,
   PullRequestReviewerCapabilities,
 } from "@t3tools/contracts";
@@ -2607,7 +2608,7 @@ it.effect("resolves a project's repository identity when its shell has none cach
   }),
 );
 
-it.effect("routes a hosted reference to another repository through a project on that host", () =>
+it.effect("routes hosted references without confusing raw selectors with checkout URLs", () =>
   Effect.gen(function* () {
     const seen: Array<{ cwd: string; repository: string; host: string }> = [];
     const service = yield* makeService({
@@ -2632,6 +2633,54 @@ it.effect("routes a hosted reference to another repository through a project on 
 
     assert.strictEqual(summary.number, 7);
     assert.deepStrictEqual(seen, [{ cwd: "/web", repository: "acme/api", host: "github.com" }]);
+
+    const host = "code.example";
+    const repository = "gitlab/team/subgroup/project";
+    const checkoutUrl = `http://${host}:8924/gitlab/team/subgroup/project.git`;
+    const urls = [
+      `http://${host}:8924/gitlab/team/subgroup/project/-/merge_requests/1`,
+      `http://${host}:8924/gitlab/gitlab/team/subgroup/project/-/merge_requests/1`,
+    ];
+    const reads: Array<Parameters<PullRequestProviderApi["getChangeRequest"]>[0]> = [];
+    const gitlab = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "HTTP checkout of project 1",
+          workspaceRoot: "/gitlab",
+          repository,
+          host,
+          provider: "gitlab",
+          remoteUrl: checkoutUrl,
+        }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("gitlab"), {
+          getChangeRequest: (input) =>
+            Effect.sync(() => {
+              reads.push(input);
+              return {
+                ...hostedChangeRequest(""),
+                title: input.webUrl === undefined ? "Project 2 MR" : "Project 1 MR",
+                url: urls[input.webUrl === undefined ? 1 : 0]!,
+              };
+            }),
+        }),
+      ],
+    });
+    const reference = { projectId: "p1" as ProjectId, host, repository, number: 1 };
+    const rawSelection = { ...reference, webUrl: null };
+    const rawReference: PullRequestRef = rawSelection;
+    const raw = yield* gitlab.detail(rawReference);
+    const checkout = yield* gitlab.detail(reference);
+    assert.strictEqual(checkout.title, "Project 1 MR");
+    assert.strictEqual(checkout.url, urls[0]);
+    assert.strictEqual(raw.title, "Project 2 MR");
+    assert.strictEqual(raw.url, urls[1]);
+    assert.deepStrictEqual(reads, [
+      { cwd: "/gitlab", host, repository, number: 1 },
+      { cwd: "/gitlab", host, repository, number: 1, webUrl: checkoutUrl },
+    ]);
   }),
 );
 
