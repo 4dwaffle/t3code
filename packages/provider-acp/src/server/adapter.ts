@@ -7169,9 +7169,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                           interruptContext.providerTurnId === turnInput.providerTurnId)
                       ) {
                         // ACP cancel leaves native children alive; close confirms session-wide Stop.
-                        const carryover = yield* Ref.get(carryoverSubagents);
-                        const wasQuarantined = yield* Ref.get(stoppedRunQuarantine);
-                        yield* Ref.set(stoppedRunQuarantine, true);
                         const closed = yield* runtime.closeSession().pipe(
                           Effect.timeoutOption("10 seconds"),
                           Effect.mapError(
@@ -7183,26 +7180,32 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                                 cause,
                               }),
                           ),
-                          Effect.tapError(() => Ref.set(stoppedRunQuarantine, wasQuarantined)),
                         );
                         if (Option.isNone(closed)) {
-                          yield* Ref.set(stoppedRunQuarantine, wasQuarantined);
                           return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                             driver,
                             detail:
                               "The agent did not confirm session close; background work may still run",
                           });
                         }
-                        yield* Ref.set(runtimeRestartRequired, true);
-                        agentWork = null;
-                        agentRequests.clear();
-                        yield* quarantineStoppedRun();
-                        if (interruptContext !== null) interruptContext.interrupted = true;
-                        yield* cancelPendingRuntimeRequests();
-                        yield* terminalizeCarryoverSubagents(carryover);
-                        if (interruptContext !== null) {
-                          yield* finalizeTurn(interruptContext, "interrupted");
-                        }
+                        yield* runtimeCallbackPermit.withPermit(
+                          Effect.gen(function* () {
+                            // Callbacks can settle the turn while close is awaiting confirmation.
+                            const context = yield* Ref.get(activeTurn);
+                            const carryover = yield* Ref.get(carryoverSubagents);
+                            yield* Ref.set(stoppedRunQuarantine, true);
+                            yield* Ref.set(runtimeRestartRequired, true);
+                            agentWork = null;
+                            agentRequests.clear();
+                            yield* quarantineStoppedRun();
+                            if (context !== null) context.interrupted = true;
+                            yield* cancelPendingRuntimeRequests();
+                            yield* terminalizeCarryoverSubagents(carryover);
+                            if (context !== null) {
+                              yield* finalizeTurn(context, "interrupted");
+                            }
+                          }),
+                        );
                         return undefined;
                       }
                       const softSteerCandidate =
