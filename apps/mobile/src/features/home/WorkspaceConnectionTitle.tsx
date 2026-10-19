@@ -1,5 +1,5 @@
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Animated, Platform, Pressable, View } from "react-native";
 
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
@@ -65,7 +65,7 @@ function StatusFadeIn(props: {
   readonly maxWidth?: number;
 }) {
   const { animate } = props;
-  const opacity = useRef(new Animated.Value(animate ? 0 : 1)).current;
+  const [opacity] = useState(() => new Animated.Value(animate ? 0 : 1));
 
   useEffect(() => {
     if (!animate) return;

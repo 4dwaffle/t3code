@@ -265,29 +265,23 @@ export function PullRequestListFilters(props: {
     author ?? "",
   );
   const customized = count > 0 || value.sort !== "updated" || props.environmentId !== null;
-  // The Android header's filter button opens every filter. The menu is a pure function of the
-  // controls and facets, so it is keyed on those and the header only re-renders when one changes.
-  const { environmentId, onEnvironmentChange, onChange } = props;
-  const facetsKey = JSON.stringify([props.authors, props.labels, props.environments]);
-  const headerMenu = useMemo(
-    () =>
-      Platform.OS === "android"
-        ? {
-            actions: [
-              { id: "environment", title: "Environment", subactions: environmentActions },
-              { id: "state", title: "State", subactions: stateActions },
-              { id: "involvement", title: "Involvement", subactions: involvementActions },
-              { id: "labels", title: "Labels", subactions: labelActions },
-              { id: "author", title: "Author", subactions: authorActions },
-              ...more,
-              reset(true),
-            ],
-            onSelect: select,
-            customized,
-          }
-        : null,
-    [value, environmentId, onEnvironmentChange, onChange, projects, facetsKey, customized],
-  );
+  // The Android header's filter button opens every filter.
+  const headerMenu =
+    Platform.OS === "android"
+      ? {
+          actions: [
+            { id: "environment", title: "Environment", subactions: environmentActions },
+            { id: "state", title: "State", subactions: stateActions },
+            { id: "involvement", title: "Involvement", subactions: involvementActions },
+            { id: "labels", title: "Labels", subactions: labelActions },
+            { id: "author", title: "Author", subactions: authorActions },
+            ...more,
+            reset(true),
+          ],
+          onSelect: select,
+          customized,
+        }
+      : null;
   usePublishPullRequestFilterMenu(headerMenu);
   return (
     <ScrollView
