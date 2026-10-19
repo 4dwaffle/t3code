@@ -1480,6 +1480,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           input.runtimePolicy;
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveAcpTurn | null>(null);
+        let pendingStopCloseTurn: ActiveAcpTurn | null = null;
         let followsAgentWorkState = false;
         let agentWork: Extract<
           EffectAcpSchema.SessionUpdate,
@@ -3792,6 +3793,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           )
             return;
           const work = agentWork;
+          // Native close sends cancelled idle before acknowledging the user's Stop.
+          if (work.stopReason === "cancelled" && pendingStopCloseTurn === context) {
+            context.interrupted = true;
+          }
           const failure =
             work.stopReason === "error"
               ? (flavor.promptFailure?.(
@@ -7169,6 +7174,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                           interruptContext.providerTurnId === turnInput.providerTurnId)
                       ) {
                         // ACP cancel leaves native children alive; close confirms session-wide Stop.
+                        pendingStopCloseTurn = interruptContext;
                         const closed = yield* runtime.closeSession().pipe(
                           Effect.timeoutOption("10 seconds"),
                           Effect.mapError(
@@ -7179,6 +7185,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                                   "The agent refused to close its session; background work may still run",
                                 cause,
                               }),
+                          ),
+                          Effect.ensuring(
+                            Effect.sync(() => {
+                              pendingStopCloseTurn = null;
+                            }),
                           ),
                         );
                         if (Option.isNone(closed)) {
