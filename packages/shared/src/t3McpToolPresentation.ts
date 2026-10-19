@@ -167,7 +167,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   t3_checkpoint_list: tool(["List", "Listing", "Listed", "thread checkpoints"], "checkpoint-list"),
   t3_checkpoint_restore: tool(
-    ["Restore", "Restoring", "Restored", "a checkpoint"],
+    ["Request restore of", "Requesting restore of", "Requested restore of", "a checkpoint"],
     "checkpoint-restore",
   ),
   t3_checkpoint_diff: tool(["Read", "Reading", "Read", "a checkpoint diff"], "checkpoint-diff"),
