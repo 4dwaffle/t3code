@@ -135,7 +135,7 @@ async function readCapturedWindowAccessibility(
     bounds: active.bounds,
     clientBounds: active.clientBounds,
     platform,
-    bundleId: active.owner.bundleId,
+    bundleId: pidWindows.length > 0 ? active.owner.bundleId : undefined,
   };
   const window = findAccessibleWindow(
     pidWindows.length > 0 || foreground !== undefined ? pidWindows : await windowsFromAppList(App),
