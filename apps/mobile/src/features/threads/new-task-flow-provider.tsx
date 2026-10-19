@@ -959,14 +959,16 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     const text = draft.text.trim();
     const workspaceSelection = canChooseWorkspace ? draft.workspaceSelection : undefined;
     const mode = workspaceSelection?.mode ?? workspaceMode;
+    const cwd =
+      mode === "worktree"
+        ? selectedProject.workspaceRoot
+        : (workspaceSelection?.worktreePath ?? selectedProject.workspaceRoot);
     const draftModelSelection =
       resolveSelectableModelSelection(
         selectedEnvironmentServerConfig,
         draft.modelSelection ?? null,
         selectedProject.id,
-        mode === "worktree"
-          ? selectedProject.workspaceRoot
-          : (workspaceSelection?.worktreePath ?? selectedProject.workspaceRoot),
+        cwd,
       ) ?? selectedModel;
     if ((text.length === 0 && draft.attachments.length === 0) || !draftModelSelection) {
       return null;

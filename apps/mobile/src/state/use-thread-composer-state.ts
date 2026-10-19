@@ -301,11 +301,12 @@ export function useThreadComposerState() {
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
   const selectedThread = selectedThreadShell;
   const rawModelSelection = selectedDraft.modelSelection ?? selectedThread?.modelSelection ?? null;
+  const selectedThreadProjectId = selectedThread?.projectId ?? null;
   const modelSelection =
     resolveSelectableModelSelection(
       selectedEnvironmentRuntime?.serverConfig,
       rawModelSelection,
-      selectedThread?.projectId ?? null,
+      selectedThreadProjectId,
       selectedThreadCwd,
     ) ?? rawModelSelection;
   const pendingHandoff = resolvePendingHandoff(
