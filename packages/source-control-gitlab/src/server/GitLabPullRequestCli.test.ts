@@ -374,56 +374,94 @@ layer("GitLabPullRequestCli.layer", (it) => {
     }),
   );
 
-  it.effect("merges immediately rather than leaving auto-merge armed", () =>
-    Effect.gen(function* () {
-      mockedExecute.mockReturnValueOnce(Effect.succeed(output("")));
-      const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
+  it.effect.each([
+    { action: "merge", autoMerge: "false" },
+    { action: "enable-auto-merge", autoMerge: "true" },
+  ] as const)(
+    "$action succeeds on a project requiring the current source SHA",
+    ({ action, autoMerge }) =>
+      Effect.gen(function* () {
+        const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
 
-      yield* cli.runMergeRequestAction({
-        cwd: "/w",
-        repository: "acme/web",
-        number: 7,
-        action: "merge",
-        mergeMethod: "squash",
-      });
+        for (const headSha of ["first-head", "updated-head"]) {
+          mockedExecute.mockImplementation(({ cwd, args }) => {
+            if (args[0] === "api") {
+              return Effect.succeed(
+                output(
+                  mergeRequestJson({
+                    diff_refs: { base_sha: "base", head_sha: headSha, start_sha: "start" },
+                  }),
+                ),
+              );
+            }
+            if (args[args.indexOf("--sha") + 1] !== headSha) {
+              return Effect.fail(
+                new GitLabCli.GitLabCliCommandError({
+                  operation: "execute",
+                  command: "glab",
+                  cwd,
+                  cause: new Error("SHA must match the current source branch HEAD"),
+                }),
+              );
+            }
+            return Effect.succeed(output(""));
+          });
 
-      expect(argsOfCall(0)).toEqual([
-        "mr",
-        "merge",
-        "7",
-        "--repo",
-        "acme/web",
-        "--auto-merge=false",
-        "--yes",
-        "--squash",
-      ]);
-    }),
+          yield* cli.runMergeRequestAction({
+            cwd: "/w",
+            repository: "acme/web",
+            number: 7,
+            action,
+            mergeMethod: "squash",
+          });
+
+          expect(mockedExecute.mock.calls.slice(-2).map(([input]) => input.args)).toEqual([
+            ["api", "projects/acme%2Fweb/merge_requests/7"],
+            [
+              "mr",
+              "merge",
+              "7",
+              "--repo",
+              "acme/web",
+              `--auto-merge=${autoMerge}`,
+              "--yes",
+              "--squash",
+              "--sha",
+              headSha,
+            ],
+          ]);
+        }
+        expect(mockedExecute).toHaveBeenCalledTimes(4);
+      }),
   );
 
-  it.effect("arms auto-merge with the same strategy a merge would have used", () =>
-    Effect.gen(function* () {
-      mockedExecute.mockReturnValueOnce(Effect.succeed(output("")));
-      const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
+  it.effect.each(["merge", "enable-auto-merge"] as const)(
+    "does not run %s when GitLab has no diff revisions",
+    (action) =>
+      Effect.gen(function* () {
+        mockedExecute.mockReturnValue(
+          Effect.succeed(output(mergeRequestJson({ diff_refs: null }))),
+        );
+        const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
 
-      yield* cli.runMergeRequestAction({
-        cwd: "/w",
-        repository: "acme/web",
-        number: 7,
-        action: "enable-auto-merge",
-        mergeMethod: "squash",
-      });
+        const result = yield* Effect.result(
+          cli.runMergeRequestAction({
+            cwd: "/w",
+            repository: "acme/web",
+            number: 7,
+            action,
+            mergeMethod: "squash",
+          }),
+        );
 
-      expect(argsOfCall(0)).toEqual([
-        "mr",
-        "merge",
-        "7",
-        "--repo",
-        "acme/web",
-        "--auto-merge=true",
-        "--yes",
-        "--squash",
-      ]);
-    }),
+        expect(mockedExecute.mock.calls.map(([input]) => input.args)).toEqual([
+          ["api", "projects/acme%2Fweb/merge_requests/7"],
+        ]);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: { _tag: "GitLabDiffRefsUnavailableError" },
+        });
+      }),
   );
 
   it.effect("cancels an armed auto-merge through the API glab has no flag for", () =>

@@ -1277,25 +1277,28 @@ export const make = Effect.gen(function* () {
         Effect.asVoid,
       ),
 
-    runMergeRequestAction: (input) => {
-      // `glab mr merge` arms auto-merge and never disarms it, so the one direction the CLI has
-      // no flag for is asked of GitLab directly through the same `api` passthrough the rest of
-      // this module writes with.
-      if (input.action === "disable-auto-merge") {
-        return api({
-          cwd: input.cwd,
-          path: `projects/${projectPath(input.repository)}/merge_requests/${input.number}/cancel_merge_when_pipeline_succeeds`,
-          method: "POST",
-        }).pipe(Effect.asVoid);
-      }
-      const [subcommand, ...flags] = actionArgs(input.action, input.mergeMethod);
-      return gitlab
-        .execute({
+    runMergeRequestAction: (input) =>
+      Effect.gen(function* () {
+        // `glab mr merge` arms auto-merge and never disarms it, so the one direction the CLI has
+        // no flag for is asked of GitLab directly through the same `api` passthrough the rest of
+        // this module writes with.
+        if (input.action === "disable-auto-merge") {
+          return yield* api({
+            cwd: input.cwd,
+            path: `projects/${projectPath(input.repository)}/merge_requests/${input.number}/cancel_merge_when_pipeline_succeeds`,
+            method: "POST",
+          }).pipe(Effect.asVoid);
+        }
+        const [subcommand, ...flags] = actionArgs(input.action, input.mergeMethod);
+        if (input.action === "merge" || input.action === "enable-auto-merge") {
+          const refs = yield* getDiffRefs(input);
+          flags.push("--sha", refs.headSha);
+        }
+        yield* gitlab.execute({
           cwd: input.cwd,
           args: ["mr", subcommand!, String(input.number), "--repo", input.repository, ...flags],
-        })
-        .pipe(Effect.asVoid);
-    },
+        });
+      }),
 
     updateMergeRequest: (input) =>
       api({
