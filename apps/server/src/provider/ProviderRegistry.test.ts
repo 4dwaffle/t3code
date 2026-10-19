@@ -710,6 +710,47 @@ it.layer(
         { name: "replacement" },
       ]);
       assert.strictEqual(recovered.workspaceSnapshots?.[0]?.slashCommandsPending, undefined);
+
+      const { optionDescriptors, ...failedSnapshot } = scopedSnapshot;
+      const firstFailure = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        provider,
+        "/project",
+        failedSnapshot,
+      );
+      assert.strictEqual(
+        Object.hasOwn(firstFailure.workspaceSnapshots![0]!, "optionDescriptors"),
+        false,
+      );
+      const failedOtherProject = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        recovered,
+        "/other-project",
+        failedSnapshot,
+      );
+      assert.strictEqual(
+        Object.hasOwn(failedOtherProject.workspaceSnapshots![1]!, "optionDescriptors"),
+        false,
+      );
+
+      for (const clearedDescriptors of [[], [{ ...optionDescriptors[0]!, options: [] }]]) {
+        const cleared = ProviderRegistry.upsertProviderWorkspaceSnapshot(recovered, "/project", {
+          ...scopedSnapshot,
+          optionDescriptors: clearedDescriptors,
+        });
+        assert.deepStrictEqual(
+          cleared.workspaceSnapshots?.[0]?.optionDescriptors,
+          clearedDescriptors,
+        );
+      }
+
+      const failedRefresh = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        failedOtherProject,
+        "/project",
+        failedSnapshot,
+      );
+      assert.deepStrictEqual(
+        failedRefresh.workspaceSnapshots?.[1]?.optionDescriptors,
+        optionDescriptors,
+      );
     });
 
     it("preserves previously discovered provider models when a refresh returns none", () => {
