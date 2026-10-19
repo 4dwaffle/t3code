@@ -16,12 +16,11 @@ export const REQUEST_BYTES = 1024;
 export const RESPONSE_BYTES = 64 * 1024;
 // Idle/incomplete peers and blocked response consumers must not retain sockets.
 export const SOCKET_IDLE_MS = 5_000;
-// Existing lock retry (40s), OAuth (20s), plus startup/store headroom (20s).
-export const COMMAND_TIMEOUT_MS = 80_000;
-export class ProtocolError extends Schema.TaggedError<ProtocolError>()(
-  "ManagedTokenProtocolError",
-  {},
-) {}
+class ProtocolError extends Schema.TaggedError<ProtocolError>()("ManagedTokenProtocolError", {}) {
+  override get message(): string {
+    return "The managed token frame was invalid or incomplete.";
+  }
+}
 
 export const readFrame = (socket: NodeNet.Socket, maxBytes: number, timeoutMs: number) =>
   Effect.callback<string, ProtocolError>((resume) => {
