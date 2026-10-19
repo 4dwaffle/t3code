@@ -8,9 +8,10 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
-import * as EffectAcpSchema from "effect-acp/schema";
+import type * as EffectAcpSchema from "effect-acp/compat";
+import * as AcpWireSchema from "effect-acp/schema-v1";
 
-import type { AcpToolCallState } from "./AcpRuntimeModel.ts";
+import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
 
 const TOOL_TEXT_LIMIT = 8_000;
 const TOOL_TEXT_TRUNCATED = "[Earlier output truncated]\n\n";
@@ -36,7 +37,7 @@ const decodeNativeToolFields = Schema.decodeUnknownOption(NativeToolFields);
 const decodeSingleAnswer = Schema.decodeUnknownOption(
   Schema.Union([Schema.String, Schema.Tuple([Schema.String])]),
 );
-const decodeToolCallContent = Schema.decodeUnknownOption(EffectAcpSchema.ToolCallContent);
+const decodeToolCallContent = Schema.decodeUnknownOption(AcpWireSchema.ToolCallContent);
 
 /** Native questions share the permission method, but their choices are not approvals. */
 export function isAntigravityUserInputRequest(
@@ -72,9 +73,7 @@ const decodeSecurityWarning = Schema.decodeUnknownOption(
  * The agent marks "Allow Always" on shell and web tools with a prompt injection
  * warning in `_meta`. Surface it as option text so both clients can show it.
  */
-export function antigravitySecurityWarning(
-  option: EffectAcpSchema.PermissionOption,
-): string | undefined {
+function antigravitySecurityWarning(option: EffectAcpSchema.PermissionOption): string | undefined {
   const meta = option._meta;
   if (!Predicate.isObject(meta)) return undefined;
   const warning = Option.getOrUndefined(decodeSecurityWarning(meta[SECURITY_WARNING_META_KEY]));
@@ -85,7 +84,6 @@ export function antigravitySecurityWarning(
     : text;
 }
 
-/** Only advertise decisions that the native request can honor. */
 export function antigravityApprovalOptions(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): ReadonlyArray<ProviderApprovalOption> {
@@ -155,7 +153,6 @@ export function extractAntigravityUserInputQuestion(
   };
 }
 
-/** Return undefined for an invalid answer so the adapter keeps the question open. */
 export function makeAntigravityUserInputResponse(
   request: EffectAcpSchema.RequestPermissionRequest,
   answers: ProviderUserInputAnswers,
@@ -231,12 +228,10 @@ function sanitizeToolValue(value: unknown, budget: ToolPayloadBudget, depth: num
   return Object.fromEntries(entries);
 }
 
-/** Bound both retained raw events and display data before they enter the event stream. */
 export function sanitizeAntigravityToolPayload(payload: unknown): unknown {
   return sanitizeToolValue(payload, { nodes: 512, text: 64_000 }, 0);
 }
 
-/** The runtime uses this before it retains tool state or dispatches raw callbacks. */
 export function normalizeAntigravitySessionUpdate(
   notification: EffectAcpSchema.SessionNotification,
 ): EffectAcpSchema.SessionNotification {
@@ -264,7 +259,9 @@ export function normalizeAntigravitySessionUpdate(
         ? { rawOutput: sanitizeAntigravityToolPayload(update.rawOutput) }
         : {}),
       ...(update.content !== undefined ? { content: content ?? [] } : {}),
-      ...(update._meta !== undefined ? { _meta: Predicate.isObject(meta) ? meta : null } : {}),
+      ...(update._meta !== undefined
+        ? { _meta: Schema.is(Schema.Record(Schema.String, Schema.Json))(meta) ? meta : null }
+        : {}),
     },
   };
 }
@@ -345,15 +342,17 @@ export function normalizeAntigravityToolCall(toolCall: AcpToolCallState): AcpToo
   };
 }
 
-/** Only commands still running after end_turn become background tasks. */
 export function isAntigravityOpenCommand(toolCall: AcpToolCallState): boolean {
   return toolCall.kind === "execute" && toolCall.status === "inProgress";
 }
 
-/** ACP 1.1.1 exposes subagent invocations as ordinary tools, without child IDs or models. */
+/**
+ * ACP 1.1.1 exposes subagent invocations as ordinary tools, without child IDs
+ * or models.
+ */
 export function classifyAntigravitySubagentToolCall(
   toolCall: AcpToolCallState,
-  rawPayload: unknown,
+  rawPayload?: unknown,
 ): "subagent" | "mcp" | undefined {
   if (
     (toolCall.kind !== undefined && toolCall.kind !== "other") ||
@@ -361,7 +360,7 @@ export function classifyAntigravitySubagentToolCall(
   )
     return undefined;
   const update = Predicate.isObject(rawPayload) ? rawPayload.update : undefined;
-  const meta = Predicate.isObject(update) ? update._meta : undefined;
+  const meta = Predicate.isObject(update) ? update._meta : toolCall.data.meta;
   return Predicate.isObject(meta) && meta.is_mcp_tool_call === true ? "mcp" : "subagent";
 }
 

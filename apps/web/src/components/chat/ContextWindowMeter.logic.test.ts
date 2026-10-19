@@ -5,8 +5,10 @@ import {
   formatContextWindowCompactionMessage,
   hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
+  formatContextWindowCost,
   resolveContextWindowModelDisplayName,
   shouldOfferResumeCompaction,
+  shouldReserveContextWindowMeter,
 } from "./ContextWindowMeter.logic";
 
 function claudeProvider(input: {
@@ -171,6 +173,19 @@ describe("shouldOfferResumeCompaction", () => {
     ).toBe(false);
   });
 
+  it("uses the reported prompt cache TTL instead of the fallback", () => {
+    const offer = (updatedAt: string) =>
+      shouldOfferResumeCompaction({
+        provider: "claudeAgent",
+        usedTokens: 200_000,
+        updatedAt,
+        promptCacheTtlMs: 5 * 60_000,
+        now,
+      });
+    expect(offer("2026-08-24T11:55:00.000Z")).toBe(true);
+    expect(offer("2026-08-24T11:56:00.000Z")).toBe(false);
+  });
+
   it("does not show Claude's resume prompt for another provider", () => {
     expect(
       shouldOfferResumeCompaction({
@@ -234,5 +249,61 @@ describe("hasDismissedResumeCompaction", () => {
         { kind: "user-input.resolved", payload: { answers: ["Don't ask again"] } },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("shouldReserveContextWindowMeter", () => {
+  const loadingStartedThread = {
+    meterEnabled: true,
+    detailLoading: true,
+    threadStarted: true,
+    providerReportsContextWindow: true,
+  };
+
+  it("holds the meter's slot while a started thread's detail loads", () => {
+    expect(shouldReserveContextWindowMeter(loadingStartedThread)).toBe(true);
+  });
+
+  it("reserves nothing once the detail is in", () => {
+    expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, detailLoading: false })).toBe(
+      false,
+    );
+  });
+
+  it("reserves nothing for a thread that never ran a turn", () => {
+    expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, threadStarted: false })).toBe(
+      false,
+    );
+  });
+
+  it("reserves while the thread's provider is not in the catalog yet", () => {
+    expect(
+      shouldReserveContextWindowMeter({
+        ...loadingStartedThread,
+        providerReportsContextWindow: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("reserves nothing for a provider that does not stream usage", () => {
+    expect(
+      shouldReserveContextWindowMeter({
+        ...loadingStartedThread,
+        providerReportsContextWindow: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("reserves nothing while the meter is switched off", () => {
+    expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, meterEnabled: false })).toBe(
+      false,
+    );
+  });
+});
+
+describe("formatContextWindowCost", () => {
+  it("keeps ordinary and sub-cent ACP costs readable", () => {
+    expect(formatContextWindowCost({ amount: 0.42, currency: "USD" })).toBe("USD 0.42");
+    expect(formatContextWindowCost({ amount: 0.0042, currency: "USD" })).toBe("USD 0.0042");
   });
 });

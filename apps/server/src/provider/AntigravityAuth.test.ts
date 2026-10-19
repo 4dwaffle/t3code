@@ -10,14 +10,14 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as AcpErrors from "effect-acp/errors";
-import type * as AcpSchema from "effect-acp/schema";
+import type * as AcpSchema from "effect-acp/compat";
 
 import {
   makeAntigravityAuth,
   type AntigravityAuth,
   type AntigravityAuthRuntime,
 } from "./AntigravityAuth.ts";
-import type { AcpSessionRuntimeStartResult } from "./acp/AcpSessionRuntime.ts";
+import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
 const instanceId = ProviderInstanceId.make("antigravity-auth-test");
 const owner = "t3-auth-session-owner";
@@ -31,7 +31,7 @@ const initialized = {
   authMethods: [{ id: "oauth-personal", name: "Log in with Google" }],
   agentCapabilities: { auth: { logout: {} } },
 } satisfies AcpSchema.InitializeResponse;
-const started: AcpSessionRuntimeStartResult = {
+const started: AcpSessionRuntime.AcpSessionRuntimeStartResult = {
   sessionId: "native-session",
   initializeResult: initialized,
   sessionSetupResult: {
@@ -61,7 +61,7 @@ const makeHarness = Effect.fn("makeAuthTestHarness")(function* (
   } = {},
 ) {
   const authenticated = yield* Deferred.make<void, AcpErrors.AcpError>();
-  const discovered = yield* Deferred.make<void>();
+  const discovered = yield* Deferred.make<void, AcpErrors.AcpError>();
   const closed = yield* Deferred.make<void>();
   const events: string[] = [];
   let receiveAuthorizationUrl:
@@ -224,6 +224,33 @@ it.layer(NodeServices.layer)("AntigravityAuth", (it) => {
     }),
   );
 
+  it.effect(
+    "distinguishes a post-authentication session failure without exposing its payload",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.auth.controller.start(owner);
+        yield* phase(harness.auth, "waiting");
+        yield* Deferred.succeed(harness.authenticated, undefined);
+        yield* Deferred.fail(
+          harness.discovered,
+          new AcpErrors.AcpRequestError({
+            code: -32603,
+            errorMessage: `Internal error ${callbackUrl}`,
+            method: "session/new",
+          }),
+        );
+        const failed = yield* phase(harness.auth, "failed");
+        assert.equal(
+          failed.message,
+          "Antigravity authenticated, but could not initialize a session or load models.",
+        );
+        assert.isNull(failed.authorizationUrl);
+        assert.deepEqual(harness.catalog(), ["previous-account-model"]);
+        yield* Deferred.await(harness.closed);
+      }),
+  );
+
   it.effect("does not call callback HTTP success a successful Google sign-in", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness();
@@ -295,7 +322,6 @@ it.layer(NodeServices.layer)("AntigravityAuth", (it) => {
       });
       const state = yield* harness.auth.controller.start(owner);
       yield* phase(harness.auth, "waiting");
-      // The client sends the callback, then its socket drops before Google answers.
       const request = yield* harness.auth.controller
         .complete(owner, { flowId: state.flowId!, callbackUrl })
         .pipe(Effect.forkScoped);

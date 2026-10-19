@@ -12,7 +12,6 @@ import {
   isTerminalCompositionCommitInput,
   isTerminalCompositionKey,
   isTerminalCopyShortcut,
-  isTerminalLinkPointerGesture,
   isTerminalPasteShortcut,
   loadTerminalFontFamily,
   primeTerminalCopyInput,
@@ -23,8 +22,6 @@ import {
   terminalGridCellAt,
   terminalScrollbarGeometry,
   terminalScrollbarOffsetAtPointer,
-  terminalLinkAtColumn,
-  terminalLinkAtPosition,
   terminalLinkAtPositionWithRange,
   terminalContentOriginY,
   terminalFontFamily,
@@ -45,12 +42,44 @@ vi.mock("./vendor/ghostty-write-pty.wasm?url&no-inline", async () => ({
 describe("GhosttyTerminalSurface visibility", () => {
   const surfaces = new Set<GhosttyTerminalSurface>();
 
-  // Keep the real surface, renderer, and WASM core. Only browser layout and
-  // scheduling are replaced so tests can count work while the terminal is hidden.
+  function key(
+    surface: GhosttyTerminalSurface,
+    key: string,
+    code: string,
+    modifiers: Partial<
+      Pick<
+        KeyboardEvent,
+        | "altKey"
+        | "ctrlKey"
+        | "metaKey"
+        | "shiftKey"
+        | "isComposing"
+        | "keyCode"
+        | "getModifierState"
+      >
+    > = {},
+    type = "keydown",
+  ) {
+    const event = Object.assign(new Event(type, { cancelable: true }), {
+      key,
+      code,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      isComposing: false,
+      keyCode: 0,
+      getModifierState: () => false,
+      ...modifiers,
+    });
+    surface.input.dispatchEvent(event);
+    return event;
+  }
+
   function createHarness() {
     vi.useFakeTimers();
     const frames = new Map<number, FrameRequestCallback>();
-    const resizeCallbacks = new Set<() => void>();
+    const resizeTargets = new Map<(entries: { target: Element }[]) => void, Set<Element>>();
     const paint = vi.fn((_operation: string, _args: ReadonlyArray<unknown>) => {});
     let frameId = 0;
     const requestFrame = vi.fn((callback: FrameRequestCallback) => {
@@ -126,6 +155,7 @@ describe("GhosttyTerminalSurface visibility", () => {
       "window",
       Object.assign(new EventTarget(), {
         devicePixelRatio: 1,
+        innerHeight: 104,
         requestAnimationFrame: requestFrame,
         cancelAnimationFrame: (id: number) => frames.delete(id),
         setTimeout,
@@ -138,12 +168,17 @@ describe("GhosttyTerminalSurface visibility", () => {
     vi.stubGlobal(
       "ResizeObserver",
       class {
-        constructor(private readonly callback: () => void) {
-          resizeCallbacks.add(callback);
+        constructor(private readonly callback: (entries: { target: Element }[]) => void) {
+          resizeTargets.set(callback, new Set());
         }
-        observe() {}
+        observe(target: Element) {
+          resizeTargets.get(this.callback)?.add(target);
+        }
+        unobserve(target: Element) {
+          resizeTargets.get(this.callback)?.delete(target);
+        }
         disconnect() {
-          resizeCallbacks.delete(this.callback);
+          resizeTargets.delete(this.callback);
         }
       },
     );
@@ -169,16 +204,40 @@ describe("GhosttyTerminalSurface visibility", () => {
         for (const callback of queued) callback(0);
       },
       resize() {
-        for (const callback of resizeCallbacks) callback();
+        for (const [callback, targets] of resizeTargets) {
+          callback([...targets].map((target) => ({ target })));
+        }
       },
-      pointer(type: string, clientX: number, buttons: number) {
+      pointer(
+        type: string,
+        clientX: number,
+        buttons: number,
+        modifiers: boolean | Partial<Pick<MouseEvent, "ctrlKey" | "metaKey" | "shiftKey">> = {},
+        button = 0,
+        clientY = 5,
+      ) {
         canvas.dispatchEvent(
           Object.assign(new Event(type, { cancelable: true }), {
             clientX,
-            clientY: 5,
+            clientY,
             pointerId: 1,
-            button: 0,
+            button,
             buttons,
+            ...(typeof modifiers === "boolean" ? { shiftKey: modifiers } : modifiers),
+          }),
+        );
+      },
+      touch(type: string, clientY: number, pointerId = 2) {
+        canvas.dispatchEvent(
+          Object.assign(new Event(type, { cancelable: true }), {
+            clientX: 40,
+            clientY,
+            pointerId,
+            pointerType: "touch",
+            isPrimary: pointerId === 2,
+            button: 0,
+            buttons: type === "pointerup" ? 0 : 1,
+            shiftKey: false,
           }),
         );
       },
@@ -213,25 +272,31 @@ describe("GhosttyTerminalSurface visibility", () => {
     vi.restoreAllMocks();
   });
 
-  it("paints one complete synchronized frame across split markers while answering VT queries", async () => {
+  it("holds the complete frame across split synchronized markers and a DPR change", async () => {
     const harness = createHarness();
     const surface = await harness.create();
     surface.write("\x1b[?1049h\x1b[HOLD first\x1b[2;1HOLD second");
     harness.flushFrame();
+    expect(harness.renderedSnapshot.rowData.slice(0, 2).map((row) => row.text)).toEqual([
+      "OLD first",
+      "OLD second",
+    ]);
+    const { width, height } = harness.canvas;
     harness.snapshot.mockClear();
     harness.paint.mockClear();
 
     surface.write("\x1b[?20");
-    expect(harness.frames.size).toBe(1);
     surface.write("26h\x1b[HNEW first\x1b[5n");
     expect(harness.onData).toHaveBeenCalledWith("\x1b[0n");
-    expect(harness.frames.size).toBe(0);
     harness.flushFrame();
+    window.devicePixelRatio = 2;
+    harness.resize();
     vi.advanceTimersByTime(200);
     surface.write("\x1b[2;1HNEW second\x1b[?2026");
     harness.flushFrame();
     expect(harness.snapshot).not.toHaveBeenCalled();
     expect(harness.paint).not.toHaveBeenCalled();
+    expect([harness.canvas.width, harness.canvas.height]).toEqual([width, height]);
 
     surface.write("l");
     harness.flushFrame();
@@ -240,53 +305,75 @@ describe("GhosttyTerminalSurface visibility", () => {
       "NEW first",
       "NEW second",
     ]);
+    expect([harness.canvas.width, harness.canvas.height]).toEqual([width * 2, height * 2]);
     expect(
-      harness.paint.mock.calls.some(
-        ([operation, args]) => operation === "fillText" && String(args[0]).includes("NEW first"),
-      ),
-    ).toBe(true);
+      harness.paint.mock.calls
+        .filter(([operation]) => operation === "fillText")
+        .map(([, args]) => args[0]),
+    ).toEqual(expect.arrayContaining(["NEW first", "NEW second"]));
     vi.advanceTimersByTime(1_000);
     harness.flushFrame();
     expect(harness.snapshot).toHaveBeenCalledTimes(1);
   });
 
-  it("expires an unterminated update once without extending its deadline on later output", async () => {
+  it("recovers an unterminated synchronized update at 500ms despite later output", async () => {
     const harness = createHarness();
     const surface = await harness.create();
     surface.write("before");
     harness.flushFrame();
     harness.snapshot.mockClear();
+    harness.paint.mockClear();
     surface.write("\x1b[?2026h\rpartial");
     vi.advanceTimersByTime(499);
-    expect(harness.snapshot).not.toHaveBeenCalled();
     surface.write(" frame");
+    harness.flushFrame();
+    expect(harness.snapshot).not.toHaveBeenCalled();
+    expect(harness.paint).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
+    harness.flushFrame();
     expect(harness.snapshot).toHaveBeenCalledTimes(1);
     expect(harness.renderedSnapshot.rowData[0]?.text).toBe("partial frame");
-    vi.advanceTimersByTime(2_000);
+    vi.advanceTimersByTime(1_000);
     harness.flushFrame();
     expect(harness.snapshot).toHaveBeenCalledTimes(1);
+    surface.write("!");
+    harness.flushFrame();
+    expect(harness.renderedSnapshot.rowData[0]?.text).toBe("partial frame!");
+  });
 
-    surface.write("\rnormal ");
+  it("gives a synchronized group its own deadline when one write closes A and opens B", async () => {
+    const harness = createHarness();
+    const surface = await harness.create();
+    surface.write("old");
     harness.flushFrame();
-    expect(harness.snapshot).toHaveBeenCalledTimes(2);
-    surface.write("\x1b[?2026h\rnext group");
+    harness.snapshot.mockClear();
+    harness.paint.mockClear();
+    surface.write("\x1b[?2026h\rAAA");
+    vi.advanceTimersByTime(450);
+    surface.write("\x1b[?2026l\x1b[?2026h\rBBB");
+    vi.advanceTimersByTime(50);
     harness.flushFrame();
-    expect(harness.snapshot).toHaveBeenCalledTimes(2);
-    surface.write("\x1b[?2026l");
+    expect(harness.snapshot).not.toHaveBeenCalled();
+    expect(harness.paint).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(449);
     harness.flushFrame();
-    expect(harness.snapshot).toHaveBeenCalledTimes(3);
+    expect(harness.snapshot).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    harness.flushFrame();
+    expect(harness.snapshot).toHaveBeenCalledTimes(1);
+    expect(harness.renderedSnapshot.rowData[0]?.text).toBe("BBB");
   });
 
   it.each(["hide", "zero-size", "dispose"] as const)(
-    "cancels a synchronized-output deadline on %s",
+    "cancels synchronized recovery on %s",
     async (action) => {
       const harness = createHarness();
       const surface = await harness.create();
-      surface.write("before");
+      surface.write("old");
       harness.flushFrame();
-      surface.write("\x1b[?2026hpartial");
+      surface.write("\x1b[?2026h\rnew");
       harness.snapshot.mockClear();
+      harness.paint.mockClear();
       if (action === "hide") surface.setVisible(false);
       else if (action === "zero-size") {
         harness.mount.clientWidth = 0;
@@ -295,6 +382,7 @@ describe("GhosttyTerminalSurface visibility", () => {
       vi.advanceTimersByTime(1_000);
       harness.flushFrame();
       expect(harness.snapshot).not.toHaveBeenCalled();
+      expect(harness.paint).not.toHaveBeenCalled();
       if (action === "dispose") return;
       if (action === "hide") surface.setVisible(true);
       else {
@@ -304,11 +392,11 @@ describe("GhosttyTerminalSurface visibility", () => {
       expect(harness.snapshot).not.toHaveBeenCalled();
       surface.write("\x1b[?2026l");
       harness.flushFrame();
-      expect(harness.snapshot).toHaveBeenCalledTimes(1);
+      expect(harness.renderedSnapshot.rowData[0]?.text).toBe("new");
     },
   );
 
-  it("replays a reset immediately and cancels the previous synchronized deadline", async () => {
+  it("replaces an open synchronized update on reset without a stale recovery paint", async () => {
     const harness = createHarness();
     const surface = await harness.create();
     surface.write("\x1b[?2026hpartial");
@@ -322,36 +410,7 @@ describe("GhosttyTerminalSurface visibility", () => {
     expect(harness.snapshot).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])(
-    "defers DPR backing-store changes until synchronized output closes, restored=%s",
-    async (restore) => {
-      const harness = createHarness();
-      const surface = await harness.create();
-      surface.write("old");
-      harness.flushFrame();
-      const width = harness.canvas.width;
-      const height = harness.canvas.height;
-      surface.write("\x1b[?2026h\rnew");
-      harness.snapshot.mockClear();
-      window.devicePixelRatio = 2;
-      harness.resize();
-      expect([harness.canvas.width, harness.canvas.height]).toEqual([width, height]);
-      expect(harness.snapshot).not.toHaveBeenCalled();
-      if (restore) {
-        window.devicePixelRatio = 1;
-        harness.resize();
-      }
-      surface.write("\x1b[?2026l");
-      harness.flushFrame();
-      expect([harness.canvas.width, harness.canvas.height]).toEqual([
-        width * (restore ? 1 : 2),
-        height * (restore ? 1 : 2),
-      ]);
-      expect(harness.renderedSnapshot.rowData[0]?.text).toBe("new");
-    },
-  );
-
-  it("repaints a real grid resize immediately after Ghostty ends the synchronized mode", async () => {
+  it("paints a grid resize immediately when Ghostty ends synchronized output", async () => {
     const harness = createHarness();
     const surface = await harness.create();
     surface.write("old");
@@ -366,6 +425,311 @@ describe("GhosttyTerminalSurface visibility", () => {
     vi.advanceTimersByTime(1_000);
     harness.flushFrame();
     expect(harness.snapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { platform: "Linux x86_64", primary: { ctrlKey: true } },
+    { platform: "MacIntel", primary: { metaKey: true } },
+  ])(
+    "navigates history from terminal input without sending keys ($platform)",
+    async ({ platform, primary }) => {
+      vi.stubGlobal("navigator", { platform });
+      const harness = createHarness();
+      const surface = await harness.create({ beforeKey: () => true });
+      surface.write(Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\r\n"));
+      harness.flushFrame();
+      const latest = harness.renderedSnapshot.rowData[0]?.text;
+      expect(surface.isAtBottom()).toBe(true);
+
+      expect(key(surface, "PageUp", "PageUp", { shiftKey: true }).defaultPrevented).toBe(true);
+      harness.flushFrame();
+      expect(harness.renderedSnapshot.rowData[0]?.text).toContain("line 8");
+      expect(surface.isAtBottom()).toBe(false);
+      key(surface, "PageDown", "PageDown", { shiftKey: true });
+      harness.flushFrame();
+      expect(harness.renderedSnapshot.rowData[0]?.text).toBe(latest);
+
+      key(surface, "Home", "Home", { ...primary, shiftKey: true });
+      harness.flushFrame();
+      expect(harness.renderedSnapshot.rowData[0]?.text).toContain("line 0");
+      key(surface, "End", "End", { ...primary, shiftKey: true });
+      harness.flushFrame();
+      expect(harness.renderedSnapshot.rowData[0]?.text).toBe(latest);
+      expect(surface.isAtBottom()).toBe(true);
+      expect(harness.onData).not.toHaveBeenCalled();
+    },
+  );
+
+  it("forwards navigation presses and releases when scrollback state is unavailable", async () => {
+    vi.stubGlobal("navigator", { platform: "Linux x86_64" });
+    const harness = createHarness();
+    const surface = await harness.create({ beforeKey: () => true });
+    surface.write("history\x1b[>31u");
+    vi.spyOn(GhosttyTerminalCore.prototype, "scrollbarState").mockReturnValue(null);
+
+    for (const [name, modifiers] of [
+      ["PageUp", { shiftKey: true }],
+      ["Home", { ctrlKey: true, shiftKey: true }],
+    ] as const) {
+      key(surface, name, name, modifiers);
+      key(surface, name, name, modifiers, "keyup");
+    }
+    expect(harness.onData).toHaveBeenCalledTimes(4);
+    expect(harness.onData.mock.calls[1]?.[0]).toContain(":3");
+    expect(harness.onData.mock.calls[3]?.[0]).toContain(":3");
+  });
+
+  it("selects full history and keeps selection coordinates available outside the viewport", async () => {
+    vi.stubGlobal("navigator", { platform: "Linux x86_64" });
+    const harness = createHarness();
+    const surface = await harness.create({ beforeKey: () => true });
+    const lines = Array.from({ length: 20 }, (_, index) => `line ${index}`);
+    surface.write(lines.join("\r\n"));
+    harness.flushFrame();
+    surface.selectAll();
+    harness.flushFrame();
+    expect(surface.getSelection()).toBe(lines.join("\n"));
+    expect(surface.getSelectionPosition()).toMatchObject({ start: { x: 0, y: 0 } });
+    expect(surface.getSelectionPosition()?.end.y).toBe(19);
+    expect(surface.getSelectionEndClientRect()).not.toBeNull();
+    expect(harness.renderedSnapshot.rowData.every((row) => row.cells[0]?.selected)).toBe(true);
+
+    key(surface, "Home", "Home", { ctrlKey: true, shiftKey: true });
+    harness.flushFrame();
+    surface.selectAll();
+    expect(surface.getSelection()).toBe(lines.join("\n"));
+    expect(surface.getSelectionPosition()?.end.y).toBe(19);
+    expect(surface.getSelectionEndClientRect()).toBeNull();
+    surface.clearSelection();
+    expect(surface.getSelection()).toBe("");
+    expect(surface.getSelectionPosition()).toBeNull();
+  });
+
+  it.each([
+    { platform: "Linux x86_64", modifiers: { ctrlKey: true, shiftKey: true } },
+    { platform: "MacIntel", modifiers: { metaKey: true } },
+  ])("selects all through the local shortcut ($platform)", async ({ platform, modifiers }) => {
+    vi.stubGlobal("navigator", { platform });
+    const harness = createHarness();
+    const surface = await harness.create({ beforeKey: () => true });
+    surface.write("hello\r\nworld");
+    harness.flushFrame();
+    expect(key(surface, "a", "KeyA", modifiers).defaultPrevented).toBe(true);
+    expect(surface.getSelection()).toBe("hello\nworld");
+    expect(surface.getSelectionPosition()).not.toBeNull();
+    expect(harness.onData).not.toHaveBeenCalled();
+  });
+
+  it("preserves shell Ctrl+A and ordinary application navigation", async () => {
+    vi.stubGlobal("navigator", { platform: "Linux x86_64" });
+    const harness = createHarness();
+    const surface = await harness.create({ beforeKey: () => true });
+    key(surface, "a", "KeyA", { ctrlKey: true });
+    key(surface, "PageUp", "PageUp");
+    key(surface, "PageDown", "PageDown");
+    key(surface, "Home", "Home");
+    key(surface, "End", "End");
+    expect(harness.onData.mock.calls.map(([data]) => data)).toEqual([
+      "\x01",
+      "\x1b[5~",
+      "\x1b[6~",
+      "\x1b[H",
+      "\x1b[F",
+    ]);
+    expect(surface.hasSelection()).toBe(false);
+  });
+
+  it("leaves modified history keys with alternate-screen applications", async () => {
+    vi.stubGlobal("navigator", { platform: "Linux x86_64" });
+    const harness = createHarness();
+    const surface = await harness.create({ beforeKey: () => true });
+    surface.write("\x1b[?1049happ");
+    key(surface, "PageUp", "PageUp", { shiftKey: true });
+    key(surface, "End", "End", { ctrlKey: true, shiftKey: true });
+    expect(harness.onData.mock.calls.map(([data]) => data)).toEqual(["\x1b[5;2~", "\x1b[1;6F"]);
+    surface.selectAll();
+    expect(surface.getSelection()).toBe("app");
+    surface.write("\x1b[?1049l");
+    expect(surface.getSelection()).toBe("");
+  });
+
+  it("suppresses local shortcut releases in Kitty sessions, including read-only observers", async () => {
+    vi.stubGlobal("navigator", { platform: "Linux x86_64" });
+    const harness = createHarness();
+    const surface = await harness.create({ beforeKey: () => true });
+    surface.input.readOnly = true;
+    surface.write("history\x1b[>31u");
+    for (const [name, code, modifiers] of [
+      ["PageUp", "PageUp", { shiftKey: true }],
+      ["Home", "Home", { ctrlKey: true, shiftKey: true }],
+      ["a", "KeyA", { ctrlKey: true, shiftKey: true }],
+    ] as const) {
+      key(surface, name, code, modifiers);
+      key(surface, name, code, modifiers, "keyup");
+    }
+    expect(surface.getSelection()).toBe("history");
+    expect(harness.onData).not.toHaveBeenCalled();
+
+    key(surface, "PageUp", "PageUp");
+    key(surface, "PageUp", "PageUp", {}, "keyup");
+    expect(harness.onData).toHaveBeenCalledTimes(2);
+    expect(harness.onData.mock.calls[1]?.[0]).toContain(":3");
+  });
+
+  it("honors host interception, IME candidates, and AltGr before local shortcuts", async () => {
+    vi.stubGlobal("navigator", { platform: "Linux x86_64" });
+    const harness = createHarness();
+    let allow = false;
+    const surface = await harness.create({ beforeKey: () => allow });
+    surface.write("hello\x1b[>31u");
+    key(surface, "a", "KeyA", { ctrlKey: true, shiftKey: true });
+    key(surface, "a", "KeyA", {}, "keyup");
+    expect(surface.hasSelection()).toBe(false);
+    allow = true;
+    surface.input.value = "候補";
+    key(surface, "a", "KeyA", { ctrlKey: true, shiftKey: true, isComposing: true });
+    key(surface, "a", "KeyA", {}, "keyup");
+    key(surface, "a", "KeyA", { ctrlKey: true, shiftKey: true, keyCode: 229 });
+    key(surface, "a", "KeyA", {}, "keyup");
+    key(surface, "a", "KeyA", {
+      ctrlKey: true,
+      shiftKey: true,
+      altKey: true,
+      getModifierState: (modifier) => modifier === "AltGraph",
+    });
+    key(surface, "a", "KeyA", {}, "keyup");
+    expect(surface.input.value).toBe("候補");
+    expect(surface.hasSelection()).toBe(false);
+    expect(harness.onData).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { platform: "Linux x86_64", modifiers: { ctrlKey: true, metaKey: false } },
+    { platform: "MacIntel", modifiers: { ctrlKey: false, metaKey: true } },
+  ])(
+    "gates path links and preserves selection and URLs ($platform)",
+    async ({ platform, modifiers }) => {
+      vi.stubGlobal("navigator", { platform });
+      const harness = createHarness();
+      vi.spyOn(Event.prototype, "timeStamp", "get").mockImplementation(() => Date.now());
+      let canOpenPaths = false;
+      const openLink = vi.fn();
+      const surface = await harness.create({
+        canActivateLink: (text) => text.startsWith("https://") || canOpenPaths,
+        onLinkActivate: openLink,
+      });
+      surface.write("/repo/file.ts");
+      harness.flushFrame();
+      harness.pointer("pointermove", 5, 0, modifiers);
+      expect(surface.canvas.style.cursor).toBe("");
+      harness.pointer("pointerdown", 5, 1, modifiers);
+      harness.pointer("pointerup", 5, 0, modifiers);
+      expect(openLink).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(501);
+      harness.pointer("pointerdown", 5, 1);
+      harness.pointer("pointermove", 37, 1);
+      harness.pointer("pointerup", 37, 0);
+      expect(surface.getSelection()).toBe("/repo");
+
+      vi.advanceTimersByTime(501);
+      harness.pointer("pointermove", 5, 0, modifiers);
+      canOpenPaths = true;
+      surface.refreshLinkActivation();
+      expect(surface.canvas.style.cursor).toBe("pointer");
+      harness.pointer("pointerdown", 5, 1, modifiers);
+      harness.pointer("pointerup", 5, 0, modifiers);
+      expect(openLink).toHaveBeenCalledExactlyOnceWith("/repo/file.ts", expect.any(Event));
+
+      vi.advanceTimersByTime(501);
+      harness.pointer("pointerdown", 5, 1, modifiers);
+      canOpenPaths = false;
+      surface.refreshLinkActivation();
+      expect(surface.canvas.style.cursor).toBe("");
+      harness.pointer("pointerup", 5, 0, modifiers);
+      expect(openLink).toHaveBeenCalledOnce();
+
+      vi.advanceTimersByTime(501);
+      surface.resetAndWrite("https://t3.codes");
+      harness.flushFrame();
+      harness.pointer("pointermove", 5, 0, modifiers);
+      expect(surface.canvas.style.cursor).toBe("pointer");
+      harness.pointer("pointerdown", 5, 1, modifiers);
+      harness.pointer("pointerup", 5, 0, modifiers);
+      expect(openLink).toHaveBeenLastCalledWith("https://t3.codes", expect.any(Event));
+    },
+  );
+
+  it("resends an unchanged grid when authorization and attachment become ready", async () => {
+    const harness = createHarness();
+    let canOperate = false;
+    let attached = false;
+    const resizePty = vi.fn<(cols: number, rows: number) => void>();
+    const surface = await harness.create({
+      onResize: (cols, rows) => {
+        if (canOperate && attached) resizePty(cols, rows);
+      },
+    });
+    vi.advanceTimersByTime(150);
+    expect(resizePty).not.toHaveBeenCalled();
+
+    canOperate = true;
+    surface.resendSize();
+    vi.advanceTimersByTime(150);
+    expect(resizePty).not.toHaveBeenCalled();
+
+    attached = true;
+    surface.resendSize();
+    vi.advanceTimersByTime(150);
+    expect(resizePty).toHaveBeenCalledExactlyOnceWith(20, 6);
+    surface.fit();
+    vi.advanceTimersByTime(150);
+    expect(resizePty).toHaveBeenCalledOnce();
+
+    canOperate = false;
+    harness.mount.clientWidth = 248;
+    surface.fit();
+    vi.advanceTimersByTime(150);
+    expect(resizePty).toHaveBeenCalledOnce();
+  });
+
+  it("sends the settled grid when a resize drag is released", async () => {
+    const harness = createHarness();
+    const onResize = vi.fn<(cols: number, rows: number) => void>();
+    const surface = await harness.create({ onResize });
+    vi.advanceTimersByTime(150);
+    onResize.mockClear();
+
+    harness.mount.clientWidth = 120;
+    harness.resize();
+    expect(surface.cols).toBe(14);
+    expect(onResize).not.toHaveBeenCalled();
+
+    harness.mount.clientWidth = 96;
+    window.dispatchEvent(new Event("pointerup"));
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(11, 6);
+
+    harness.resize();
+    vi.advanceTimersByTime(150);
+    window.dispatchEvent(new Event("pointerup"));
+    expect(onResize).toHaveBeenCalledOnce();
+  });
+
+  it("replays the current grid on reveal when a hidden host becomes ready", async () => {
+    const harness = createHarness();
+    const onResize = vi.fn<(cols: number, rows: number) => void>();
+    const surface = await harness.create({ onResize });
+    vi.advanceTimersByTime(150);
+    onResize.mockClear();
+
+    surface.setVisible(false);
+    surface.resendSize();
+    vi.advanceTimersByTime(150);
+    expect(onResize).not.toHaveBeenCalled();
+
+    surface.setVisible(true);
+    vi.advanceTimersByTime(150);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(20, 6);
   });
 
   it("stops hidden snapshots and paint while preserving live VT replies and the next cursor", async () => {
@@ -405,6 +769,91 @@ describe("GhosttyTerminalSurface visibility", () => {
     expect(harness.frames.size).toBe(0);
   });
 
+  it("scrolls touch drags in both directions without selecting or sending input", async () => {
+    const harness = createHarness();
+    const surface = await harness.create();
+    surface.write(Array.from({ length: 50 }, (_, i) => `row ${i}\r\n`).join(""));
+    harness.flushFrame();
+    const bottom = harness.renderedSnapshot.rowData[0]?.text;
+    harness.touch("pointerdown", 20);
+    for (let y = 22; y <= 68; y += 2) harness.touch("pointermove", y);
+    harness.flushFrame();
+    expect(harness.renderedSnapshot.rowData[0]?.text).not.toBe(bottom);
+    expect(surface.getSelection()).toBe("");
+    harness.touch("pointermove", 20);
+    harness.touch("pointerup", 20);
+    harness.flushFrame();
+    expect(harness.renderedSnapshot.rowData[0]?.text).toBe(bottom);
+    expect(harness.onData).not.toHaveBeenCalled();
+  });
+
+  it("sends touch scrolling to alternate-screen applications", async () => {
+    const harness = createHarness();
+    const surface = await harness.create();
+    surface.write("\x1b[?1049h\x1b[?1h");
+    harness.touch("pointerdown", 20);
+    harness.touch("pointermove", 52);
+    harness.touch("pointerup", 52);
+    expect(harness.onData.mock.calls).toEqual([["\x1bOA\x1bOA"]]);
+  });
+
+  it("reports touch scrolling and taps to mouse-tracking applications", async () => {
+    const harness = createHarness();
+    const surface = await harness.create();
+    surface.write("\x1b[?1000h\x1b[?1006h");
+    harness.touch("pointerdown", 20);
+    harness.touch("pointermove", 52);
+    harness.touch("pointerup", 52);
+    expect(harness.onData.mock.calls.map(([data]) => data)).toEqual([
+      "\x1b[<64;5;4M",
+      "\x1b[<64;5;4M",
+    ]);
+    harness.onData.mockClear();
+    harness.touch("pointerdown", 20);
+    harness.touch("pointerup", 20);
+    expect(harness.onData.mock.calls.map(([data]) => data)).toEqual([
+      "\x1b[<0;5;2M",
+      "\x1b[<0;5;2m",
+    ]);
+  });
+
+  it("opens a link on touch tap but not on drag or cancellation", async () => {
+    const harness = createHarness();
+    const onLinkActivate = vi.fn();
+    const surface = await harness.create({ onLinkActivate });
+    surface.write("https://example.com");
+    harness.flushFrame();
+    harness.touch("pointerdown", 5);
+    harness.touch("pointerup", 5);
+    expect(onLinkActivate).toHaveBeenCalledTimes(1);
+    harness.touch("pointerdown", 5);
+    harness.touch("pointermove", 37);
+    harness.touch("pointerup", 37);
+    harness.touch("pointerdown", 5);
+    harness.touch("pointercancel", 5);
+    expect(onLinkActivate).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends a canceled touch drag and ignores a second finger", async () => {
+    const harness = createHarness();
+    const surface = await harness.create();
+    surface.write(Array.from({ length: 50 }, (_, i) => `row ${i}\r\n`).join(""));
+    harness.flushFrame();
+    const bottom = harness.renderedSnapshot.rowData[0]?.text;
+    harness.touch("pointerdown", 20);
+    harness.touch("pointerdown", 20, 3);
+    harness.touch("pointermove", 68, 3);
+    harness.touch("pointercancel", 20);
+    harness.touch("pointermove", 68);
+    harness.flushFrame();
+    expect(harness.renderedSnapshot.rowData[0]?.text).toBe(bottom);
+    harness.touch("pointerdown", 20);
+    harness.touch("pointermove", 68);
+    harness.touch("pointerup", 68);
+    harness.flushFrame();
+    expect(harness.renderedSnapshot.rowData[0]?.text).not.toBe(bottom);
+  });
+
   it("keeps the selection on reveal and applies a hidden selection clear", async () => {
     const harness = createHarness();
     const surface = await harness.create();
@@ -436,6 +885,130 @@ describe("GhosttyTerminalSurface visibility", () => {
     expect(surface.getSelection()).toBe("");
     expect(surface.getSelectionPosition()).toBeNull();
     expect(harness.renderedSnapshot.rowData[0]?.cells.some((cell) => cell.selected)).toBe(false);
+  });
+
+  it("scrolls a selection drag held at the terminal edge, even when the window ends there", async () => {
+    const harness = createHarness();
+    const surface = await harness.create();
+    surface.write(Array.from({ length: 40 }, (_, index) => `line ${index}`).join("\r\n"));
+    harness.flushFrame();
+    const latest = harness.renderedSnapshot.rowData[0]?.text;
+
+    harness.pointer("pointerdown", 5, 1, {}, 0, 50);
+    harness.pointer("pointermove", 5, 1, {}, 0, 1);
+    vi.advanceTimersByTime(400);
+    harness.flushFrame();
+    expect(surface.isAtBottom()).toBe(false);
+
+    harness.pointer("pointermove", 5, 1, {}, 0, 103);
+    vi.advanceTimersByTime(2_000);
+    harness.pointer("pointerup", 5, 0, {}, 0, 103);
+    harness.flushFrame();
+    expect(surface.isAtBottom()).toBe(true);
+    expect(harness.renderedSnapshot.rowData[0]?.text).toBe(latest);
+    expect(surface.getSelection()).not.toBe("");
+    expect(surface.getSelectionPosition()?.end.y).toBe(39);
+  });
+
+  it("pastes the terminal selection, and only that, on a Linux middle click", async () => {
+    const harness = createHarness();
+    const readText = vi.fn(async () => "clipboard text");
+    vi.stubGlobal("navigator", { platform: "Linux x86_64", clipboard: { readText } });
+    const surface = await harness.create();
+    surface.write("hello world");
+    harness.flushFrame();
+    harness.pointer("pointerdown", 5, 1);
+    harness.pointer("pointermove", 37, 1);
+    harness.pointer("pointerup", 37, 0);
+    expect(surface.getSelection()).toBe("hello");
+
+    harness.onData.mockClear();
+    harness.pointer("pointerdown", 5, 4, false, 1);
+    await vi.waitFor(() => expect(harness.onData).toHaveBeenCalled());
+    expect(harness.onData.mock.calls.at(-1)?.[0]).toBe("hello");
+    expect(surface.getSelection()).toBe("hello");
+
+    surface.clearSelection();
+    harness.pointer("pointerdown", 5, 4, false, 1);
+    expect(readText).not.toHaveBeenCalled();
+  });
+
+  it("starts a selection when dragging from a link", async () => {
+    const harness = createHarness();
+    const onLinkActivate = vi.fn();
+    const surface = await harness.create({ onLinkActivate });
+    surface.write("https://example.com");
+    harness.flushFrame();
+
+    harness.pointer("pointerdown", 5, 1);
+    harness.pointer("pointermove", 37, 1);
+    harness.pointer("pointerup", 37, 0);
+
+    expect(onLinkActivate).not.toHaveBeenCalled();
+    expect(surface.getSelection()).toBe("https");
+  });
+
+  it("keeps a link click active through slight pointer movement", async () => {
+    const harness = createHarness();
+    const onLinkActivate = vi.fn();
+    const surface = await harness.create({ onLinkActivate });
+    surface.write("https://example.com");
+    harness.flushFrame();
+
+    harness.pointer("pointerdown", 5, 1);
+    harness.pointer("pointermove", 6, 1);
+    harness.pointer("pointerup", 6, 0);
+
+    expect(onLinkActivate).toHaveBeenCalledOnce();
+  });
+
+  it("uses repeated link clicks for word and line selection", async () => {
+    const harness = createHarness();
+    const onLinkActivate = vi.fn();
+    const surface = await harness.create({ onLinkActivate });
+    surface.write("https://example.com tail");
+    harness.flushFrame();
+
+    harness.pointer("pointerdown", 5, 1);
+    harness.pointer("pointerup", 5, 0);
+    harness.pointer("pointerdown", 5, 1);
+    harness.pointer("pointerup", 5, 0);
+    expect(onLinkActivate).toHaveBeenCalledOnce();
+    expect(surface.getSelection()).not.toBe("");
+
+    harness.pointer("pointerdown", 5, 1);
+    harness.pointer("pointerup", 5, 0);
+    expect(onLinkActivate).toHaveBeenCalledOnce();
+    expect(surface.getSelection()).toBe("https://example.com tail");
+  });
+
+  it("uses Shift drags over links for selection", async () => {
+    const harness = createHarness();
+    const onLinkActivate = vi.fn();
+    const surface = await harness.create({ onLinkActivate });
+    surface.write("https://example.com");
+    harness.flushFrame();
+
+    harness.pointer("pointerdown", 5, 1, true);
+    harness.pointer("pointermove", 37, 1, true);
+    harness.pointer("pointerup", 37, 0, true);
+    expect(onLinkActivate).not.toHaveBeenCalled();
+    expect(surface.getSelection()).toBe("https");
+  });
+
+  it("does not activate a link replaced before pointer release", async () => {
+    const harness = createHarness();
+    const onLinkActivate = vi.fn();
+    const surface = await harness.create({ onLinkActivate });
+    surface.write("https://first.example");
+    harness.flushFrame();
+
+    harness.pointer("pointerdown", 5, 1);
+    surface.write("\x1b[2J\x1b[Hhttps://second.example");
+    harness.flushFrame();
+    harness.pointer("pointerup", 5, 0);
+
+    expect(onLinkActivate).not.toHaveBeenCalled();
   });
 
   it("stops zero-size mounts and repaints when the same size returns", async () => {
@@ -579,9 +1152,6 @@ describe("shouldBlinkTerminalCursor", () => {
   });
 
   it("holds the cursor steady when blinking would be unwanted", () => {
-    // Unfocused surfaces draw a steady hollow cursor, DECSCUSR steady styles and
-    // DEC mode 12 turn blinking off, a hidden cursor has nothing to toggle, and
-    // reduced-motion readers get no permanently animating element.
     expect(shouldBlinkTerminalCursor({ ...blinking, focused: false })).toBe(false);
     expect(shouldBlinkTerminalCursor({ ...blinking, cursorBlinking: false })).toBe(false);
     expect(shouldBlinkTerminalCursor({ ...blinking, cursorVisible: false })).toBe(false);
@@ -589,7 +1159,26 @@ describe("shouldBlinkTerminalCursor", () => {
   });
 });
 
-describe("terminalLinkAtColumn", () => {
+describe("terminalLinkAtPositionWithRange", () => {
+  it("activates a wrapped quoted Windows path from its spaces and position suffix", () => {
+    const row = (text: string, isWrapContinuation: boolean): GhosttyRow => ({
+      cells: Array.from(text, (character) => cell(character)),
+      text,
+      isWrapContinuation,
+      wrapsToNext: false,
+    });
+    const first = String.raw`"C:\Users\Jane `;
+    const second = String.raw`Doe\index.ts":12:7`;
+    const rows = [row(first, false), row(second, true)];
+    const expected = {
+      text: String.raw`C:\Users\Jane Doe\index.ts:12:7`,
+      range: { start: { x: 1, y: 0 }, end: { x: second.length - 1, y: 1 } },
+    };
+    expect(terminalLinkAtPositionWithRange(rows, 0, first.length - 1)).toEqual(expected);
+    expect(terminalLinkAtPositionWithRange(rows, 1, second.length - 1)).toEqual(expected);
+    expect(terminalLinkAtPositionWithRange(rows, 0, 0)).toBeNull();
+  });
+
   it("maps terminal cells to UTF-16 offsets after a wide emoji", () => {
     const cells = [
       cell("🙂"),
@@ -606,9 +1195,11 @@ describe("terminalLinkAtColumn", () => {
       wrapsToNext: false,
     };
 
-    expect(terminalLinkAtColumn(row, 2)).toBe("https://t3.codes");
-    expect(terminalLinkAtColumn(row, cells.length - 1)).toBe("https://t3.codes");
-    expect(terminalLinkAtColumn(row, 0)).toBeNull();
+    expect(terminalLinkAtPositionWithRange([row], 0, 2)?.text).toBe("https://t3.codes");
+    expect(terminalLinkAtPositionWithRange([row], 0, cells.length - 1)?.text).toBe(
+      "https://t3.codes",
+    );
+    expect(terminalLinkAtPositionWithRange([row], 0, 0)).toBeNull();
     expect(terminalLinkAtPositionWithRange([row], 0, 8)?.range).toEqual({
       start: { x: 2, y: 0 },
       end: { x: cells.length - 1, y: 0 },
@@ -629,10 +1220,10 @@ describe("terminalLinkAtColumn", () => {
       row("C:\\repo\\file.ts", false),
     ];
 
-    expect(terminalLinkAtPosition(rows, 0, 8)).toBe("https://example.com/reference");
-    expect(terminalLinkAtPosition(rows, 1, 4)).toBe("https://example.com/reference");
-    expect(terminalLinkAtPosition(rows, 2, 2)).toBe("~/project/file");
-    expect(terminalLinkAtPosition(rows, 3, 4)).toBe("C:\\repo\\file.ts");
+    expect(terminalLinkAtPositionWithRange(rows, 0, 8)?.text).toBe("https://example.com/reference");
+    expect(terminalLinkAtPositionWithRange(rows, 1, 4)?.text).toBe("https://example.com/reference");
+    expect(terminalLinkAtPositionWithRange(rows, 2, 2)?.text).toBe("~/project/file");
+    expect(terminalLinkAtPositionWithRange(rows, 3, 4)?.text).toBe("C:\\repo\\file.ts");
     expect(terminalLinkAtPositionWithRange(rows, 1, 4)).toEqual({
       text: "https://example.com/reference",
       range: {
@@ -649,17 +1240,12 @@ describe("terminalLinkAtColumn", () => {
       isWrapContinuation,
       wrapsToNext,
     });
-    // The head of the wrapped line scrolled above the viewport.
     const headCut = [row("ple.com/missing", true), row("head", true)];
-    expect(terminalLinkAtPosition(headCut, 0, 4)).toBeNull();
-    // The bottom row soft-wraps on below the viewport.
+    expect(terminalLinkAtPositionWithRange(headCut, 0, 4)).toBeNull();
     const tailCut = [row("https://t3.codes", false, true)];
-    expect(terminalLinkAtPosition(tailCut, 0, 8)).toBeNull();
-    // A partial bottom row is provably complete and still resolves.
+    expect(terminalLinkAtPositionWithRange(tailCut, 0, 8)).toBeNull();
     const complete = [row("https://t3.codes", false), row("", false)];
-    expect(terminalLinkAtPosition(complete, 0, 8)).toBe("https://t3.codes");
-    // A wide grapheme earlier in the row must not break truncation detection:
-    // the soft-wrap flag decides, not string-length-versus-cell-count.
+    expect(terminalLinkAtPositionWithRange(complete, 0, 8)?.text).toBe("https://t3.codes");
     const wideFull: GhosttyRow = {
       cells: [
         { ...cell("🙂"), wide: 1 },
@@ -670,8 +1256,7 @@ describe("terminalLinkAtColumn", () => {
       isWrapContinuation: false,
       wrapsToNext: true,
     };
-    expect(terminalLinkAtPosition([wideFull], 0, 8)).toBeNull();
-    // Unwritten trailing cells prove the bottom row is complete.
+    expect(terminalLinkAtPositionWithRange([wideFull], 0, 8)).toBeNull();
     const unwrittenTail: GhosttyRow = {
       cells: [
         ...Array.from("https://t3.codes", (character) => cell(character)),
@@ -682,7 +1267,7 @@ describe("terminalLinkAtColumn", () => {
       isWrapContinuation: false,
       wrapsToNext: false,
     };
-    expect(terminalLinkAtPosition([unwrittenTail], 0, 8)).toBe("https://t3.codes");
+    expect(terminalLinkAtPositionWithRange([unwrittenTail], 0, 8)?.text).toBe("https://t3.codes");
   });
 });
 
@@ -712,6 +1297,20 @@ describe("isTerminalCopyShortcut", () => {
     expect(isTerminalCopyShortcut(event({ key: "C", metaKey: true }), "MacIntel")).toBe(true);
     expect(isTerminalCopyShortcut(event({ key: "j", metaKey: true }), "MacIntel")).toBe(false);
   });
+
+  it("supports the conventional Ctrl+Insert copy shortcut", () => {
+    expect(isTerminalCopyShortcut(event({ key: "Insert", ctrlKey: true }), "Linux x86_64")).toBe(
+      true,
+    );
+    expect(isTerminalCopyShortcut(event({ key: "Insert" }), "Linux x86_64")).toBe(false);
+    expect(
+      isTerminalCopyShortcut(
+        event({ key: "Insert", ctrlKey: true, shiftKey: true }),
+        "Linux x86_64",
+      ),
+    ).toBe(false);
+    expect(isTerminalCopyShortcut(event({ key: "Insert", ctrlKey: true }), "MacIntel")).toBe(false);
+  });
 });
 
 describe("applyTerminalCopyEvent", () => {
@@ -726,8 +1325,7 @@ describe("applyTerminalCopyEvent", () => {
 
   it("leaves the writeText fallback alive when clipboardData is missing", () => {
     // Electron's edit-menu Copy often delivers a copy event with no
-    // clipboardData. Claiming that event used to skip writeText and copy the
-    // empty IME textarea, which is the blank clipboard users paste.
+    // clipboardData.
     expect(applyTerminalCopyEvent("ls -la", null)).toEqual({
       preventDefault: false,
       claimWriteFallback: false,
@@ -947,9 +1545,8 @@ describe("terminal font resolution", () => {
   });
 
   it("ignores proportional families the cell grid cannot lay out", () => {
-    // jsdom has no canvas metrics, so the probe answers "monospace" and the
-    // family is kept; the guard is exercised in the browser instead. Assert the
-    // shape stays intact so a rejected face still yields a usable stack.
+    // Node has no canvas, so the probe answers "monospace" and the
+    // family is kept; the guard is exercised in the browser instead.
     const stack = terminalFontFamily("Helvetica Neue");
     expect(stack.endsWith("monospace")).toBe(true);
   });
@@ -978,17 +1575,12 @@ describe("terminalContentOriginY", () => {
   });
 
   it("pins the grid to the bottom by moving the sub-row slack above row 0", () => {
-    // 100px mount, 4px padding, 5 rows of 16px: 92 - 80 = 12px slack on top.
     expect(terminalContentOriginY(100, 4, 5, 16, true)).toBe(16);
-    // Exact fit keeps the origin at the padding.
     expect(terminalContentOriginY(88, 4, 5, 16, true)).toBe(4);
-    // A mount smaller than the grid never pushes the origin above the padding.
     expect(terminalContentOriginY(80, 4, 5, 16, true)).toBe(4);
   });
 
   it("keeps the prompt stationary while a drag crosses row boundaries", () => {
-    // Growing the mount pixel by pixel: the bottom edge (origin + rows*cell)
-    // tracks the mount bottom exactly until a new row fits.
     for (let height = 88; height < 104; height += 1) {
       const rows = Math.max(1, Math.floor((height - 8) / 16));
       const origin = terminalContentOriginY(height, 4, rows, 16, true);
@@ -1029,19 +1621,6 @@ describe("terminalWheelArrowData", () => {
     expect(terminalWheelArrowData(3, false)).toBe("\u001b[B\u001b[B\u001b[B");
     expect(terminalWheelArrowData(-1, true)).toBe("\u001bOA");
     expect(terminalWheelArrowData(0, true)).toBe("");
-  });
-});
-
-describe("isTerminalLinkPointerGesture", () => {
-  it("uses Command on macOS and Control elsewhere", () => {
-    expect(isTerminalLinkPointerGesture({ ctrlKey: false, metaKey: true }, "MacIntel")).toBe(true);
-    expect(isTerminalLinkPointerGesture({ ctrlKey: true, metaKey: false }, "MacIntel")).toBe(false);
-    expect(isTerminalLinkPointerGesture({ ctrlKey: true, metaKey: false }, "Linux x86_64")).toBe(
-      true,
-    );
-    expect(isTerminalLinkPointerGesture({ ctrlKey: false, metaKey: true }, "Linux x86_64")).toBe(
-      false,
-    );
   });
 });
 

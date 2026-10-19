@@ -1,11 +1,10 @@
 import type { DesktopBridge, DesktopDiscoveredSshHost } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 
 type DesktopSshDiscoveryBridge = Pick<DesktopBridge, "discoverSshHosts">;
 
-/** Filters and ranks SSH host suggestions as the user types in the host field. */
 export function filterDiscoveredSshHosts(
   hosts: ReadonlyArray<DesktopDiscoveredSshHost>,
   query: string,
@@ -27,7 +26,7 @@ export function filterDiscoveredSshHosts(
   return [...prefixMatches, ...substringMatches];
 }
 
-class DesktopSshDiscoveryUnavailableError extends Schema.TaggedErrorClass<DesktopSshDiscoveryUnavailableError>()(
+class DesktopSshDiscoveryUnavailableError extends Schema.TaggedError<DesktopSshDiscoveryUnavailableError>()(
   "DesktopSshDiscoveryUnavailableError",
   {},
 ) {
@@ -36,7 +35,7 @@ class DesktopSshDiscoveryUnavailableError extends Schema.TaggedErrorClass<Deskto
   }
 }
 
-class DesktopSshDiscoveryError extends Schema.TaggedErrorClass<DesktopSshDiscoveryError>()(
+class DesktopSshDiscoveryError extends Schema.TaggedError<DesktopSshDiscoveryError>()(
   "DesktopSshDiscoveryError",
   { cause: Schema.Defect() },
 ) {
