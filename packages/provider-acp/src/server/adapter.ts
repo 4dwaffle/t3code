@@ -1486,7 +1486,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           { sessionUpdate: "state_update" }
         > | null = null;
         const agentRequests = new Set<object>();
-        let turnAttached = yield* Deferred.make<void>();
+        let turnAttached = yield* Deferred.make<boolean>();
         const activeSessionId = yield* Ref.make<string | null>(null);
         const contextUsageBySessionId = yield* Ref.make(
           new Map<string, ThreadTokenUsageSnapshot>(),
@@ -1508,7 +1508,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           setup: AcpSessionRuntime.AcpSessionRuntimeStartResult,
         ) {
           followsAgentWorkState =
-            flavor.followAgentWorkState === true && setup.initializeResult.protocolVersion === 2;
+            flavor.followAgentWorkState === true &&
+            continuationRequests !== undefined &&
+            setup.initializeResult.protocolVersion === 2;
           agentWork = null;
           agentRequests.clear();
           yield* Ref.set(activeSessionSetup, setup);
@@ -3812,11 +3814,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         });
 
         const awaitRequestTurn = Effect.fnUntraced(function* (generation: number) {
-          if (!followsAgentWorkState) return;
+          if (!followsAgentWorkState) return true;
           while (true) {
             const waiting = yield* runRuntimeCallbackAtGeneration(
               generation,
               Effect.gen(function* () {
+                if (yield* Ref.get(stoppedRunQuarantine)) return false;
                 if ((yield* Ref.get(activeTurn)) !== null) return null;
                 const sessionId = yield* Ref.get(activeSessionId);
                 if (sessionId !== null) yield* offerContinuationRun(sessionId);
@@ -3824,8 +3827,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }),
             );
             if (Option.isNone(waiting)) return yield* Effect.never;
-            if (waiting.value === null) return;
-            yield* Deferred.await(waiting.value);
+            if (waiting.value === false) return false;
+            if (waiting.value === null) return true;
+            if (!(yield* Deferred.await(waiting.value))) return false;
           }
         });
 
@@ -4745,50 +4749,53 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           request: Effect.Effect<AcpAdapterV2UserInputRequest>,
           transportRequestId: string,
         ) =>
-          awaitRequestTurn(generation).pipe(
-            Effect.andThen(
-              runRuntimeCallbackAtGeneration(
-                generation,
-                request.pipe(
-                  Effect.flatMap((value) =>
-                    beginUserInputRequest(value, generation, transportRequestId),
-                  ),
+          Effect.gen(function* () {
+            if (!(yield* awaitRequestTurn(generation))) {
+              return { answers: null, acknowledgeNativeResponse: Effect.void };
+            }
+            return yield* runRuntimeCallbackAtGeneration(
+              generation,
+              request.pipe(
+                Effect.flatMap((value) =>
+                  beginUserInputRequest(value, generation, transportRequestId),
                 ),
               ),
-            ),
-            Effect.flatMap((pending) => {
-              if (Option.isNone(pending)) return Effect.never;
-              const { answers, requestId, transportRequestId } = pending.value;
-              return Deferred.await(answers).pipe(
-                Effect.flatMap((result) =>
-                  runRuntimeCallbackAtGeneration(generation, Effect.succeed(result)).pipe(
-                    Effect.flatMap((checked) =>
-                      Option.isSome(checked)
-                        ? Effect.succeed({
-                            acknowledgeNativeResponse: acknowledgeNativeResponse(
-                              generation,
-                              transportRequestId,
-                            ),
-                            answers: checked.value,
-                          })
-                        : Effect.never,
+            ).pipe(
+              Effect.flatMap((pending) => {
+                if (Option.isNone(pending)) return Effect.never;
+                const { answers, requestId, transportRequestId } = pending.value;
+                return Deferred.await(answers).pipe(
+                  Effect.flatMap((result) =>
+                    runRuntimeCallbackAtGeneration(generation, Effect.succeed(result)).pipe(
+                      Effect.flatMap((checked) =>
+                        Option.isSome(checked)
+                          ? Effect.succeed({
+                              acknowledgeNativeResponse: acknowledgeNativeResponse(
+                                generation,
+                                transportRequestId,
+                              ),
+                              answers: checked.value,
+                            })
+                          : Effect.never,
+                      ),
                     ),
                   ),
-                ),
-                Effect.ensuring(
-                  runRuntimeCallbackAtGeneration(
-                    generation,
-                    Effect.gen(function* () {
-                      yield* Ref.update(pendingRuntimeRequests, (current) => {
-                        const updated = new Map(current);
-                        updated.delete(String(requestId));
-                        return updated;
-                      });
-                    }),
-                  ).pipe(Effect.asVoid),
-                ),
-              );
-            }),
+                  Effect.ensuring(
+                    runRuntimeCallbackAtGeneration(
+                      generation,
+                      Effect.gen(function* () {
+                        yield* Ref.update(pendingRuntimeRequests, (current) => {
+                          const updated = new Map(current);
+                          updated.delete(String(requestId));
+                          return updated;
+                        });
+                      }),
+                    ).pipe(Effect.asVoid),
+                  ),
+                );
+              }),
+            );
+          }).pipe(
             Effect.mapError(
               (cause) =>
                 new EffectAcpErrors.AcpTransportError({
@@ -4799,6 +4806,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           );
 
         const cancelPendingRuntimeRequests = Effect.fnUntraced(function* () {
+          const waiting = turnAttached;
+          turnAttached = yield* Deferred.make<boolean>();
+          yield* Deferred.succeed(waiting, false);
           const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => [
             [...current.values()],
             new Map<string, PendingRuntimeRequest>(),
@@ -5391,7 +5401,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const dispositionFor = (policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy) =>
                 (flavor.permissionDisposition ?? acpPermissionDisposition)(policy, params);
               if (followsAgentWorkState && dispositionFor(latestRuntimePolicy) === "ask") {
-                yield* awaitRequestTurn(handlerGeneration);
+                if (!(yield* awaitRequestTurn(handlerGeneration)))
+                  return { outcome: { outcome: "cancelled" } } as const;
               }
               const admitted = yield* runRuntimeCallbackAtGeneration(
                 handlerGeneration,
@@ -6765,8 +6776,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               updatedAt: startedAt,
             });
             const attached = turnAttached;
-            turnAttached = yield* Deferred.make<void>();
-            yield* Deferred.succeed(attached, undefined);
+            turnAttached = yield* Deferred.make<boolean>();
+            yield* Deferred.succeed(attached, true);
             // Every attach ends the deferred-terminal contract, but only the
             // queued provider continuation owns wake traffic. A user turn may
             // start before that continuation and must leave its buffer intact.
