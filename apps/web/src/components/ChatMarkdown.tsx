@@ -2350,6 +2350,7 @@ const markdownServerConfigFieldsAtom = Atom.family((environmentId: EnvironmentId
 
 function useChatMarkdownState({
   text,
+  inline = false,
   cwd,
   threadRef,
   pullRequestPanelRef,
@@ -2752,6 +2753,7 @@ function useChatMarkdownState({
     imageBaseDir,
     workspaceMutationId,
     inlineCodeFileLinkMetaByText,
+    inline,
     isStreaming,
     linkTargetPreference,
     markdownFileLinkMetaByHref,
@@ -3326,9 +3328,8 @@ const CHAT_MARKDOWN_COMPONENTS = {
   },
   pre: function MarkdownPre({ node, children, ...props }) {
     const mathEnabled = useClientSettings((settings) => settings.mathRenderingEnabled);
-    const { resolvedTheme, diffThemeName, expandMedia, isStreaming, onRunShellCommand } = use(
-      ChatMarkdownRendererContext,
-    );
+    const { resolvedTheme, diffThemeName, expandMedia, isStreaming, onRunShellCommand, inline } =
+      use(ChatMarkdownRendererContext);
     const text = use(ChatMarkdownTextContext);
     const codeBlock = extractCodeBlock(children);
     if (!codeBlock) {
@@ -3337,7 +3338,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     if (mathEnabled && language === "math" && (!isStreaming || isClosedCodeFence(node, text))) {
-      return <MarkdownMath tex={codeBlock.code} display />;
+      return <MarkdownMath tex={codeBlock.code} display focusable={!inline} />;
     }
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
     const highlightedCode = (
@@ -3394,9 +3395,16 @@ const CHAT_MARKDOWN_COMPONENTS = {
 } satisfies Components;
 
 const MarkdownCodeOrMath: NonNullable<Components["code"]> = (props) => {
+  const { inline } = use(ChatMarkdownRendererContext);
   const math = mathKind(props.className);
   if (!math) return CHAT_MARKDOWN_COMPONENTS.code(props);
-  return <MarkdownMath tex={nodeToPlainText(props.children)} display={math === "display"} />;
+  return (
+    <MarkdownMath
+      tex={nodeToPlainText(props.children)}
+      display={math === "display"}
+      focusable={!inline}
+    />
+  );
 };
 
 // Only messages parsed with math enabled can typeset, so raw HTML carrying the
@@ -3422,7 +3430,7 @@ function ChatMarkdown({
     markdownUrlTransform,
     localMediaPreview,
     closeLocalMediaPreview,
-  } = useChatMarkdownState({ text, ...props });
+  } = useChatMarkdownState({ text, inline, ...props });
   const incrementalParsing =
     props.isStreaming === true &&
     extraRemarkPlugins.length === 0 &&

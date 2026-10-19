@@ -4,6 +4,7 @@ import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { MarkdownFindContext } from "./chat/markdownFindContext";
@@ -880,6 +881,46 @@ describe("ChatMarkdown math", () => {
     });
     return { host };
   };
+
+  it.each(["$x$", "$$x$$", "```math\nx\n```", "$\\notACommand{x}$"])(
+    "keeps keyboard focus on the parent control in compact previews of %s",
+    async (formula) => {
+      settingsOverrides.mathRenderingEnabled = true;
+      const { container } = await render(
+        <>
+          <button type="button">
+            Preview <ChatMarkdown inline text={formula} cwd={undefined} />
+          </button>
+          <button type="button">After preview</button>
+        </>,
+      );
+      await act(async () => {
+        await import("./chat/MathTypeset");
+      });
+      const [preview, after] = container.querySelectorAll("button");
+      preview!.focus();
+      await act(() => userEvent.tab());
+      expect(document.activeElement).toBe(after);
+      if (formula.includes("notACommand")) {
+        expect(page.getByRole("button", { name: /notACommand/ }).element()).toBe(preview);
+      }
+    },
+  );
+
+  it("keeps message formulas reachable by keyboard", async () => {
+    settingsOverrides.mathRenderingEnabled = true;
+    const { container } = await render(
+      <>
+        <button type="button">Before equation</button>
+        <ChatMarkdown text="$x$" cwd={undefined} />
+      </>,
+    );
+    container.querySelector("button")!.focus();
+    await act(() => userEvent.tab());
+    expect(document.activeElement).toBe(
+      container.querySelector('[aria-label="Scroll inline equation"]'),
+    );
+  });
 
   it("renders table formulas and exports their TeX instead of duplicate glyph text", async () => {
     const rendered = await renderMath(

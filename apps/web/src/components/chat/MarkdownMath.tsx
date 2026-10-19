@@ -26,13 +26,25 @@ export const MarkdownMath = memo(function MarkdownMath(props: {
       }
       data-markdown-math={props.display ? "display" : "inline"}
       data-markdown-copy={props.display ? `${source}\n\n` : source}
-      role="group"
-      aria-label={props.display ? "Display equation" : "Inline equation"}
+      role={props.focusable === false ? undefined : "group"}
+      aria-label={
+        props.focusable === false
+          ? undefined
+          : props.display
+            ? "Display equation"
+            : "Inline equation"
+      }
     >
       <span
-        className="chat-markdown-math-viewport block max-w-full overflow-x-auto overflow-y-hidden px-0.5 py-0.75 focus-visible:outline-1 focus-visible:outline-solid focus-visible:-outline-offset-1 focus-visible:outline-border"
-        tabIndex={props.focusable === false ? undefined : 0}
-        aria-label={props.display ? "Scroll display equation" : "Scroll inline equation"}
+        className="chat-markdown-math-viewport block max-w-full overflow-x-auto overflow-y-hidden px-0.5 py-0.75 focus-visible:outline-1 focus-visible:outline-solid focus-visible:-outline-offset-1 focus-visible:outline-border [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-thumb]:rounded [&::-webkit-scrollbar-thumb]:border [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-clip-content"
+        tabIndex={props.focusable === false ? -1 : 0}
+        aria-label={
+          props.focusable === false
+            ? undefined
+            : props.display
+              ? "Scroll display equation"
+              : "Scroll inline equation"
+        }
       >
         <span className={props.display ? "inline-block w-max min-w-full" : "inline-block w-max"}>
           <RenderErrorBoundary resetKeys={[tex]} fallback={fallback}>
