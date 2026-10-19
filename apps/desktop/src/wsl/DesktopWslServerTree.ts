@@ -11,11 +11,7 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 // Packaged Windows builds ship the server tree inside resources/server.asar
 // (see scripts/build-desktop-artifact.ts). The Windows primary reads it in
 // place through the asar-aware ELECTRON_RUN_AS_NODE runtime, but the WSL
-// backend launches plain `wsl.exe -- node`, which cannot read an asar
-// archive. This service materializes the archive into a real, version-keyed
-// directory the first time the WSL backend starts, and reuses it afterwards —
-// so only users who enable WSL ever pay for a loose copy of the server tree.
-//
+// backend launches plain `wsl.exe -- node`, which cannot read an asar archive.
 // Reading through Electron's patched fs also transparently returns the
 // contents of files that electron-builder/asar left in the server.asar.unpacked
 // sibling (native binaries), so a single walk of the archive yields the
@@ -32,7 +28,7 @@ const Marker = Schema.Struct({ version: Schema.String });
 const decodeMarker = Schema.decodeUnknownEffect(Schema.fromJsonString(Marker));
 const encodeMarker = Schema.encodeEffect(Schema.fromJsonString(Marker));
 
-export class DesktopWslServerTreeExtractError extends Schema.TaggedErrorClass<DesktopWslServerTreeExtractError>()(
+export class DesktopWslServerTreeExtractError extends Schema.TaggedError<DesktopWslServerTreeExtractError>()(
   "DesktopWslServerTreeExtractError",
   {
     targetDir: Schema.String,
@@ -47,18 +43,11 @@ export class DesktopWslServerTreeExtractError extends Schema.TaggedErrorClass<De
 export class DesktopWslServerTree extends Context.Service<
   DesktopWslServerTree,
   {
-    // Resolves the directory the WSL backend should treat as the app root
-    // (the directory containing apps/server/dist and node_modules). In dev
-    // the checkout already is that directory; packaged Windows builds extract
-    // server.asar on first use.
     readonly ensure: Effect.Effect<WslServerTreeResult>;
+    readonly cleanupLegacy: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/wsl/DesktopWslServerTree") {}
 
-// Child scheduling stays here instead of inside `visit`, so nested directories
-// cannot create independent concurrency pools. The LIFO work list also keeps
-// traversal memory proportional to the remaining frontier rather than the
-// number of active fibers.
 export const forEachBoundedTree = <Node, E, R>(
   roots: ReadonlyArray<Node>,
   visit: (node: Node) => Effect.Effect<ReadonlyArray<Node>, E, R>,
@@ -81,9 +70,6 @@ interface CopyTreeEntry {
   readonly targetPath: string;
 }
 
-// Copy using only operations supported by Electron's asar-patched fs. Symlinks
-// are not expected because the sidecar is installed with a hoisted, physical
-// layout; anything that is neither a file nor a directory is skipped.
 const copyTree = (
   fs: FileSystem.FileSystem,
   join: (first: string, ...rest: string[]) => string,
@@ -104,8 +90,6 @@ const copyTree = (
           }));
         }
         if (info.type === "File") {
-          // Read and write stay in the same bounded task, so at most eight file
-          // buffers can be retained while their writes complete.
           const bytes = yield* fs.readFile(sourcePath);
           yield* fs.writeFile(targetPath, bytes);
         }
@@ -113,6 +97,7 @@ const copyTree = (
       }),
   );
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fs = yield* FileSystem.FileSystem;
@@ -124,8 +109,6 @@ export const make = Effect.gen(function* () {
   const version = environment.appVersion;
   const versionDir = join(treeRoot, version);
 
-  // Remove sibling trees left behind by previous app versions (and aborted
-  // extractions). Best-effort: a locked file must not block the backend.
   const sweepStale = Effect.gen(function* () {
     const entries = yield* fs.readDirectory(treeRoot).pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(
@@ -155,8 +138,6 @@ export const make = Effect.gen(function* () {
       yield* copyTree(fs, join, serverRoot, partialDir);
       const markerJson = yield* encodeMarker({ version });
       yield* fs.writeFileString(join(partialDir, MARKER_FILE_NAME), `${markerJson}\n`);
-      // The marker is written before the rename, so a directory named after
-      // the version is complete by construction.
       yield* fs.remove(versionDir, { recursive: true }).pipe(Effect.ignore);
       yield* fs.rename(partialDir, versionDir);
     }).pipe(
@@ -169,9 +150,29 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  // Serialize concurrent ensure calls (backend restarts can overlap): the
-  // first caller extracts, later callers see the marker and reuse the tree.
   const gate = yield* Semaphore.make(1);
+
+  const cleanupLegacy = gate
+    .withPermits(1)(
+      needsExtraction
+        ? Effect.gen(function* () {
+            // Invalidate completeness before recursive deletion. Windows can
+            // remove part of a tree and then fail on a locked file; without
+            // this ordering, a surviving marker makes ensure reuse that
+            // half-deleted fallback instead of extracting it again.
+            yield* fs.remove(join(versionDir, MARKER_FILE_NAME), { force: true });
+            yield* fs.remove(treeRoot, { recursive: true, force: true });
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("[wsl-server-tree] Could not remove the legacy extraction cache.", {
+                treeRoot,
+                cause,
+              }),
+            ),
+          )
+        : Effect.void,
+    )
+    .pipe(Effect.withSpan("desktop.wslServerTree.cleanupLegacy"));
 
   const ensure: Effect.Effect<WslServerTreeResult> = gate
     .withPermits(1)(
@@ -185,8 +186,6 @@ export const make = Effect.gen(function* () {
         }
         const result = yield* extract.pipe(
           Effect.map(() => ({ ok: true, root: versionDir }) as const),
-          // Retryable: transient antivirus locks and slow disks are the common
-          // causes, and the backend manager already bounds preflight retries.
           Effect.catch((error) =>
             Effect.succeed({
               ok: false,
@@ -205,13 +204,14 @@ export const make = Effect.gen(function* () {
     )
     .pipe(Effect.withSpan("desktop.wslServerTree.ensure"));
 
-  return DesktopWslServerTree.of({ ensure });
+  return DesktopWslServerTree.of({ ensure, cleanupLegacy });
 });
 
 export const layer = Layer.effect(DesktopWslServerTree, make);
 
 export interface DesktopWslServerTreeTestStub {
   readonly result?: WslServerTreeResult;
+  readonly cleanupLegacy?: Effect.Effect<void>;
 }
 
 export const layerTest = (stub: DesktopWslServerTreeTestStub = {}) =>
@@ -221,6 +221,7 @@ export const layerTest = (stub: DesktopWslServerTreeTestStub = {}) =>
       const environment = yield* DesktopEnvironment.DesktopEnvironment;
       return DesktopWslServerTree.of({
         ensure: Effect.succeed(stub.result ?? { ok: true, root: environment.appRoot }),
+        cleanupLegacy: stub.cleanupLegacy ?? Effect.void,
       });
     }),
   );

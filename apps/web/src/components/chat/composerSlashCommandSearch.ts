@@ -12,6 +12,21 @@ type SlashSearchItem = Extract<
   { type: "slash-command" | "provider-slash-command" | "skill" }
 >;
 
+/**
+ * A provider expands a slash command only when it opens the whole message;
+ * anywhere else it reaches the agent as literal text, so it is not offered
+ * there.
+ */
+export function slashCommandItemsForPromptPosition(
+  items: ReadonlyArray<SlashSearchItem>,
+  isAtPromptStart: boolean,
+): SlashSearchItem[] {
+  if (isAtPromptStart) {
+    return [...items];
+  }
+  return items.filter((item) => item.type !== "provider-slash-command");
+}
+
 function scoreSlashCommandItem(item: SlashSearchItem, query: string): number | null {
   if (item.type === "skill") {
     if (query === "skill") {
