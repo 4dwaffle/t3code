@@ -56,6 +56,7 @@ const makeFileRevisions = (dependencies: FileRevisionsDependencies) => {
       fileRevisionsEpoch(),
       ref.projectId,
       project.repository.trim().toLowerCase(),
+      project.webUrl ?? "",
       ref.number,
     ].join(" ");
 
@@ -132,6 +133,7 @@ const makeFileRevisions = (dependencies: FileRevisionsDependencies) => {
         cwd: project.project.workspaceRoot,
         repository: project.repository,
         host: project.host,
+        ...(project.webUrl === undefined ? {} : { webUrl: project.webUrl }),
         number: ref.number,
         paths,
       }).pipe(
@@ -315,6 +317,7 @@ export const make = (dependencies: Dependencies) => {
             cwd: project.project.workspaceRoot,
             repository: project.repository,
             host: project.host,
+            ...(project.webUrl === undefined ? {} : { webUrl: project.webUrl }),
             number: input.number,
           }).pipe(Effect.mapError(toPullRequestError("filesViewed")));
         }
@@ -341,6 +344,7 @@ export const make = (dependencies: Dependencies) => {
             cwd: project.project.workspaceRoot,
             repository: project.repository,
             host: project.host,
+            ...(project.webUrl === undefined ? {} : { webUrl: project.webUrl }),
             number: input.number,
             files: input.files,
           }).pipe(Effect.mapError(toPullRequestError("setFilesViewed")));

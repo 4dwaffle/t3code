@@ -237,6 +237,8 @@ export interface ProviderFileRevisions {
 }
 
 export interface ProviderRepositoryRef {
+  /** Actual HTTP(S) clone or change-request URL from which the repository path was read. */
+  readonly webUrl?: string;
   readonly cwd: string;
   readonly repository: string;
   readonly host: string;

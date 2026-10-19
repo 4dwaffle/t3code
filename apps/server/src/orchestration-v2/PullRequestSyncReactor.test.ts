@@ -13,7 +13,6 @@ import {
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationProjectShell,
-  type PullRequestRef,
   type PullRequestStack,
   type PullRequestSummary,
   type ThreadPullRequestKey,
@@ -40,6 +39,8 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
 import type { PullRequestTestThread } from "./testkit/pullRequestFixtures.ts";
+
+type PullRequestRef = PullRequestService.PullRequestRef;
 
 const NOW = "2026-08-28T12:00:00.000Z";
 const PROJECT_ID = ProjectId.make("sync-project");
@@ -465,6 +466,7 @@ describe("PullRequestSyncReactor", () => {
               projectId: PROJECT_ID,
               host: "github.com",
               repository: "owner/repository",
+              webUrl: "https://github.com/owner/repository/pull/42",
               number: 42,
             },
           ]);

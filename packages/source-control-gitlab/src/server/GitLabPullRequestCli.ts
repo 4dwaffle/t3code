@@ -1,5 +1,8 @@
+import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -36,6 +39,7 @@ import {
   decodeNotesJson,
   decodeOwnAwardIdJson,
   decodeProjectMergeCapabilitiesJson,
+  decodeProjectPathJson,
   decodeProjectUsersJson,
   decodeRepositoryBlobsJson,
   decodeViewerJson,
@@ -186,6 +190,8 @@ const DIFF_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DIFF_TIMEOUT_MS = 60_000;
 const isVcsProcessExitError = Schema.is(VcsProcessExitError);
 const DIFF_FILE_MAX_OUTPUT_BYTES = 1024 * 1024;
+const PROJECT_PATH_CACHE_CAPACITY = 128;
+const PROJECT_PATH_CACHE_TTL = Duration.minutes(10);
 
 export interface GitLabMergeRequestListBatch {
   readonly items: ReadonlyArray<GitLabMergeRequestListItem>;
@@ -202,6 +208,11 @@ export interface GitLabMergeRequestDiffSlice {
 export class GitLabPullRequestCli extends Context.Service<
   GitLabPullRequestCli,
   {
+    readonly resolveProjectPath: (input: {
+      readonly cwd: string;
+      readonly webUrl: string;
+    }) => Effect.Effect<string, GitLabPullRequestCliError>;
+
     readonly getViewerUsername: (input: {
       readonly cwd: string;
     }) => Effect.Effect<string, GitLabPullRequestCliError>;
@@ -498,6 +509,34 @@ export const make = Effect.gen(function* () {
       ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
     });
+
+  const projectPaths = yield* Cache.makeWith(
+    ({ cwd, webUrl }: { readonly cwd: string; readonly webUrl: string }) =>
+      gitlab
+        .execute({
+          cwd,
+          args: ["repo", "view", webUrl, "--output", "json"],
+        })
+        .pipe(
+          Effect.flatMap((result) =>
+            Effect.fromResult(decodeProjectPathJson(result.stdout.trim())).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new GitLabMergeRequestReadError({
+                    command: "glab",
+                    cwd,
+                    operation: "resolveProjectPath",
+                    cause,
+                  }),
+              ),
+            ),
+          ),
+        ),
+    {
+      capacity: PROJECT_PATH_CACHE_CAPACITY,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? PROJECT_PATH_CACHE_TTL : Duration.zero),
+    },
+  );
 
   const listPage = (input: {
     readonly cwd: string;
@@ -1070,6 +1109,25 @@ export const make = Effect.gen(function* () {
     );
 
   return GitLabPullRequestCli.of({
+    resolveProjectPath: ({ cwd, webUrl }) =>
+      Effect.try({
+        try: () => {
+          const url = new URL(webUrl);
+          // glab owns the installation prefix; only the known MR suffix is removed here.
+          url.pathname = url.pathname.replace(/\/-\/merge_requests\/\d+(?:\/.*)?$/, "");
+          url.search = "";
+          url.hash = "";
+          return url.toString();
+        },
+        catch: (cause) =>
+          new GitLabMergeRequestReadError({
+            command: "glab",
+            cwd,
+            operation: "resolveProjectPath",
+            cause,
+          }),
+      }).pipe(Effect.flatMap((url) => Cache.get(projectPaths, { cwd, webUrl: url }))),
+
     getViewerUsername: viewerUsername,
 
     listMergeRequests: (input) => {
