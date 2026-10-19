@@ -177,6 +177,17 @@ describe("chat math parsing", () => {
     expect(formulas(source)).toEqual([["display", tex]]);
   });
 
+  it.each([1, 2, 3, 4])("respects %i backslashes before a display fence", (count) => {
+    const prefix = "a+" + "\\".repeat(count);
+    for (const opening of ["$$", "$$\n"]) {
+      const source = `${opening}${prefix}$$\nb\n$$`;
+      expect(formulas(source)).toEqual([["display", count % 2 === 1 ? `${prefix}$$\nb` : prefix]]);
+      expect(markdownMathRanges(source)[0]?.source).toBe(
+        count % 2 === 1 ? source : `${opening}${prefix}$$`,
+      );
+    }
+  });
+
   it("keeps TeX escapes inside formulas", () => {
     expect(formulas("Cost $a\\$b$ and \\(\\left(x\\right)\\).")).toEqual([
       ["inline", "a\\$b"],

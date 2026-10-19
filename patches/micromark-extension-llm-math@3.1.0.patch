@@ -10,15 +10,16 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
  import {codes, constants, types} from 'micromark-util-symbol'
  
  /** @type {Construct} */
-@@ -32,6 +32,7 @@
+@@ -32,6 +32,8 @@
        ? tail[2].sliceSerialize(tail[1], true).length
        : 0
    let sizeOpen = 0
 +  let closed = false
++  let slashes = 0
  
    return start
  
-@@ -79,7 +80,32 @@
+@@ -79,7 +81,32 @@
      }
  
      effects.exit('mathFlowFenceSequence')
@@ -52,7 +53,7 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
    }
  
    /**
-@@ -230,6 +256,14 @@
+@@ -230,6 +257,14 @@
        )(code)
      }
  
@@ -67,11 +68,18 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
      effects.enter('mathFlowValue')
      return contentChunk(code)
    }
-@@ -252,8 +286,65 @@
+@@ -247,13 +282,72 @@
+    * @type {State}
+    */
+   function contentChunk(code) {
++    const escaped = slashes % 2 === 1
++    slashes = code === codes.backslash ? slashes + 1 : 0
+     if (code === codes.eof || markdownLineEnding(code)) {
+       effects.exit('mathFlowValue')
        return beforeContentChunk(code)
      }
  
-+    if (code === codes.dollarSign) {
++    if (code === codes.dollarSign && !escaped) {
 +      effects.exit('mathFlowValue')
 +      return effects.attempt(
 +        {tokenize: tokenizeInlineClosingFence, partial: true},
@@ -133,7 +141,7 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
    }
  
    /**
-@@ -269,6 +360,7 @@
+@@ -269,6 +363,7 @@
     * @type {State}
     */
    function after(code) {
@@ -141,7 +149,7 @@ diff --git a/dev/lib/math-flow.js b/dev/lib/math-flow.js
      effects.exit('mathFlow')
      return ok(code)
    }
-@@ -357,6 +449,7 @@
+@@ -357,6 +452,7 @@
      function afterSequenceClose(code) {
        if (code === codes.eof || markdownLineEnding(code)) {
          effects.exit('mathFlowFence')
