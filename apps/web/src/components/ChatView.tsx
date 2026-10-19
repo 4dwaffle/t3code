@@ -5967,6 +5967,9 @@ export default function ChatView(props: ChatViewProps) {
     },
   ) => {
     e?.preventDefault();
+    // What the user pressed send on; uploads below can take a while, and a redirect must not
+    // decline approvals for a draft that changed meanwhile.
+    const promptAtSend = promptRef.current;
     if (
       usageLimitsOffered &&
       usageLimitsKey !== null &&
@@ -6525,20 +6528,23 @@ export default function ChatView(props: ChatViewProps) {
     const approvalsToDecline =
       currentRouteThreadKeyRef.current === routeThreadKey ? pendingApprovalsRef.current : [];
     if (approvalsToDecline.length > 0) {
+      // A draft edited since send, or a paste still landing in it, is no longer the message
+      // the user sent.
+      const draftChangedSinceSend = () =>
+        promptRef.current !== promptAtSend || composerRef.current?.hasPendingAttachments() === true;
       const draftBeforeDecline = useComposerDraftStore
         .getState()
         .getComposerDraft(composerDraftTarget);
-      const promptBeforeDecline = promptRef.current;
+      const changedBeforeDecline = draftChangedSinceSend();
       const declined =
+        !changedBeforeDecline &&
         !approvalsToDecline.some((approval) => respondingRequestIds.includes(approval.requestId)) &&
         (await declinePendingApprovals(approvalsToDecline, onRespondToApprovalStable).catch(
           () => false,
         ));
-      // A draft edited during the decline, or a paste still landing in it, is no longer the
-      // message the user sent.
       const draftChanged =
-        promptRef.current !== promptBeforeDecline ||
-        composerRef.current?.hasPendingAttachments() === true ||
+        changedBeforeDecline ||
+        draftChangedSinceSend() ||
         useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) !==
           draftBeforeDecline;
       if (!declined || draftChanged || currentRouteThreadKeyRef.current !== routeThreadKey) {
@@ -6546,10 +6552,12 @@ export default function ChatView(props: ChatViewProps) {
         setDockedDraftHeroThreadKey((currentThreadKey) =>
           currentThreadKey === activeThreadKey ? null : currentThreadKey,
         );
-        if (declined && draftChanged) {
+        if (draftChanged) {
           toastManager.add({
             type: "info",
-            title: "Approval declined. Your message changed, so it wasn't sent.",
+            title: declined
+              ? "Approval declined. Your message changed, so it wasn't sent."
+              : "Your message changed, so it wasn't sent.",
             description: "Send again when it's ready.",
           });
         }
