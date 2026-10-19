@@ -153,8 +153,7 @@ function attachmentsFor(row: LegacyMessageRow) {
   return Option.getOrElse(decodeAttachments(parseJson(row.attachments_json)), () => []);
 }
 
-// Best-effort like attachments: an unreadable context drops, the message stays.
-function contextFor(row: LegacyMessageRow): OrchestrationMessageContext | undefined {
+function contextFor(row: LegacyMessageRow) {
   if (!row.context_json) return undefined;
   return Option.getOrUndefined(decodeMessageContext(parseJson(row.context_json)));
 }
@@ -776,8 +775,6 @@ const make = Effect.gen(function* () {
     let importedThreadCount = 0;
     let importedMessageCount = 0;
     for (const row of rows) {
-      // One thread's failure or defect must not stop hydration of the rest;
-      // interruption (shutdown) still propagates.
       const result = yield* ensureTranscript(ThreadId.make(row.thread_id)).pipe(
         Effect.catchCauseIf(
           (cause) => !Cause.hasInterrupts(cause),
@@ -786,19 +783,19 @@ const make = Effect.gen(function* () {
               threadId: row.thread_id,
               cause,
             }).pipe(
-              Effect.andThen(
-                () =>
-                  sql`
+              Effect.andThen(() =>
+                sql`
                     UPDATE orchestration_v2_legacy_imports
                     SET last_error = 'Transcript hydration failed; retry on next open.'
                     WHERE thread_id = ${row.thread_id}
-                  `,
+                  `.pipe(
+                  Effect.catchCauseIf(
+                    (cause) => !Cause.hasInterrupts(cause),
+                    () => Effect.void,
+                  ),
+                ),
               ),
               Effect.as({ importedThreadCount: 0, importedMessageCount: 0 }),
-              Effect.orElseSucceed(() => ({
-                importedThreadCount: 0,
-                importedMessageCount: 0,
-              })),
             ),
         ),
       );
@@ -809,9 +806,11 @@ const make = Effect.gen(function* () {
     return { importedThreadCount, importedMessageCount };
   }).pipe(
     Effect.catchCause((cause) =>
-      Effect.logWarning("Legacy v1 transcript background import stopped", { cause }).pipe(
-        Effect.as({ importedThreadCount: 0, importedMessageCount: 0 }),
-      ),
+      Cause.hasInterrupts(cause)
+        ? Effect.failCause(Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)))
+        : Effect.logWarning("Legacy v1 transcript background import stopped", { cause }).pipe(
+            Effect.as({ importedThreadCount: 0, importedMessageCount: 0 }),
+          ),
     ),
   );
 
