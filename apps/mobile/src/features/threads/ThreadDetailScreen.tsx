@@ -12,6 +12,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import {
   childThreadInputsTitle,
+  parseCodexFeedbackCommand,
   type CodexFeedbackSubmission,
   type EnvironmentThreadStatus,
 } from "@t3tools/client-runtime/state/threads";
@@ -899,21 +900,29 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     selectedThreadKey,
   ]);
 
-  const handleSendMessage = async (followUp?: ActiveTurnComposerAction) => {
+  const handleSendMessage = async (
+    followUp?: ActiveTurnComposerAction,
+    stillSendable?: () => boolean,
+  ) => {
     const targetThreadKey = selectedThreadKey;
     const hasUserMessage = selectedThreadFeed.some(
       (entry) => entry.type === "message" && entry.message.role === "user",
     );
-    // Saving a queued-message edit sends nothing, so it leaves the approval alone.
+    // Saving a queued-message edit or submitting `/feedback` sends nothing to the agent, so it
+    // leaves approvals alone.
     if (
       props.activePendingApprovals.length > 0 &&
       props.activePendingUserInput === null &&
-      props.queuedRunEdit === null
+      props.queuedRunEdit === null &&
+      (props.composerDraftKey === null ||
+        parseCodexFeedbackCommand(getComposerDraftSnapshot(props.composerDraftKey).text) === null)
     ) {
       if (
         props.respondingApprovalId !== null ||
         !(await declinePendingApprovals(props.activePendingApprovals, props.onRespondToApproval)) ||
-        selectedThreadKeyRef.current !== targetThreadKey
+        selectedThreadKeyRef.current !== targetThreadKey ||
+        // A draft edited or pasted into during the decline isn't what the user sent.
+        stillSendable?.() === false
       ) {
         return null;
       }

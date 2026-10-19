@@ -57,6 +57,7 @@ import {
   declinePendingApprovals,
   type ApprovalResponder,
 } from "@t3tools/client-runtime/state/thread-requests";
+import { parseCodexFeedbackCommand } from "@t3tools/client-runtime/state/threads";
 import * as Schema from "effect/Schema";
 import {
   isPasteAsTextShortcut,
@@ -67,7 +68,7 @@ import {
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { folderDropTarget, resolveDroppedFolderPath } from "./folderDrop";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
-import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
+import { USAGE_LIMITS_COMMAND, isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import {
   memo,
   type ComponentProps,
@@ -94,6 +95,7 @@ import {
   expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
   replaceTextRange,
+  parseStandaloneComposerSlashCommand,
 } from "../../composer-logic";
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
 import { listContinuationForEnter, listIndentForTab } from "../../composer-list-continuation";
@@ -3982,9 +3984,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
-    // Saving a queued-message edit sends nothing, so it leaves the approval alone. Approvals
-    // the typing guard still hides count too: the redirect replaces them all.
-    if (pendingApprovals.length > 0 && activePendingProgress === null && !isEditingQueuedMessage) {
+    // Saving a queued-message edit or running a local command (`/plan`, `/feedback`, usage limits) sends
+    // nothing, so it leaves approvals alone. Approvals the typing guard still hides count too:
+    // the redirect replaces them all.
+    if (
+      pendingApprovals.length > 0 &&
+      activePendingProgress === null &&
+      !isEditingQueuedMessage &&
+      !isUsageLimitsCommand(promptRef.current) &&
+      parseStandaloneComposerSlashCommand(promptRef.current) === null &&
+      parseCodexFeedbackCommand(promptRef.current) === null
+    ) {
       event?.preventDefault();
       if (
         approvalSubmissionInFlightRef.current ||
