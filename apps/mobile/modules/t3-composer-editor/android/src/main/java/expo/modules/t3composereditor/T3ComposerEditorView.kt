@@ -676,14 +676,7 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
    */
   private fun submitChord(keyCode: Int, event: KeyEvent): Boolean? {
     val isReturn = keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
-    val fromSoftKeyboard =
-      event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
-        (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
-    // Return during IME composition (CJK on a hardware keyboard) commits the candidate, like
-    // iOS's marked-text guard, so the draft is never sent half-typed.
-    val composing = text?.let { BaseInputConnection.getComposingSpanStart(it) != -1 } == true
-    val canSubmit = submitEnabled && submitListener != null && !readOnly && isEnabled && !composing
-    if (!isReturn || fromSoftKeyboard || !canSubmit) {
+    if (!isReturn || isFromSoftKeyboard(event) || !canSubmit()) {
       return null
     }
     return when {
@@ -693,6 +686,17 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
         if (returnSends) null else true
       else -> null
     }
+  }
+
+  private fun isFromSoftKeyboard(event: KeyEvent): Boolean =
+    event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD ||
+      (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0
+
+  private fun canSubmit(): Boolean {
+    // Return during IME composition (CJK on a hardware keyboard) commits the candidate, like
+    // iOS's marked-text guard, so the draft is never sent half-typed.
+    val composing = text?.let { BaseInputConnection.getComposingSpanStart(it) != -1 } == true
+    return submitEnabled && submitListener != null && !readOnly && isEnabled && !composing
   }
 
   override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
