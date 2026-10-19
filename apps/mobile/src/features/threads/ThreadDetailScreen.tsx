@@ -9,6 +9,7 @@ import type { WorktreeSetupCardProps } from "./worktree-setup-card";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import type { HandoffEndpoints } from "@t3tools/client-runtime/handoff";
 import {
   childThreadInputsTitle,
@@ -787,7 +788,15 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const lastDispatchedVisitRef = useRef<string | null>(null);
   const lastVisitDispatchRef = useRef({ threadKey: selectedThreadKey, at: 0 });
   const selectedThreadId = props.selectedThread.id;
-  const selectedThreadUpdatedAt = props.selectedThread.updatedAt;
+  const selectedThreadWokeAt = threadWokeAt(props.selectedThread, {
+    now: new Date().toISOString(),
+  });
+  // A scheduled wake can happen without a newer server update.
+  const selectedThreadUpdatedAt =
+    selectedThreadWokeAt !== null &&
+    Date.parse(selectedThreadWokeAt) > Date.parse(props.selectedThread.updatedAt)
+      ? selectedThreadWokeAt
+      : props.selectedThread.updatedAt;
   const selectedThreadLastVisitedAt = props.selectedThread.lastVisitedAt;
   const selectedThreadCompletedAt = props.selectedThread.latestRun?.completedAt;
   useEffect(() => {
