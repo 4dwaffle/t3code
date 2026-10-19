@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { enrichedMarkdownWithMath } from "./enrichedMarkdownMath";
+import { markdownWithHtml, markdownWithTableBreaks } from "./markdownDocument";
 
 describe("native Enriched math input", () => {
   it.each(["- b", "+ c", "> d", "# e"])("keeps %s inside multiline display math", (line) => {
@@ -11,6 +12,12 @@ describe("native Enriched math input", () => {
   it("removes TeX comments before folding line breaks, preserving escaped percent signs", () => {
     expect(enrichedMarkdownWithMath("$$\nx% discarded\n+y \\% \\\\% discarded again\n+z\n$$")).toBe(
       "$$x+y \\% \\\\+z$$",
+    );
+  });
+  it("keeps paragraph-to-table breaks while normalizing formulas", () => {
+    const source = "Intro\n| Name | Formula |\n| --- | --- |\n| Norm | \\(x\\) |";
+    expect(enrichedMarkdownWithMath(markdownWithTableBreaks(markdownWithHtml(source)))).toBe(
+      "Intro\n\n| Name | Formula |\n| --- | --- |\n| Norm | $x$ |",
     );
   });
   it("normalizes complete math while retaining surrounding Markdown", () => {
