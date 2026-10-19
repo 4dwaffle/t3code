@@ -55,11 +55,11 @@ describe("declining an approval before sending", () => {
     },
   );
 
-  it("does not respond to an approval whose provider is unavailable", async () => {
+  it("sends without responding when the provider can no longer answer", async () => {
     const respond = vi.fn(async () => AsyncResult.success(undefined));
     expect(
       await declinePendingApproval({ ...approval, responseCapability: "not_resumable" }, respond),
-    ).toBe(false);
+    ).toBe(true);
     expect(respond).not.toHaveBeenCalled();
   });
 });

@@ -19,7 +19,8 @@ export async function declinePendingApproval(
   approval: ThreadPendingApproval,
   respond: ApprovalResponder,
 ): Promise<boolean> {
-  if (approval.responseCapability !== "live") return false;
+  // A request the provider can no longer answer has nothing to decline.
+  if (approval.responseCapability !== "live") return true;
   return (await respond(approval.requestId, "decline"))?._tag === "Success";
 }
 
