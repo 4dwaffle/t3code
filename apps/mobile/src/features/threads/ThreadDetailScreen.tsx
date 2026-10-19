@@ -453,9 +453,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     }
   })();
   const threadSyncLabel = useDelayedStatus(selectedThreadKey, realThreadSyncLabel);
-  const canInterrupt = useAtomValue(
-    threadEnvironment.interruptTurn.permissionAtom(props.environmentId),
-  );
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
@@ -500,7 +497,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     latestRunCompletedAt: props.selectedThread.latestRun?.completedAt ?? null,
   });
   const runStatusAction = async (action: "stop" | "wake" | "unsettle" | "dismiss") => {
-    if (statusPending || (action === "stop" ? !canInterrupt : !props.canOperateThread)) return;
+    if (statusPending || !props.canOperateThread) return;
     const request = { threadKey: selectedThreadKey };
     setStatusRequest(request);
     const target = {
@@ -614,7 +611,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
         action: {
           label: statusPending ? "Stopping..." : "Stop",
           accessibilityLabel: "Stop background work",
-          disabled: !canInterrupt || statusPending,
+          disabled: !props.canOperateThread || statusPending,
           onPress: () => void runStatusAction("stop"),
         },
       };
