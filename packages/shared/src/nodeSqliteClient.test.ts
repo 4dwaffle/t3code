@@ -978,7 +978,7 @@ it.effect.each([
         ? Effect.scoped(
             Effect.gen(function* () {
               const connection = yield* sql.reserve;
-              yield* connection.executeUnprepared("INSERT INTO entries VALUES (1)", []);
+              yield* connection.executeUnprepared("INSERT INTO entries VALUES (1)", [], undefined);
               yield* Deferred.succeed(entered, undefined);
             }),
           )
