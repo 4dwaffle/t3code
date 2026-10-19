@@ -463,10 +463,7 @@ export function NewTaskDraftScreen(props: {
       selectedEnvironmentServerConfig?.providers ?? [],
       selectedEnvironmentServerConfig?.usageLimitSources ?? [],
     );
-  const composerWorkspaceCwd =
-    (flow.workspaceMode === "worktree"
-      ? selectedProject?.workspaceRoot
-      : (flow.selectedWorktreePath ?? selectedProject?.workspaceRoot)) || null;
+  const composerWorkspaceCwd = flow.modelCwd;
   const stripAttachments = composerStripAttachments(flow.attachments);
   const composerMenu = useComposerCommandMenu({
     draftMessage: flow.prompt,
@@ -1182,13 +1179,17 @@ export function NewTaskDraftScreen(props: {
     }
     const draft = getComposerDraftSnapshot(draftKey);
     if (appAtomRegistry.get(composerContextImportsAtom)[draftKey]) return;
+    const workspaceSelection = flow.canChooseWorkspace ? draft.workspaceSelection : undefined;
+    const workspaceMode = workspaceSelection?.mode ?? flow.workspaceMode;
     const modelSelection =
       resolveSelectableModelSelection(
         selectedEnvironmentServerConfig,
         draft.modelSelection ?? null,
         selectedProject.id,
+        workspaceMode === "worktree"
+          ? selectedProject.workspaceRoot
+          : (workspaceSelection?.worktreePath ?? selectedProject.workspaceRoot),
       ) ?? flow.selectedModel;
-    const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
     const initialMessageText = draft.text.trim();
 

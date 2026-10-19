@@ -168,6 +168,7 @@ type NewTaskFlowContextValue = {
   readonly selectedProjectKey: string | null;
   readonly selectedModelKey: string | null;
   readonly workspaceMode: WorkspaceMode;
+  readonly modelCwd: string | null;
   readonly canChooseWorkspace: boolean;
   readonly selectedBranchName: string | null;
   readonly selectedWorktreePath: string | null;
@@ -508,12 +509,18 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     : projectSettings.settings.defaultRuntimeMode;
   const runtimeMode = selectedProjectDraft.runtimeMode ?? defaultRuntimeMode;
 
+  const modelCwd =
+    (workspaceMode === "worktree"
+      ? selectedProject?.workspaceRoot
+      : ((canChooseWorkspace ? selectedWorktreePath : null) ?? selectedProject?.workspaceRoot)) ||
+    null;
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model.
   const draftModelSelection = resolveSelectableModelSelection(
     selectedEnvironmentServerConfig,
     selectedProjectDraft.modelSelection ?? null,
     selectedProject?.id ?? null,
+    modelCwd,
   );
   const projectDefaultModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
@@ -531,6 +538,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
     undefined,
     selectedProject?.id ?? null,
+    false,
+    modelCwd,
   );
 
   const selectedModel = resolveNewTaskModelSelection({
@@ -948,17 +957,20 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     }
     const draft = getComposerDraftSnapshot(selectedProjectDraftKey);
     const text = draft.text.trim();
+    const workspaceSelection = canChooseWorkspace ? draft.workspaceSelection : undefined;
+    const mode = workspaceSelection?.mode ?? workspaceMode;
     const draftModelSelection =
       resolveSelectableModelSelection(
         selectedEnvironmentServerConfig,
         draft.modelSelection ?? null,
         selectedProject.id,
+        mode === "worktree"
+          ? selectedProject.workspaceRoot
+          : (workspaceSelection?.worktreePath ?? selectedProject.workspaceRoot),
       ) ?? selectedModel;
     if ((text.length === 0 && draft.attachments.length === 0) || !draftModelSelection) {
       return null;
     }
-    const workspaceSelection = canChooseWorkspace ? draft.workspaceSelection : undefined;
-    const mode = workspaceSelection?.mode ?? workspaceMode;
     // When the selection is the stand-in built from the queued snapshot,
     // persist the original (possibly absent) snapshot values — the
     // stand-in's placeholder title/workspaceRoot must never be written back
@@ -1117,6 +1129,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     selectedProjectKey,
     selectedModelKey,
     workspaceMode,
+    modelCwd,
     canChooseWorkspace,
     selectedBranchName,
     selectedWorktreePath,

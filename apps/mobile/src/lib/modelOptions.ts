@@ -1,3 +1,4 @@
+import { resolveProviderForCwd } from "@t3tools/client-runtime/providerSkills";
 import type { MenuAction } from "@react-native-menu/menu";
 import type {
   ModelCapabilities,
@@ -177,6 +178,7 @@ export function resolveSelectableModelSelection(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null,
   projectId: ProjectId | null,
+  cwd?: string | null,
 ): ModelSelection | null {
   if (!selection || !config) {
     return selection;
@@ -189,12 +191,21 @@ export function resolveSelectableModelSelection(
   if (driver === "antigravity") {
     return isProjectDisabledOverride(config, selection.instanceId, projectId) ? null : selection;
   }
-  return provider &&
-    isProviderEnabledForProject(config, provider, projectId) &&
-    provider.installed &&
-    provider.auth.status !== "unauthenticated"
+  if (
+    !provider ||
+    !isProviderEnabledForProject(config, provider, projectId) ||
+    !provider.installed ||
+    provider.auth.status === "unauthenticated"
+  ) {
+    return null;
+  }
+  return cwd === undefined
     ? selection
-    : null;
+    : normalizeSelectionOptions(
+        selection,
+        resolveProviderForCwd(provider, cwd).models.find((model) => model.slug === selection.model)
+          ?.capabilities ?? null,
+      );
 }
 
 export function resolveDefaultableModelSelection(
@@ -217,10 +228,18 @@ export function resolveNewTaskModelSelection(input: {
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
+  const selection = input.draftSelection ?? input.projectDefaultSelection ?? input.stickySelection;
+  if (selection) {
+    const option = input.modelOptions.find(
+      (option) =>
+        option.selection.instanceId === selection.instanceId &&
+        option.selection.model === selection.model,
+    );
+    return option && !option.isUnavailable && option.providerDriver !== "antigravity"
+      ? option.selection
+      : selection;
+  }
   return (
-    input.draftSelection ??
-    input.projectDefaultSelection ??
-    input.stickySelection ??
     input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
     input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
     null
@@ -233,10 +252,12 @@ export function buildModelOptions(
   providerInstanceId: ModelSelection["instanceId"] | undefined,
   projectId: ProjectId | null,
   includeHidden = false,
+  cwd?: string | null,
 ): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
 
-  for (const provider of config?.providers ?? []) {
+  for (const snapshot of config?.providers ?? []) {
+    const provider = resolveProviderForCwd(snapshot, cwd);
     if (
       (providerInstanceId !== undefined && provider.instanceId !== providerInstanceId) ||
       !isProviderEnabledForProject(config, provider, projectId) ||

@@ -86,32 +86,89 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("lists an OpenCode 2 workspace's own skills and commands from its server", () =>
-    Effect.gen(function* () {
-      serverStarts.length = 0;
-      const requested: Array<string> = [];
-      const server = replayOpenCodeServer(
-        { ...OPENCODE_2_RESPONSES, ...OPENCODE_2_WORKSPACE_RESPONSES },
-        "secret",
-        requested,
-      );
-      const instance = yield* create(
-        { serverUrl: "http://127.0.0.1:4096", serverPassword: "secret" },
-        server,
-      );
+  it.effect(
+    "isolates workspace agents and keeps skills and commands when agent discovery fails",
+    () =>
+      Effect.gen(function* () {
+        serverStarts.length = 0;
+        const requested: Array<string> = [];
+        let failAgents = false;
+        const agentDirectories: Array<string | null> = [];
+        const server = HttpClient.make((request, url) => {
+          const directory = url.searchParams.get("location[directory]");
+          if (url.pathname === "/api/agent") agentDirectories.push(directory);
+          const responses = {
+            ...OPENCODE_2_RESPONSES,
+            ...OPENCODE_2_WORKSPACE_RESPONSES,
+            "/api/agent": {
+              status: failAgents ? 500 : 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                location: { directory },
+                data: [
+                  { id: "build", mode: "primary", hidden: false },
+                  {
+                    id: directory === "/work" ? "reviewer" : "writer",
+                    mode: "all",
+                    hidden: false,
+                  },
+                  { id: "internal", mode: "primary", hidden: true },
+                  { id: "explore", mode: "subagent", hidden: false },
+                ].map((agent) => ({
+                  ...agent,
+                  name: agent.id,
+                  request: { settings: {}, headers: {}, body: {} },
+                  permissions: [],
+                })),
+              }),
+            },
+          };
+          return replayOpenCodeServer(responses, "secret", requested).execute(request);
+        });
+        const instance = yield* create(
+          { serverUrl: "http://127.0.0.1:4096", serverPassword: "secret" },
+          server,
+        );
 
-      const workspace = yield* instance.snapshotForCwd!("/work");
-      assert.includeMembers(
-        workspace.skills.map((skill) => skill.name),
-        ["plum", "opencode"],
-      );
-      assert.deepStrictEqual(
-        workspace.slashCommands.map((command) => command.name),
-        ["compact", "init", "review", "bee"],
-      );
-      assert.include(requested, "/api/skill");
-      assert.deepStrictEqual(serverStarts, []);
-    }).pipe(Effect.scoped),
+        const global = structuredClone(yield* instance.snapshot.getSnapshot);
+        const workspace = yield* instance.snapshotForCwd!("/work");
+        assert.includeMembers(
+          workspace.skills.map((skill) => skill.name),
+          ["plum", "opencode"],
+        );
+        assert.deepStrictEqual(
+          workspace.slashCommands.map((command) => command.name),
+          ["compact", "init", "review", "bee"],
+        );
+        assert.include(requested, "/api/skill");
+        const choices = (snapshot: typeof workspace) => {
+          const descriptor = snapshot.optionDescriptors?.find((option) => option.id === "agent");
+          return descriptor?.type === "select"
+            ? descriptor.options.map((option) => option.id)
+            : undefined;
+        };
+        assert.deepStrictEqual(choices(workspace), ["build", "reviewer"]);
+        assert.deepStrictEqual(choices(yield* instance.snapshotForCwd!("/other")), [
+          "build",
+          "writer",
+        ]);
+
+        failAgents = true;
+        const failed = yield* instance.snapshotForCwd!("/work");
+        assert.deepStrictEqual(failed.skills, workspace.skills);
+        assert.deepStrictEqual(failed.slashCommands, workspace.slashCommands);
+        assert.isUndefined(failed.optionDescriptors);
+        assert.deepStrictEqual(failed.models, global.models);
+
+        failAgents = false;
+        assert.deepStrictEqual(choices(yield* instance.snapshotForCwd!("/work")), [
+          "build",
+          "reviewer",
+        ]);
+        assert.deepStrictEqual(agentDirectories, ["/work", "/other", "/work", "/work"]);
+        assert.deepStrictEqual(yield* instance.snapshot.getSnapshot, global);
+        assert.deepStrictEqual(serverStarts, []);
+      }).pipe(Effect.scoped),
   );
 
   it.effect("answers capability reads without waiting on an unreachable server", () =>
