@@ -1,3 +1,5 @@
+import * as NodePath from "node:path";
+
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
@@ -312,6 +314,10 @@ function providerRef(
   return { driver: PI_PROVIDER, nativeId, strength };
 }
 
+function samePiSessionFile(live: string | undefined, stored: string): boolean {
+  return live !== undefined && NodePath.resolve(live) === NodePath.resolve(stored);
+}
+
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 interface PiStreamItemState {
@@ -472,6 +478,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         environment: options.environment,
         mcpSession,
         extensionPath,
+        sessionPath: input.initialNativeThreadId,
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const scopedLaunch = yield* agentScope.wrap({
@@ -2170,7 +2177,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const resumeId = existing?.nativeThreadRef?.nativeId;
         const needsNewSession = resumeId == null && registrationAttempted;
         registrationAttempted = true;
-        if (resumeId != null || needsNewSession) {
+        let stateData = resumeId != null ? yield* request({ type: "get_state" }) : undefined;
+        const alreadyOnResumeFile =
+          resumeId != null && samePiSessionFile(recordString(stateData, "sessionFile"), resumeId);
+        if (alreadyOnResumeFile) {
+          lastNativeThreadId = resumeId;
+        } else if (resumeId != null || needsNewSession) {
           lastNativeThreadId = resumeId ?? lastNativeThreadId;
           // Even a failed lifecycle operation can change Pi's native session.
           // Never leave the old app binding or model defaults usable afterward.
@@ -2189,8 +2201,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           if (recordField(result, "cancelled") === true) {
             return yield* protocolError("A Pi extension cancelled the session switch");
           }
+          stateData = undefined;
         }
-        const stateData = yield* request({ type: "get_state" });
+        stateData ??= yield* request({ type: "get_state" });
         if (!modelsDiscovered) {
           const modelsData = yield* request({ type: "get_available_models" }).pipe(
             Effect.orElseSucceed(() => undefined),
