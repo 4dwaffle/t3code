@@ -978,50 +978,85 @@ describe("AcpRegistryAdapterV2", () => {
     (stopReason) =>
       Effect.gen(function* () {
         const { update, childState, idle, prompt } = claudeFrames;
-        const session = yield* openClaudeReplaySession([
-          ...claudeFrames.open,
-          ...prompt(1),
-          ...claudeChild,
-          update("child-1", {
-            sessionUpdate: "tool_call_update",
-            toolCallId: "child-tool",
-            name: "Bash",
-            title: "Read package",
-            kind: "execute",
-            status: "in_progress",
-            rawInput: { command: "cat package.json" },
-          }),
-          idle(stopReason),
-          ...prompt(2),
-          childState(CLAUDE_ROOT_SESSION, "child-1", "running"),
-          update("child-1", {
-            sessionUpdate: "session_message",
-            messageId: "resume-child",
-            senderSessionId: CLAUDE_ROOT_SESSION,
-            recipientSessionId: "child-1",
-            content: [{ type: "text", text: "Continue the review." }],
-          }),
-          claudeMarker("resumed"),
-          childState("child-1", "grandchild", "running"),
-          update("grandchild", {
-            sessionUpdate: "tool_call_update",
-            toolCallId: "nested-tool",
-            name: "Bash",
-            title: "Read nested package",
-            kind: "execute",
-            status: "in_progress",
-            rawInput: { command: "cat nested/package.json" },
-          }),
-          update("grandchild", {
-            sessionUpdate: "agent_message_chunk",
-            messageId: "nested-reply",
-            content: { type: "text", text: "Nested output" },
-          }),
-          claudeMarker("nested"),
-          idle("end_turn"),
-          claudeFrames.closeRequest,
-          claudeFrames.closed,
-        ]);
+        const gate = makeProviderReplayGate(["nested-output", "nested-idle"]);
+        const session = yield* openClaudeReplaySession(
+          [
+            ...claudeFrames.open,
+            ...prompt(1),
+            update(CLAUDE_ROOT_SESSION, {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "agent-1",
+              name: "Agent",
+              title: "Review",
+              kind: "think",
+              status: "in_progress",
+              rawInput: { prompt: "Review the code", description: "Review" },
+            }),
+            ...claudeChild.slice(1, -1),
+            update("child-1", {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "child-tool",
+              name: "Bash",
+              title: "Read package",
+              kind: "execute",
+              status: "in_progress",
+              rawInput: { command: "cat package.json" },
+            }),
+            idle(stopReason),
+            ...prompt(2),
+            childState(CLAUDE_ROOT_SESSION, "child-1", "running"),
+            update("child-1", {
+              sessionUpdate: "session_message",
+              messageId: "resume-child",
+              senderSessionId: CLAUDE_ROOT_SESSION,
+              recipientSessionId: "child-1",
+              content: [{ type: "text", text: "Continue the review." }],
+            }),
+            claudeMarker("resumed"),
+            childState("child-1", "grandchild", "running"),
+            childState(CLAUDE_ROOT_SESSION, "child-1", "idle"),
+            update(CLAUDE_ROOT_SESSION, {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "agent-1",
+              name: "Agent",
+              status: "completed",
+              rawInput: { prompt: "Review the code", description: "Review" },
+            }),
+            idle("end_turn"),
+            {
+              ...update("grandchild", {
+                sessionUpdate: "tool_call_update",
+                toolCallId: "nested-tool",
+                name: "Bash",
+                title: "Read nested package",
+                kind: "execute",
+                status: "in_progress",
+                rawInput: { command: "cat nested/package.json" },
+              }),
+              label: "nested-output",
+            },
+            update("grandchild", {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "nested-reply",
+              content: { type: "text", text: "Nested output" },
+            }),
+            update(CLAUDE_ROOT_SESSION, {
+              sessionUpdate: "user_message",
+              messageId: "nested-wake",
+              content: [{ type: "text", text: "Continue the review." }],
+            }),
+            idle("end_turn"),
+            claudeMarker("nested"),
+            {
+              ...childState("child-1", "grandchild", "idle"),
+              label: "nested-idle",
+            },
+            claudeMarker("nested idle"),
+            claudeFrames.closeRequest,
+            claudeFrames.closed,
+          ],
+          gate,
+        );
         yield* session.runtime.startTurn(session.turnInput(1));
         const settled = yield* session.terminal;
         assert.equal(settled.status, stopReason === "error" ? "failed" : "completed");
@@ -1050,7 +1085,25 @@ describe("AcpRegistryAdapterV2", () => {
             event.turnItem.status === "running",
         );
         assert.lengthOf(openTools, 1, "handoff announces each open child tool once");
-        const nested = yield* session.throughMarker("nested");
+        const foreground = yield* session.until((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          foreground.some(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          ),
+          "the foreground Agent tool terminalizes its visible owner",
+        );
+        assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+        gate.release("nested-output");
+        const childOutput = yield* session.throughMarker("nested");
+        yield* Deferred.await(session.offered);
+        assert.lengthOf(session.offers, 1);
+        yield* session.offers[0]!.dispatchIfCurrent!(Effect.void);
+        yield* session.runtime.startTurn(session.turnInput(3, { continuation: true }));
+        const continued = yield* session.until((event) => event.type === "turn.terminal");
+        const terminal = continued.at(-1)!;
+        if (terminal.type !== "turn.terminal") throw new Error("Missing continuation terminal");
+        assert.equal(terminal.status, "completed");
+        const nested = [...childOutput, ...continued];
         const messages = nested.filter(
           (event) => event.type === "message.updated" && event.message.text === "Nested output",
         );
@@ -1059,14 +1112,28 @@ describe("AcpRegistryAdapterV2", () => {
           assert.equal(messages[0].message.threadId, row.subagent.childThreadId);
         }
         const nestedTool = nested.find(
-          (event) => event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool",
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "dynamic_tool" &&
+            event.turnItem.nativeItemRef?.nativeId ===
+              "agent-1:session:grandchild:tool:nested-tool",
         );
         assert.isDefined(nestedTool);
         if (nestedTool?.type === "turn_item.updated") {
           assert.equal(nestedTool.turnItem.threadId, row.subagent.childThreadId);
+          if (nestedTool.turnItem.type === "dynamic_tool")
+            assert.deepEqual(nestedTool.turnItem.input, { command: "cat nested/package.json" });
         }
-        assert.equal((yield* session.terminal).status, "completed");
         assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+        gate.release("nested-idle");
+        const finished = yield* session.throughMarker("nested idle");
+        assert.isTrue(
+          finished.some(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          ),
+        );
+        assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+        assert.lengthOf(session.offers, 1, "nested frames make progress in one continuation");
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
