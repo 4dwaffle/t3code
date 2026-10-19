@@ -1448,6 +1448,7 @@ function renderFeedEntry(
       activities={entry.activities}
       continuesWorkLog={entry.continuesWorkLog}
       environmentId={props.environmentId}
+      workspaceRoot={props.workspaceRoot}
       anchorKey={entry.id}
       copiedRowId={props.copiedRowId}
       expandedRows={props.expandedWorkRows}
