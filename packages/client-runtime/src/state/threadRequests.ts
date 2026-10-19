@@ -15,13 +15,17 @@ export type ApprovalResponder = (
   decision: ProviderApprovalDecision,
 ) => Promise<AtomCommandResult<unknown, unknown> | undefined>;
 
-export async function declinePendingApproval(
-  approval: ThreadPendingApproval,
+/** Declines every approval a redirect replaces; any one still pending would block the agent. */
+export async function declinePendingApprovals(
+  approvals: ReadonlyArray<ThreadPendingApproval>,
   respond: ApprovalResponder,
 ): Promise<boolean> {
-  // A request the provider can no longer answer has nothing to decline.
-  if (approval.responseCapability !== "live") return true;
-  return (await respond(approval.requestId, "decline"))?._tag === "Success";
+  for (const approval of approvals) {
+    // A request the provider can no longer answer has nothing to decline.
+    if (approval.responseCapability !== "live") continue;
+    if ((await respond(approval.requestId, "decline"))?._tag !== "Success") return false;
+  }
+  return true;
 }
 
 export interface ThreadPendingApproval {

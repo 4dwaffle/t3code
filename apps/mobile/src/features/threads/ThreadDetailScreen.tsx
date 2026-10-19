@@ -38,7 +38,7 @@ import {
   type CodexArtifactTemplate,
 } from "@t3tools/shared/codexArtifactTemplates";
 import {
-  declinePendingApproval,
+  declinePendingApprovals,
   type ApprovalResponder,
   type ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
@@ -185,6 +185,7 @@ export interface ThreadDetailScreenProps {
     | { readonly kind: "failed"; readonly reason: string; readonly onEditTask: () => void }
     | null;
   readonly activePendingApproval: PendingApproval | null;
+  readonly activePendingApprovals: ReadonlyArray<PendingApproval>;
   readonly respondingApprovalId: RuntimeRequestId | null;
   readonly activePendingUserInput: PendingUserInput | null;
   readonly activePendingUserInputDrafts: Record<string, PendingUserInputDraftAnswer>;
@@ -905,13 +906,13 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     );
     // Saving a queued-message edit sends nothing, so it leaves the approval alone.
     if (
-      props.activePendingApproval !== null &&
+      props.activePendingApprovals.length > 0 &&
       props.activePendingUserInput === null &&
       props.queuedRunEdit === null
     ) {
       if (
-        props.respondingApprovalId === props.activePendingApproval.requestId ||
-        !(await declinePendingApproval(props.activePendingApproval, props.onRespondToApproval)) ||
+        props.respondingApprovalId !== null ||
+        !(await declinePendingApprovals(props.activePendingApprovals, props.onRespondToApproval)) ||
         selectedThreadKeyRef.current !== targetThreadKey
       ) {
         return null;

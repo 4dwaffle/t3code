@@ -54,7 +54,7 @@ import {
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
-  declinePendingApproval,
+  declinePendingApprovals,
   type ApprovalResponder,
 } from "@t3tools/client-runtime/state/thread-requests";
 import * as Schema from "effect/Schema";
@@ -3982,16 +3982,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
-    // Saving a queued-message edit sends nothing, so it leaves the approval alone.
-    if (
-      activePendingApproval !== null &&
-      activePendingProgress === null &&
-      !isEditingQueuedMessage
-    ) {
+    // Saving a queued-message edit sends nothing, so it leaves the approval alone. Approvals
+    // the typing guard still hides count too: the redirect replaces them all.
+    if (pendingApprovals.length > 0 && activePendingProgress === null && !isEditingQueuedMessage) {
       event?.preventDefault();
       if (
         approvalSubmissionInFlightRef.current ||
-        respondingRequestIds.includes(activePendingApproval.requestId) ||
+        pendingApprovals.some((approval) => respondingRequestIds.includes(approval.requestId)) ||
         !composerSendState.hasSendableContent
       )
         return;
@@ -4001,13 +3998,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       setComposerSubmissionError(validationMessage);
       if (validationMessage) return;
+      const submittedPrompt = promptRef.current;
       approvalSubmissionInFlightRef.current = true;
-      const declined = await declinePendingApproval(
-        activePendingApproval,
-        onRespondToApproval,
-      ).catch(() => false);
+      const declined = await declinePendingApprovals(pendingApprovals, onRespondToApproval).catch(
+        () => false,
+      );
       approvalSubmissionInFlightRef.current = false;
-      if (!declined || composerDraftTargetKey !== composerDraftTargetKeyRef.current) return;
+      // A draft edited during the decline is no longer what the user chose to send.
+      if (
+        !declined ||
+        composerDraftTargetKey !== composerDraftTargetKeyRef.current ||
+        promptRef.current !== submittedPrompt
+      )
+        return;
       // A paste that started during the decline isn't in the draft snapshot yet.
       if (
         (pendingImageCompressionsRef.current.get(attachmentTargetKeyRef.current) ?? 0) > 0 ||
