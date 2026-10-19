@@ -541,9 +541,16 @@ const finishTruncate = (truncateId) => {
   if (pendingTruncate === undefined || pendingTruncate.truncateId !== truncateId) return;
   const pending = pendingTruncate;
   parentPort.postMessage({ type: "truncate-start", truncateId });
-  const busy = truncate.get().busy !== 0;
+  let busy;
+  // Admission is paused here; a pinned reader must not make truncation wait.
+  db.exec("PRAGMA busy_timeout = 0;");
+  try {
+    busy = truncate.get().busy !== 0;
+  } finally {
+    db.exec("PRAGMA busy_timeout = 5000;");
+  }
   const state = frames.get();
-  const blocked = busy || (atCeiling(state) && state.checkpointed < state.log) || exceedsSizeLimit();
+  const blocked = (atCeiling(state) && (busy || state.checkpointed < state.log)) || exceedsSizeLimit();
   pendingTruncate = undefined;
   parentPort.postMessage({
     type: "checkpoint",
