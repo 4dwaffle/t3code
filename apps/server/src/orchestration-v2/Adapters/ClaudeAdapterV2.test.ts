@@ -1482,22 +1482,6 @@ describe("ClaudeAdapterV2 resume compaction", () => {
         assert.isFunction(callback);
         const canUseTool = openedOptions?.canUseTool;
         assert.isFunction(canUseTool);
-        const ordinaryToolResult = yield* Effect.promise(() =>
-          canUseTool!(
-            "Bash",
-            { command: "pwd" },
-            {
-              signal: new AbortController().signal,
-              toolUseID: "tool-bash-full-access",
-              requestId: "request-bash-full-access",
-            },
-          ),
-        );
-        assert.deepEqual(ordinaryToolResult, {
-          behavior: "allow",
-          updatedInput: { command: "pwd" },
-          toolUseID: "tool-bash-full-access",
-        });
         const longQuestion = `Choose a deployment target: ${"region ".repeat(80)}`;
         const questionRequestEvent = yield* runtime.events.pipe(
           Stream.filter((event) => event.type === "runtime_request.updated"),
@@ -2497,7 +2481,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ) {
         const processed = yield* Deferred.make<void>();
         processedMessages.set(message, processed);
-        yield* Queue.offer(sdkMessages, message);
+        yield* Queue.offer(processQueues.at(-1) ?? sdkMessages, message);
         if (offered !== undefined) yield* Deferred.succeed(offered, undefined);
         yield* Deferred.await(processed);
       });
@@ -2545,18 +2529,40 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           open: (input) =>
             Effect.gen(function* () {
               openedOptions = input.options;
+              const processMessages =
+                options?.freshQueueOnReopen === true && processQueues.length > 0
+                  ? yield* Queue.unbounded<SDKMessage>()
+                  : sdkMessages;
+              const messages = Stream.fromQueue(processMessages).pipe(
+                Stream.flatMap((message) =>
+                  Stream.make(message).pipe(
+                    Stream.concat(
+                      Stream.fromEffect(
+                        Effect.suspend(() => {
+                          const processed = processedMessages.get(message);
+                          return processed === undefined
+                            ? Effect.void
+                            : Deferred.succeed(processed, undefined);
+                        }),
+                      ).pipe(Stream.drain),
+                    ),
+                  ),
+                ),
+              );
               if (options?.freshQueueOnReopen === true && processQueues.length > 0) {
-                const processMessages = yield* Queue.unbounded<SDKMessage>();
                 processQueues.push(processMessages);
                 return {
-                  messages: Stream.fromQueue(processMessages),
+                  messages,
                   offer: (message: SDKUserMessage) =>
                     Effect.sync(() => {
                       offeredMessages.push(message);
                     }),
                   setModel: () => Effect.void,
                   applyFlagSettings: () => Effect.void,
-                  setPermissionMode: () => Effect.void,
+                  setPermissionMode: (mode) =>
+                    Effect.sync(() => {
+                      permissionModeChanges.push(mode);
+                    }),
                   backgroundTasks: options?.backgroundTasks ?? (() => Effect.succeed(false)),
                   stopTask: options?.stopTask ?? (() => Effect.void),
                   interrupt: Effect.void,
@@ -2565,22 +2571,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               }
               processQueues.push(sdkMessages);
               return {
-                messages: Stream.fromQueue(sdkMessages).pipe(
-                  Stream.flatMap((message) =>
-                    Stream.make(message).pipe(
-                      Stream.concat(
-                        Stream.fromEffect(
-                          Effect.suspend(() => {
-                            const processed = processedMessages.get(message);
-                            return processed === undefined
-                              ? Effect.void
-                              : Deferred.succeed(processed, undefined);
-                          }),
-                        ).pipe(Stream.drain),
-                      ),
-                    ),
-                  ),
-                ),
+                messages,
                 offer: (message) =>
                   Effect.sync(() => {
                     offeredMessages.push(message);
@@ -2760,7 +2751,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             provenance: {},
             sources: [],
           }));
-        const harness = yield* makeWakeHarness;
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: Queue.shutdown,
+          freshQueueOnReopen: true,
+        });
         const now = yield* DateTime.now;
         let ordinal = 0;
         const start = (cwd: string, runtimeMode: "full-access" | "auto" = "full-access") =>
@@ -2791,6 +2785,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             (event) =>
               event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
           );
+
+        yield* start("/restricted-worktree", "auto");
+        assert.equal(harness.getOpenedOptions()?.permissionMode, "auto");
+        yield* finish;
+        assert.equal(notices().length, 0);
+        assert.equal(resolveSettings.mock.calls.length, 0);
 
         yield* start("/restricted");
         const openedOptions = harness.getOpenedOptions()!;
@@ -2851,28 +2851,78 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.isUndefined(harness.getOpenedOptions()?.allowDangerouslySkipPermissions);
         assert.equal(resolveSettings.mock.calls.length, 2);
         yield* finish;
-        yield* start("/restricted-worktree", "auto");
-        assert.equal(harness.getOpenedOptions()?.permissionMode, "auto");
-        yield* finish;
-        assert.equal(notices().length, 1);
 
         yield* start("/unrestricted");
         assert.equal(harness.getOpenedOptions()?.permissionMode, "bypassPermissions");
         assert.equal(harness.getOpenedOptions()?.allowDangerouslySkipPermissions, true);
-        assert.equal(
-          (yield* Effect.promise(() =>
+        // The SDK can dispatch control callbacks before yielding queued init/status frames.
+        // Unrestricted bypass tools do not invoke canUseTool at all.
+        for (const { phase, frame } of [
+          {
+            phase: "init",
+            frame: claudeSdkFrame({
+              type: "system",
+              subtype: "init",
+              permissionMode: "bypassPermissions",
+              uuid: "policy-cli-init",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          },
+          {
+            phase: "status",
+            frame: claudeSdkFrame({
+              type: "system",
+              subtype: "status",
+              status: null,
+              permissionMode: "default",
+              uuid: "policy-cli-downgrade",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          },
+        ]) {
+          const forwardedDecision = yield* Effect.promise(() =>
             harness.getOpenedOptions()!.canUseTool!(
               "Bash",
               { command: "git status" },
               {
                 signal: new AbortController().signal,
-                toolUseID: "unrestricted-command",
-                requestId: "request-unrestricted-command",
+                toolUseID: `forwarded-before-${phase}`,
+                requestId: `request-forwarded-before-${phase}`,
               },
             ),
-          ))?.behavior,
-          "allow",
+          ).pipe(Effect.forkScoped);
+          const forwardedFirst = yield* Effect.raceFirst(
+            Queue.take(harness.runtimeRequestReceipts).pipe(
+              Effect.map((event) => ({ type: "request", event }) as const),
+            ),
+            Fiber.join(forwardedDecision).pipe(
+              Effect.map((result) => ({ type: "decision", result }) as const),
+            ),
+          );
+          assert.equal(
+            forwardedFirst.type,
+            "request",
+            `CLI-forwarded Bash must ask before the queued ${phase} frame reaches the adapter`,
+          );
+          if (forwardedFirst.type !== "request") return;
+          assert.equal(forwardedFirst.event.runtimeRequest.kind, "command");
+          yield* harness.runtime.respondToRuntimeRequest({
+            requestId: forwardedFirst.event.runtimeRequest.id,
+            decision: "decline",
+          });
+          assert.equal((yield* Fiber.join(forwardedDecision))?.behavior, "deny");
+          yield* harness.offerAndWait(frame);
+        }
+        yield* finish;
+        const unrestrictedOptions = harness.getOpenedOptions();
+        yield* start("/unrestricted");
+        assert.strictEqual(harness.getOpenedOptions(), unrestrictedOptions);
+        assert.deepEqual(
+          harness.permissionModeChanges,
+          ["auto"],
+          "A CLI policy downgrade must not be restored to bypass on the next turn",
         );
+        assert.equal(resolveSettings.mock.calls.length, 3);
         yield* finish;
         assert.equal(notices().length, 1);
       }).pipe(
