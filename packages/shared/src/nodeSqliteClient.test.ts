@@ -1287,6 +1287,84 @@ const openDatabase = (filename: string) =>
     (db) => Effect.sync(() => db.close()),
   );
 
+it.effect.each([false, true])(
+  "bounds a busy truncate without gating a reset WAL (resetDuringHandoff=%s)",
+  (resetDuringHandoff) =>
+    withCheckpointClient((sql, filename) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const worker = startedWorkers.at(-1)!;
+        const reader = yield* openDatabase(filename);
+        const observer = yield* openDatabase(filename);
+        const limit = 1024 * 1024;
+        const requests = pauseCheckpointRequests(worker);
+        yield* Effect.addFinalizer(() => Effect.sync(requests.release));
+        const truncation = holdWorkerMessage(worker, "truncate-request");
+        yield* Effect.addFinalizer(() => Effect.sync(truncation.release));
+        yield* sql.unsafe(`PRAGMA journal_size_limit = ${limit}`).unprepared;
+        yield* sql`CREATE TABLE pages(payload BLOB)`;
+        yield* sql`
+          WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1200)
+          INSERT INTO pages(payload) SELECT zeroblob(4000) FROM n
+        `;
+        // Reading before PASSIVE pins the last WAL frame even when every frame is copied.
+        reader.exec("BEGIN");
+        assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM pages").get()?.count, 1200);
+        requests.sendNext();
+        yield* Effect.promise(() => truncation.ready);
+        const copied = readCheckpointState(observer);
+        assert.equal(copied.checkpointed, copied.log);
+        assert.isAbove(copied.log, 1000);
+        assert.isBelow(copied.log, 10_000);
+        assert.isAbove(Number((yield* fs.stat(`${filename}-wal`)).size), limit);
+
+        if (resetDuringHandoff) {
+          // Another connection can reset the WAL before the main thread acknowledges truncation.
+          reader.exec("ROLLBACK");
+          assert.equal(observer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy, 0);
+          observer.exec("INSERT INTO pages VALUES (x'01')");
+          reader.exec("BEGIN");
+          assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM pages").get()?.count, 1201);
+          assert.isAbove(readCheckpointState(observer).log, 0);
+          assert.isBelow(readCheckpointState(observer).log, 10_000);
+          assert.isAtMost(Number((yield* fs.stat(`${filename}-wal`)).size), limit);
+        }
+
+        const completed = waitForTruncateCompletion(worker);
+        requests.release();
+        const started = performance.now();
+        truncation.deliver();
+        const write = yield* Effect.forkChild(sql`INSERT INTO pages VALUES (x'02')`, {
+          startImmediately: true,
+        });
+        const reply = yield* Effect.promise(() => completed);
+        const elapsed = performance.now() - started;
+        assert.equal(reply.log, reply.checkpointed);
+        if (resetDuringHandoff) {
+          yield* Fiber.join(write);
+          assert.deepEqual(yield* sql`SELECT COUNT(*) AS count FROM pages`, [{ count: 1202 }]);
+          assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM pages").get()?.count, 1201);
+        } else {
+          yield* eventLoopTurn;
+          assert.isUndefined(write.pollUnsafe(), "the physical size limit must still gate writes");
+          assert.equal(reader.prepare("SELECT COUNT(*) AS count FROM pages").get()?.count, 1200);
+        }
+        reader.exec("ROLLBACK");
+        yield* checkpointWorkerReply(worker);
+        yield* Fiber.join(write);
+        yield* sql`INSERT INTO pages VALUES (x'03')`;
+        assert.deepEqual(yield* sql`SELECT COUNT(*) AS count FROM pages`, [
+          { count: resetDuringHandoff ? 1203 : 1202 },
+        ]);
+        assert.isAtMost(Number((yield* fs.stat(`${filename}-wal`)).size), limit);
+        assert.equal(reply.blocked, !resetDuringHandoff);
+        // Both implementations eventually reply; only a bound distinguishes SQLite's 5s busy wait.
+        assert.isBelow(elapsed, 1000, "TRUNCATE must return promptly while the reader stays open");
+      }),
+    ),
+  { skip: !supportsNoopCheckpoint, timeout: 15_000 },
+);
+
 it.effect.each(["statement", "commit", "rollback", "partial failure", "worker failure"] as const)(
   "bounds a real WAL backlog and resumes writes (%s)",
   (mode) =>
