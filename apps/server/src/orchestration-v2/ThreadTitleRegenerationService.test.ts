@@ -418,7 +418,6 @@ describe("ThreadTitleRegenerationService", () => {
         const projection = yield* threads.getThreadProjection(threadId);
         assert.equal(projection.thread.title, "Seed title");
         assert.isNotOk(projection.thread.titleRegeneration);
-        // A defect's message is internal, so clients get a fixed reason.
         assert.deepStrictEqual(projection.thread.titleRegenerationFailure, {
           requestId,
           message: "The thread title could not be generated.",
@@ -427,82 +426,92 @@ describe("ThreadTitleRegenerationService", () => {
     }),
   );
 
-  it.effect("records the provider's reason until the next regeneration starts", () =>
-    Effect.gen(function* () {
-      const harness = makeHarness({
-        generateTitle: () =>
-          Effect.fail(
-            new TextGenerationError({
-              operation: "generateThreadTitle",
-              detail: "Codex is not authenticated.",
+  it.effect(
+    "persists safe background failures in the shell without letting stale requests overwrite them",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const secret = "private-cli-output-sentinel";
+        let attempts = 0;
+        const harness = makeHarness({
+          generateTitle: () =>
+            Effect.gen(function* () {
+              attempts += 1;
+              if (attempts === 2) {
+                yield* Deferred.succeed(started, undefined);
+                yield* Deferred.await(release);
+              }
+              return yield* new TextGenerationError({
+                operation: "generateThreadTitle",
+                detail: `CLI failed: token=${secret}; prompt=private conversation`,
+                cause: new Error(secret),
+              });
             }),
-          ),
-      });
-      yield* Effect.gen(function* () {
-        const threads = yield* ThreadManagement.ThreadManagementService;
-        const titleRegeneration = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
-        const threadId = yield* createThread({
-          command: "command:title:reason:create",
-          thread: "thread:title:reason",
         });
-        yield* dispatchUserMessage({
-          command: "command:title:reason:message",
-          threadId,
-          text: "Some conversation",
-        });
-        const requestId = yield* armRegeneration({ command: "command:title:reason:1", threadId });
+        yield* Effect.gen(function* () {
+          const threads = yield* ThreadManagement.ThreadManagementService;
+          const service = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+          const threadId = yield* createThread({
+            command: "command:title:reason:create",
+            thread: "thread:title:reason",
+          });
+          yield* dispatchUserMessage({
+            command: "command:title:reason:message",
+            threadId,
+            text: "Some conversation",
+          });
+          const requestId = yield* armRegeneration({ command: "command:title:reason:1", threadId });
+          const first = yield* service
+            .execute({ threadId, requestId, kind: { type: "regenerate" } })
+            .pipe(Effect.forkChild);
+          yield* Fiber.join(first);
+          const projection = yield* threads.getThreadProjection(threadId);
+          const shell = yield* threads.getThreadShell(threadId);
+          assert.equal(projection.thread.title, "Seed title");
+          assert.isNotOk(projection.thread.titleRegeneration);
+          assert.equal(projection.thread.titleRegenerationFailure?.requestId, requestId);
+          assert.deepStrictEqual(
+            shell?.titleRegenerationFailure,
+            projection.thread.titleRegenerationFailure,
+          );
 
-        yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
+          const staleRequest = yield* armRegeneration({
+            command: "command:title:reason:2",
+            threadId,
+          });
+          assert.isUndefined((yield* threads.getThreadShell(threadId))?.titleRegenerationFailure);
+          const stale = yield* service
+            .execute({ threadId, requestId: staleRequest, kind: { type: "regenerate" } })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          const currentRequest = yield* armRegeneration({
+            command: "command:title:reason:3",
+            threadId,
+          });
+          yield* service.execute({
+            threadId,
+            requestId: currentRequest,
+            kind: { type: "regenerate" },
+          });
+          const current = yield* threads.getThreadShell(threadId);
+          assert.equal(current?.titleRegenerationFailure?.requestId, currentRequest);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(stale);
+          assert.deepStrictEqual(
+            (yield* threads.getThreadShell(threadId))?.titleRegenerationFailure,
+            current?.titleRegenerationFailure,
+          );
 
-        const failure = { requestId, message: "Codex is not authenticated." };
-        const projection = yield* threads.getThreadProjection(threadId);
-        assert.deepStrictEqual(projection.thread.titleRegenerationFailure, failure);
-        const shell = yield* threads.getThreadShell(threadId);
-        assert.deepStrictEqual(shell?.titleRegenerationFailure, failure);
-
-        yield* armRegeneration({ command: "command:title:reason:2", threadId });
-
-        const rearmed = yield* threads.getThreadShell(threadId);
-        assert.isUndefined(rearmed?.titleRegenerationFailure);
-        assert.equal(rearmed?.titleRegeneration?.requestId, "command:title:reason:2");
-      }).pipe(Effect.provide(harness.layer));
-    }),
-  );
-
-  it.effect("caps a long provider reason", () =>
-    Effect.gen(function* () {
-      const harness = makeHarness({
-        generateTitle: () =>
-          Effect.fail(
-            new TextGenerationError({
-              operation: "generateThreadTitle",
-              detail: `Codex CLI command failed: ${"x".repeat(2_000)}`,
-            }),
-          ),
-      });
-      yield* Effect.gen(function* () {
-        const threads = yield* ThreadManagement.ThreadManagementService;
-        const titleRegeneration = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
-        const threadId = yield* createThread({
-          command: "command:title:long:create",
-          thread: "thread:title:long",
-        });
-        yield* dispatchUserMessage({
-          command: "command:title:long:message",
-          threadId,
-          text: "Some conversation",
-        });
-        const requestId = yield* armRegeneration({ command: "command:title:long:1", threadId });
-
-        yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
-
-        const projection = yield* threads.getThreadProjection(threadId);
-        const message = projection.thread.titleRegenerationFailure?.message ?? "";
-        assert.equal(message.length, 500);
-        assert.isTrue(message.startsWith("Codex CLI command failed: x"));
-        assert.isTrue(message.endsWith("…"));
-      }).pipe(Effect.provide(harness.layer));
-    }),
+          for (const failure of [
+            shell?.titleRegenerationFailure,
+            current?.titleRegenerationFailure,
+          ]) {
+            assert.notInclude(failure?.message ?? "", secret);
+            assert.equal(failure?.message, "The thread title could not be generated.");
+          }
+        }).pipe(Effect.provide(harness.layer));
+      }),
   );
 
   it.effect("completes without generating when the initial message is unavailable", () =>
@@ -597,7 +606,9 @@ it.effect.each(["success", "exhausted", "stale", "interrupted"] as const)(
         else assert.isNotOk(projection.thread.titleRegeneration);
         assert.deepStrictEqual(
           projection.thread.titleRegenerationFailure ?? null,
-          outcome === "exhausted" ? { requestId, message: "Temporary failure" } : null,
+          outcome === "exhausted"
+            ? { requestId, message: "The thread title could not be generated." }
+            : null,
         );
       }).pipe(Effect.provide(harness.layer));
     }),
