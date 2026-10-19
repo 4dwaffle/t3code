@@ -1254,7 +1254,11 @@ export const layer: Layer.Layer<
                   !routing.ownedThreadIds.has(event.subagent.childThreadId)
                 ) {
                   const moved = event.subagent;
-                  const detachedItems = yield* Ref.modify(openRunOwnedSubagents, (current) => {
+                  const detached = yield* Ref.modify(openRunOwnedSubagents, (current) => {
+                    const subagentIds = new Set([moved.id]);
+                    for (const subagent of current.subagents.values()) {
+                      if (subagent.threadId === moved.childThreadId) subagentIds.add(subagent.id);
+                    }
                     const childTurnItems = new Map(
                       [...current.childTurnItems].filter(
                         ([, item]) => item.threadId !== moved.childThreadId,
@@ -1271,13 +1275,10 @@ export const layer: Layer.Layer<
                         .map((item) => item.id),
                     );
                     return [
-                      detachedItems,
+                      { itemIds: detachedItems, subagentIds },
                       {
                         subagents: new Map(
-                          [...current.subagents].filter(
-                            ([id, subagent]) =>
-                              id !== moved.id && subagent.threadId !== moved.childThreadId,
-                          ),
+                          [...current.subagents].filter(([id]) => !subagentIds.has(id)),
                         ),
                         turnItems,
                         childTurnItems,
@@ -1297,7 +1298,8 @@ export const layer: Layer.Layer<
                   });
                   yield* Ref.update(
                     activeChildSubagents,
-                    (current) => new Set([...current].filter((id) => id !== moved.id)),
+                    (current) =>
+                      new Set([...current].filter((id) => !detached.subagentIds.has(id))),
                   );
                   yield* Ref.update(
                     activeChildProviderTurns,
@@ -1306,7 +1308,7 @@ export const layer: Layer.Layer<
                   );
                   yield* Ref.update(
                     activeBackgroundTurnItems,
-                    (current) => new Set([...current].filter((id) => !detachedItems.has(id))),
+                    (current) => new Set([...current].filter((id) => !detached.itemIds.has(id))),
                   );
                 }
                 return { event, accepted };

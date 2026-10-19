@@ -1896,6 +1896,16 @@ it.effect("releases a settled run when its live child transfers to another run",
           return [
             childThreadCreatedEvent(ids),
             linked,
+            {
+              ...linked,
+              subagent: {
+                ...linked.subagent,
+                id: NodeId.make("node:child-transfer-release:nested"),
+                threadId: ids.childThreadId,
+                runId: null,
+                childThreadId: null,
+              },
+            },
             childBackgroundTurnItemEvent(ids, "running", 1),
             rootTerminalEvent(ids, "completed"),
             { ...linked, subagent: { ...linked.subagent, runId: RunId.make("run:replacement") } },
@@ -1913,7 +1923,12 @@ it.effect("releases a settled run when its live child transfers to another run",
       "the transferred child must release its prior subscription",
     );
     if (Option.isSome(result))
-      assert.deepEqual(result.value, ["subagent:running", "turn_item:running", "root-finalized"]);
+      assert.deepEqual(result.value, [
+        "subagent:running",
+        "subagent:running",
+        "turn_item:running",
+        "root-finalized",
+      ]);
   }),
 );
 
