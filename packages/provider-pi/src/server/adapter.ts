@@ -1,5 +1,3 @@
-import * as NodePath from "node:path";
-
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
@@ -30,6 +28,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -314,10 +313,6 @@ function providerRef(
   return { driver: PI_PROVIDER, nativeId, strength };
 }
 
-function samePiSessionFile(live: string | undefined, stored: string): boolean {
-  return live !== undefined && NodePath.resolve(live) === NodePath.resolve(stored);
-}
-
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 interface PiStreamItemState {
@@ -428,6 +423,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const agentScope = yield* AgentScope;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -2178,11 +2174,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const needsNewSession = resumeId == null && registrationAttempted;
         registrationAttempted = true;
         let stateData = resumeId != null ? yield* request({ type: "get_state" }) : undefined;
+        const liveSessionFile = recordString(stateData, "sessionFile");
+        // Switching replaces the session and reloads extensions, so keep an already attached file.
         const alreadyOnResumeFile =
-          resumeId != null && samePiSessionFile(recordString(stateData, "sessionFile"), resumeId);
-        if (alreadyOnResumeFile) {
-          lastNativeThreadId = resumeId;
-        } else if (resumeId != null || needsNewSession) {
+          resumeId != null &&
+          liveSessionFile !== undefined &&
+          path.resolve(cwd, liveSessionFile) === path.resolve(cwd, resumeId);
+        if (!alreadyOnResumeFile && (resumeId != null || needsNewSession)) {
           lastNativeThreadId = resumeId ?? lastNativeThreadId;
           // Even a failed lifecycle operation can change Pi's native session.
           // Never leave the old app binding or model defaults usable afterward.
@@ -3242,6 +3240,7 @@ function piUiResponse(
 export type PiAdapterV2DriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
+  | Path.Path
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
   | ProviderHost.ProviderHost;
