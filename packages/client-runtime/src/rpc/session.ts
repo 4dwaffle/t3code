@@ -26,11 +26,7 @@ import * as Socket from "effect/socket/Socket";
 
 import { makeWsRpcProtocolClient, PING_TIMEOUT, type WsRpcProtocolClient } from "./protocol.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
-import type {
-  ConnectionAttemptError,
-  ConnectionTransientError,
-  PreparedConnection,
-} from "../connection/model.ts";
+import type { ConnectionAttemptError, PreparedConnection } from "../connection/model.ts";
 import {
   ConnectionBlockedError,
   ConnectionTransientError as ConnectionTransientErrorClass,
@@ -124,10 +120,12 @@ function serverConfigReplayEvents(
 const isSocketErrorReason = Schema.is(Socket.SocketErrorReason);
 
 function mapSessionRpcError(
-  error: InitialConfigError | ProbeError | ServerConfigSubscriptionError,
-  networkHint: string,
+  error: InitialConfigError | ProbeError | ServerConfigSubscriptionError | ConnectionBlockedError,
+  transportDetail: string,
 ): ConnectionAttemptError {
   switch (error._tag) {
+    case "ConnectionBlockedError":
+      return error;
     case "EnvironmentAuthorizationError":
       return new ConnectionBlockedError({
         reason: "permission",
@@ -142,7 +140,7 @@ function mapSessionRpcError(
     case "RpcClientError":
       return new ConnectionTransientErrorClass({
         reason: "transport",
-        detail: `${error.message}${isSocketErrorReason(error.reason) ? networkHint : ""}`,
+        detail: isSocketErrorReason(error.reason) ? transportDetail : error.message,
       });
   }
 }
@@ -161,35 +159,28 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
   const connect = Effect.fnUntraced(function* (connection: PreparedConnection) {
     const networkHint =
       connection.target._tag === "RelayConnectionTarget" ? ` ${NETWORK_BLOCKING_HINT}` : "";
+    let socketOpened = false;
+    let pingTimedOut = false;
     const mapRpcError = (error: Parameters<typeof mapSessionRpcError>[0]) =>
-      mapSessionRpcError(error, networkHint);
+      mapSessionRpcError(
+        error,
+        `${
+          !socketOpened
+            ? `${connection.label} could not establish a WebSocket connection.`
+            : pingTimedOut
+              ? `${connection.label} stopped responding.`
+              : `${connection.label} disconnected.`
+        }${networkHint}`,
+      );
     yield* Effect.annotateCurrentSpan({
       "connection.environment.id": connection.environmentId,
     });
 
-    const connected = yield* Deferred.make<void>();
-    const disconnected = yield* Deferred.make<never, ConnectionTransientError>();
-    const pingTimedOut = yield* Ref.make(false);
     const hooks = RpcClient.ConnectionHooks.of({
-      onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
-      onDisconnect: Effect.all([Deferred.isDone(connected), Ref.get(pingTimedOut)]).pipe(
-        Effect.flatMap(([wasConnected, timedOut]) =>
-          Deferred.fail(
-            disconnected,
-            new ConnectionTransientErrorClass({
-              reason: "transport",
-              detail: `${
-                !wasConnected
-                  ? `${connection.label} could not establish a WebSocket connection.`
-                  : timedOut
-                    ? `${connection.label} stopped responding.`
-                    : `${connection.label} disconnected.`
-              }${networkHint}`,
-            }),
-          ),
-        ),
-        Effect.asVoid,
-      ),
+      onConnect: Effect.sync(() => {
+        socketOpened = true;
+      }),
+      onDisconnect: Effect.void,
     });
     const layerSocket = Socket.layerWebSocket(connection.socketUrl, {
       openTimeout: SOCKET_OPEN_TIMEOUT,
@@ -200,7 +191,10 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         pingTimeout: PING_TIMEOUT,
         retryTransientErrors: false,
         retryPolicy: Schedule.recurs(0),
-        onPingTimeout: Ref.set(pingTimedOut, true),
+        // RpcClient runs this before broadcasting the failure to active requests.
+        onPingTimeout: Effect.sync(() => {
+          pingTimedOut = true;
+        }),
       }),
     ).pipe(
       Layer.provide(
@@ -216,7 +210,10 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     );
     const protocolClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
     const initialConfigDeferred = yield* Deferred.make<ServerConfig>();
-    const serverConfigExit = yield* Deferred.make<void, ServerConfigSubscriptionError>();
+    const serverConfigExit = yield* Deferred.make<
+      void,
+      ServerConfigSubscriptionError | ConnectionBlockedError
+    >();
     const configSubscriptionClosed = yield* Deferred.make<never, ConnectionAttemptError>();
     const serverConfigState = yield* Ref.make(Option.none<ServerConfigReplayState>());
     const serverConfigUpdates = yield* PubSub.sliding<BufferedServerConfigEvent>(64);
@@ -270,6 +267,16 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
             yield* Deferred.succeed(initialConfigDeferred, event.config);
           }
         }),
+      ),
+      Effect.catchDefect((defect) =>
+        Schema.isSchemaError(defect)
+          ? Effect.fail(
+              new ConnectionBlockedError({
+                reason: "unsupported",
+                detail: `${connection.label} sent an incompatible server configuration. Update the client and server to compatible versions.`,
+              }),
+            )
+          : Effect.die(defect),
       ),
       Effect.onExit((exit) => {
         if (Exit.isSuccess(exit)) {
@@ -333,7 +340,9 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
     ).pipe(
       Stream.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
-          return Stream.failCause(cause);
+          return Stream.failCause(
+            Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
+          );
         }
         // The supervisor keeps the original cause. Shared durable consumers
         // need a transport-shaped failure so they wait for its replacement.
@@ -383,16 +392,10 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
       client: protocolClient,
       initialConfig,
       subscribeServerConfig,
-      ready: Deferred.await(connected).pipe(
-        Effect.andThen(initialConfig),
-        Effect.asVoid,
-        Effect.raceFirst(Deferred.await(disconnected)),
-      ),
+      ready: initialConfig.pipe(Effect.asVoid),
       probe,
-      closed: Effect.raceFirst(
-        Deferred.await(disconnected),
-        Deferred.await(configSubscriptionClosed),
-      ),
+      // Config decoding must reach the supervisor before a generic disconnect can mask it.
+      closed: Deferred.await(configSubscriptionClosed),
     } satisfies RpcSession;
   });
 
