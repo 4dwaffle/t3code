@@ -8,6 +8,8 @@ import { assert, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import type { OpenCodeSettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -169,6 +171,63 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
         assert.deepStrictEqual(yield* instance.snapshot.getSnapshot, global);
         assert.deepStrictEqual(serverStarts, []);
       }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps workspace skills and commands before the deadline when agents hang", () =>
+    Effect.gen(function* () {
+      serverStarts.length = 0;
+      const agentRequested = yield* Deferred.make<void>();
+      let commandReads = 0;
+      const server = HttpClient.make((request, url) => {
+        if (url.pathname === "/api/agent") {
+          return Deferred.succeed(agentRequested, undefined).pipe(Effect.andThen(Effect.never));
+        }
+        if (url.pathname === "/api/command") commandReads++;
+        const responses = {
+          ...OPENCODE_2_RESPONSES,
+          ...OPENCODE_2_WORKSPACE_RESPONSES,
+          // No scan events: discovery must use the supported ten-second fallback.
+          "/api/event": { status: 200, contentType: "text/event-stream", body: "" },
+          "/api/command":
+            commandReads === 1
+              ? {
+                  status: 200,
+                  contentType: "application/json",
+                  body: '{"location":{"directory":"/work"},"data":[]}',
+                }
+              : OPENCODE_2_WORKSPACE_RESPONSES["/api/command"],
+        };
+        return replayOpenCodeServer(responses, "secret").execute(request);
+      });
+      const instance = yield* create(
+        { serverUrl: "http://127.0.0.1:4096", serverPassword: "secret" },
+        server,
+      );
+      const startedAt = yield* Clock.currentTimeMillis;
+      const pending = yield* instance.snapshotForCwd!("/work").pipe(
+        Effect.flatMap((workspace) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.map((completedAt) => ({ workspace, elapsed: completedAt - startedAt })),
+          ),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(agentRequested);
+      yield* TestClock.adjust("20 seconds");
+      const { workspace, elapsed } = yield* Fiber.join(pending);
+      assert.isBelow(elapsed, 20_000);
+      assert.strictEqual(commandReads, 2);
+      assert.deepStrictEqual(
+        workspace.skills.map((skill) => skill.name),
+        ["opencode", "plum", "report"],
+      );
+      assert.deepStrictEqual(
+        workspace.slashCommands.map((command) => command.name),
+        ["compact", "init", "review", "bee"],
+      );
+      assert.isUndefined(workspace.optionDescriptors);
+      assert.deepStrictEqual(serverStarts, []);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
   it.effect("answers capability reads without waiting on an unreachable server", () =>

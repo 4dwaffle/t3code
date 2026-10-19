@@ -318,7 +318,9 @@ export const OpenCodeDriver: ProviderDriver<
               Effect.all(
                 {
                   agents: client.agent.list({ location }).pipe(
-                    Effect.timeout("10 seconds"),
+                    // Leave headroom for two agent reads and the 10-second scan wait within
+                    // the 20-second workspace deadline.
+                    Effect.timeout("3 seconds"),
                     Effect.map((list) => list.data),
                     Effect.orElseSucceed(() => undefined),
                   ),
