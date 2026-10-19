@@ -1358,7 +1358,8 @@ export function NewTaskDraftScreen(props: {
     !flow.submitting &&
     pendingPastedTextAttachmentCount === 0 &&
     !voiceInput.blocksSubmission &&
-    !(flow.workspaceMode === "worktree" && !flow.selectedBranchName);
+    // Until the repository check answers, a saved worktree selection may belong to a non-git folder.
+    !(flow.workspaceMode === "worktree" && (!flow.selectedBranchName || !flow.isGitRepoKnown));
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
     // A draft attachment lives only in the draft. Without its key the screen would fall through
     // to a remote lookup for bytes the server has never seen.

@@ -170,6 +170,7 @@ type NewTaskFlowContextValue = {
   readonly selectedModelKey: string | null;
   readonly workspaceMode: WorkspaceMode;
   readonly isGitRepo: boolean;
+  readonly isGitRepoKnown: boolean;
   readonly canChooseWorkspace: boolean;
   readonly selectedBranchName: string | null;
   readonly selectedWorktreePath: string | null;
@@ -450,7 +451,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     environmentId: selectedProject?.environmentId ?? null,
     cwd: selectedProject?.workspaceRoot || null,
   });
-  const isGitRepo = projectGitStatus.data?.isRepo ?? projectBranches.data?.isRepo ?? true;
+  const knownIsGitRepo = projectGitStatus.data?.isRepo ?? projectBranches.data?.isRepo ?? null;
+  const isGitRepo = knownIsGitRepo ?? true;
   const fileAccessSession = useEnvironmentQuery(
     selectedProject !== null && selectedProject.workspaceRoot !== ""
       ? environmentSession.sessionStateAtom(selectedProject.environmentId)
@@ -1133,6 +1135,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     selectedModelKey,
     workspaceMode,
     isGitRepo,
+    isGitRepoKnown: knownIsGitRepo !== null,
     canChooseWorkspace,
     selectedBranchName,
     selectedWorktreePath,
