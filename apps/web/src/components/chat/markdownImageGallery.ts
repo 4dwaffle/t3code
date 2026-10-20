@@ -1,10 +1,36 @@
 import { mediaKindFromPath } from "@t3tools/shared/filePreview";
 import { mediaUrlReference } from "@t3tools/client-runtime/media-reference";
-import type { ExpandedImageItem, ExpandedImagePreview } from "./ExpandedImagePreview";
+import {
+  resolveMarkdownMediaPreview,
+  type ExpandedImageItem,
+  type ExpandedImagePreview,
+} from "./ExpandedImagePreview";
+import { pullRequestMediaResource } from "@t3tools/client-runtime/pull-request-markdown";
 import { resolveExternalWebLinkHost } from "./externalLinkContextMenu";
 import { resolveProtocolRelativeMediaUrl } from "../media/mediaContent";
 
 export const markdownImageItems = new WeakMap<Element, ExpandedImageItem>();
+
+export async function resolveMarkdownImageGallery(
+  gallery: ExpandedImagePreview,
+  input: Omit<Parameters<typeof resolveMarkdownMediaPreview>[0], "source">,
+): Promise<ExpandedImagePreview> {
+  const images = await Promise.all(
+    gallery.images.map(async (item) => {
+      if (
+        item.actionsSource?.asset ||
+        !item.originalUrl ||
+        !input.pullRequestMedia ||
+        !input.cwd ||
+        !pullRequestMediaResource(item.originalUrl, input.cwd)
+      )
+        return item;
+      const resolved = await resolveMarkdownMediaPreview({ ...input, source: item.originalUrl });
+      return resolved?.images[0] ?? item;
+    }),
+  );
+  return { ...gallery, images };
+}
 
 export function markdownImageGallery(
   element: Element,

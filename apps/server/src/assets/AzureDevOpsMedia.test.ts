@@ -96,6 +96,7 @@ it.effect("rejects unsupported endpoints before invoking Azure CLI", () => {
     for (const url of ["https://example.test/a.gif", `${base}.html`]) {
       const error = yield* media.get({ cwd: "/repo", url }).pipe(Effect.flip);
       expect(error.message).toBe("Failed to load Azure DevOps attachment.");
+      expect(error.cause).toBeUndefined();
     }
     expect(calls).toBe(0);
   }).pipe(
@@ -115,6 +116,57 @@ it.effect("rejects unsupported endpoints before invoking Azure CLI", () => {
     ),
   );
 });
+
+it.effect("shares renewed capabilities and serves overflow without retaining transient files", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    let calls = 0;
+    const paths: string[] = [];
+    const cli = Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
+      execute: ({ args }) =>
+        Effect.gen(function* () {
+          calls++;
+          const destination = args[args.indexOf("--out-file") + 1]!;
+          paths.push(destination);
+          yield* fs.writeFileString(destination, "GIF89a").pipe(Effect.orDie);
+          return {
+            exitCode: ChildProcessSpawner.ExitCode(0),
+            stdout: "",
+            stderr: "",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          };
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const media = yield* AzureDevOpsMedia.AzureDevOpsMedia;
+      const original = {
+        kind: "azure-devops-media",
+        cwd: "/repo",
+        url: `${base}.gif`,
+        expiresAt: 1000,
+      };
+      const first = yield* Effect.scoped(media.get(original));
+      const renewedAsset = { ...original, expiresAt: 2000 };
+      const renewed = yield* Effect.scoped(media.get(renewedAsset));
+      expect(renewed.path).toBe(first.path);
+      expect(calls).toBe(1);
+      for (let index = 1; index < 20; index++) {
+        const file = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const file = yield* media.get({ cwd: "/repo", url: `${base}-${index}.gif` });
+            expect(yield* fs.readFileString(file.path)).toBe("GIF89a");
+            return file;
+          }),
+        );
+        expect(yield* fs.exists(file.path)).toBe(index < 16);
+        expect(yield* fs.readFileString(first.path)).toBe("GIF89a");
+      }
+      expect(calls).toBe(20);
+    }).pipe(Effect.provide(AzureDevOpsMedia.layer.pipe(Layer.provide(cli))));
+    for (const path of paths) expect(yield* fs.exists(path)).toBe(false);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 it.effect("retries after a failed authenticated download", () => {
   let calls = 0;

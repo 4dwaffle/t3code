@@ -119,7 +119,11 @@ import {
   type ExpandedImagePreview,
 } from "./chat/ExpandedImagePreview";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
-import { markdownImageGallery, markdownImageItems } from "./chat/markdownImageGallery";
+import {
+  markdownImageGallery,
+  markdownImageItems,
+  resolveMarkdownImageGallery,
+} from "./chat/markdownImageGallery";
 import { MediaVideoPlayer } from "./media/MediaVideoPlayer";
 import { MediaActions, type MediaActionSource } from "./media/MediaActions";
 import { resolveProtocolRelativeMediaUrl } from "./media/mediaContent";
@@ -2363,7 +2367,7 @@ function useChatMarkdownState({
   } | null>(null);
   const localMediaPreview = localMedia?.scope === mediaScopeKey ? localMedia.preview : null;
   const closeLocalMediaPreview = () => setLocalMedia(null);
-  const expandMedia =
+  const showExpandedMedia =
     onImageExpand ??
     ((preview: ExpandedImagePreview) => setLocalMedia({ scope: mediaScopeKey, preview }));
   const [mediaScope, setMediaScope] = useState(mediaScopeKey);
@@ -2392,6 +2396,36 @@ function useChatMarkdownState({
   });
   const pullRequestLinking = usePullRequestLinking(threadRef?.environmentId);
   const environmentId = threadRef?.environmentId ?? explicitEnvironmentId ?? null;
+  const expandMedia = (preview: ExpandedImagePreview) => {
+    if (!pullRequestMedia) {
+      showExpandedMedia(preview);
+      return;
+    }
+    const requestId = ++mediaRequestId.current;
+    void resolveMarkdownImageGallery(preview, {
+      cwd,
+      threadRef,
+      environmentId: environmentId ?? undefined,
+      pullRequestMedia,
+      httpBaseUrl:
+        environmentId === null ? undefined : readPreparedConnection(environmentId)?.httpBaseUrl,
+      createAssetUrl,
+    }).then(
+      (resolved) => {
+        if (mediaRequestId.current === requestId) showExpandedMedia(resolved);
+      },
+      () => {
+        if (mediaRequestId.current === requestId)
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Media unavailable",
+              description: "Reconnect to this environment and open the media again.",
+            }),
+          );
+      },
+    );
+  };
   const canOperateHost = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
   const remoteOpen = useRemoteOpenResolution(environmentId);
