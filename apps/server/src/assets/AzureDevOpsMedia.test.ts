@@ -117,7 +117,7 @@ it.effect("rejects unsupported endpoints before invoking Azure CLI", () => {
   );
 });
 
-it.effect("shares renewed capabilities and serves overflow without retaining transient files", () =>
+it.effect("shares renewed capabilities and reuses range downloads under cache pressure", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     let calls = 0;
@@ -146,7 +146,7 @@ it.effect("shares renewed capabilities and serves overflow without retaining tra
         url: `${base}.gif`,
         expiresAt: 1000,
       };
-      const first = yield* Effect.scoped(media.get(original));
+      const first = yield* media.get(original);
       const renewedAsset = { ...original, expiresAt: 2000 };
       const renewed = yield* Effect.scoped(media.get(renewedAsset));
       expect(renewed.path).toBe(first.path);
@@ -154,18 +154,49 @@ it.effect("shares renewed capabilities and serves overflow without retaining tra
       for (let index = 1; index < 20; index++) {
         const file = yield* Effect.scoped(
           Effect.gen(function* () {
-            const file = yield* media.get({ cwd: "/repo", url: `${base}-${index}.gif` });
+            const input = { cwd: "/repo", url: `${base}-${index}.mp4` };
+            const file = yield* media.get(input);
             expect(yield* fs.readFileString(file.path)).toBe("GIF89a");
             return file;
           }),
         );
-        expect(yield* fs.exists(file.path)).toBe(index < 16);
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const repeated = yield* media.get({ cwd: "/repo", url: `${base}-${index}.mp4` });
+            expect(repeated.path).toBe(file.path);
+            const ranged = HttpServerResponse.toWeb(
+              yield* assetFileResponse(repeated, "bytes=1-3"),
+            );
+            expect(ranged.status).toBe(206);
+            expect(yield* Effect.promise(() => ranged.text())).toBe("IF8");
+          }),
+        );
+        expect(calls).toBe(index + 1);
+        expect(yield* fs.exists(file.path)).toBe(true);
+        const retained = yield* Effect.forEach(paths, (path) => fs.exists(path));
+        expect(retained.filter(Boolean).length).toBeLessThanOrEqual(16);
         expect(yield* fs.readFileString(first.path)).toBe("GIF89a");
       }
       expect(calls).toBe(20);
-    }).pipe(Effect.provide(AzureDevOpsMedia.layer.pipe(Layer.provide(cli))));
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          for (let index = 0; index < 15; index++) {
+            yield* media.get({ cwd: "/repo", url: `${base}-active-${index}.mp4` });
+          }
+          const transient = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const file = yield* media.get({ cwd: "/repo", url: `${base}-overflow.mp4` });
+              expect(yield* fs.readFileString(file.path)).toBe("GIF89a");
+              return file;
+            }),
+          );
+          expect(yield* fs.exists(transient.path)).toBe(false);
+          expect(yield* fs.readFileString(first.path)).toBe("GIF89a");
+        }),
+      );
+    }).pipe(Effect.scoped, Effect.provide(AzureDevOpsMedia.layer.pipe(Layer.provide(cli))));
     for (const path of paths) expect(yield* fs.exists(path)).toBe(false);
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(Layer.merge(NodeServices.layer, NodeHttpPlatform.layer))),
 );
 
 it.effect("retries after a failed authenticated download", () => {

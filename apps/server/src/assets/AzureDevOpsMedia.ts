@@ -93,8 +93,23 @@ const make = Effect.gen(function* () {
     get: Effect.fn("AzureDevOpsMedia.get")(function* (input) {
       const key = new MediaKey({ cwd: input.cwd, url: input.url });
       return yield* RcMap.get(downloads, key).pipe(
-        // Overflow belongs to the request scope instead of displacing an active reader.
-        Effect.catchTags({ ExceededCapacityError: () => download(key) }),
+        Effect.catchTags({
+          ExceededCapacityError: () =>
+            Effect.gen(function* () {
+              // Reclaim an idle slot; never displace a file held by a response stream.
+              const idle =
+                downloads.state._tag === "Open"
+                  ? Array.from(downloads.state.map).find(([, entry]) => entry.refCount === 0)
+                  : undefined;
+              if (idle) {
+                yield* RcMap.invalidate(downloads, idle[0]);
+                return yield* RcMap.get(downloads, key).pipe(
+                  Effect.catchTags({ ExceededCapacityError: () => download(key) }),
+                );
+              }
+              return yield* download(key);
+            }),
+        }),
         Effect.tapError(() => RcMap.invalidate(downloads, key)),
         Effect.mapError((cause) =>
           isAzureDevOpsMediaFetchError(cause) ? cause : new AzureDevOpsMediaFetchError({ cause }),

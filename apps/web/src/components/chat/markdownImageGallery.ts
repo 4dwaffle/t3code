@@ -17,16 +17,19 @@ export async function resolveMarkdownImageGallery(
 ): Promise<ExpandedImagePreview> {
   const images = await Promise.all(
     gallery.images.map(async (item) => {
-      if (
-        item.actionsSource?.asset ||
-        !item.originalUrl ||
-        !input.pullRequestMedia ||
-        !input.cwd ||
-        !pullRequestMediaResource(item.originalUrl, input.cwd)
-      )
+      if (item.actionsSource?.asset || !item.originalUrl || !input.pullRequestMedia || !input.cwd)
         return item;
-      const resolved = await resolveMarkdownMediaPreview({ ...input, source: item.originalUrl });
-      return resolved?.images[0] ?? item;
+      // Authenticated attachment hosts require HTTPS even when the client runs on local HTTP.
+      const source = item.originalUrl.startsWith("//")
+        ? `https:${item.originalUrl}`
+        : item.originalUrl;
+      if (!pullRequestMediaResource(source, input.cwd)) return item;
+      try {
+        const resolved = await resolveMarkdownMediaPreview({ ...input, source });
+        return resolved?.images[0] ?? item;
+      } catch {
+        return item;
+      }
     }),
   );
   return { ...gallery, images };
