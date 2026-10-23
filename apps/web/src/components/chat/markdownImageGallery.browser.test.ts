@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import {
@@ -6,9 +6,7 @@ import {
   markdownImageItems,
   resolveMarkdownImageGallery,
 } from "./markdownImageGallery";
-import { resolveMarkdownMediaPreview, wrapExpandedImageIndex } from "./ExpandedImagePreview";
-
-afterEach(() => document.body.replaceChildren());
+import { resolveMarkdownMediaPreview } from "./ExpandedImagePreview";
 
 it("keeps the selected preview and other images available when a neighboring asset fails", async () => {
   const base =
@@ -67,6 +65,7 @@ it.each([
     const container = document.createElement("div");
     container.setAttribute("data-image-gallery", "");
     document.body.append(container);
+    using _cleanup = { [Symbol.dispose]: () => container.remove() };
     const images = urls.map((url, index) => {
       const parent = document.createElement(linked || index === 1 ? "a" : "span");
       if (parent instanceof HTMLAnchorElement) parent.href = url;
@@ -101,7 +100,7 @@ it.each([
       markdownImageGallery(images[0]!, selected),
       input,
     );
-    const next = gallery.images[wrapExpandedImageIndex(gallery.index + 1, gallery.images.length)]!;
+    const next = gallery.images[gallery.index + 1]!;
     expect(gallery.images).toHaveLength(2);
     expect(next.src).toBe("https://remote.example/api/assets/signed/second.gif#preview");
     expect(next.actionsSource?.asset).toEqual({
