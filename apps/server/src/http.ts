@@ -444,6 +444,15 @@ export const layerAssetRoute = HttpRouter.add(
             request.method === "HEAD" ? "HEAD" : "GET",
           ),
         ),
+        Effect.tapError((cause) =>
+          Effect.logWarning("Failed to fetch Azure DevOps media.", {
+            origin: new URL(asset.url).origin,
+            errorType:
+              cause._tag === "AzureDevOpsMediaFetchError"
+                ? "AzureDevOpsMediaFetchError"
+                : "FileResponseError",
+          }),
+        ),
         Effect.orElseSucceed(() =>
           HttpServerResponse.empty({
             status: 502,
