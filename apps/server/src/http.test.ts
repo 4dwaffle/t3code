@@ -18,9 +18,10 @@ import { HttpClient, HttpClientRequest, HttpRouter, HttpServerResponse } from "e
 import { openMediaFile } from "./assets/MediaFile.ts";
 import * as AssetAccess from "./assets/AssetAccess.ts";
 import * as AzureDevOpsMedia from "./assets/AzureDevOpsMedia.ts";
-import * as AzureDevOpsCli from "@t3tools/source-control-azure-devops/server/AzureDevOpsCli";
+import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import { VcsProcessSpawnError } from "@t3tools/contracts";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import * as GitHubCredentials from "@t3tools/source-control-github/server/GitHubCredentials";
+import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
@@ -55,25 +56,27 @@ describe("Azure DevOps media failures", () => {
           expiresAt: 1000,
         }),
       );
-      const cli = Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
-        execute: () =>
-          failure === "download"
-            ? Effect.fail(
-                new AzureDevOpsCli.AzureDevOpsCliAuthenticationError({
-                  operation: "execute",
-                  command: "az",
-                  cwd: "/private-workspace",
-                  argumentCount: 1,
-                  cause: new Error("private-credential"),
+      const cli = TestSourceControlHost.layer({
+        process: {
+          run: () =>
+            failure === "download"
+              ? Effect.fail(
+                  new VcsProcessSpawnError({
+                    operation: "execute",
+                    command: "az",
+                    cwd: "/private-workspace",
+                    argumentCount: 1,
+                    cause: new Error("private-credential"),
+                  }),
+                )
+              : Effect.succeed({
+                  exitCode: ChildProcessSpawner.ExitCode(0),
+                  stdout: "",
+                  stderr: "",
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
                 }),
-              )
-            : Effect.succeed({
-                exitCode: ChildProcessSpawner.ExitCode(0),
-                stdout: "",
-                stderr: "",
-                stdoutTruncated: false,
-                stderrTruncated: false,
-              }),
+        },
       });
       const layerApp = Layer.mergeAll(
         ServerHttp.layerAssetRoute,
@@ -81,7 +84,7 @@ describe("Azure DevOps media failures", () => {
         NodeHttpPlatform.layer,
         Logger.layer([logger], { mergeWithExisting: false }),
         // The stubbed resolver bypasses these other asset kinds; unexpected access must fail.
-        Layer.mock(GitHubCredentials.GitHubCredentials)({}),
+        Layer.succeed(SourceControlBuiltInDrivers.SourceControlDrivers)([]),
         Layer.succeed(HttpClient.HttpClient)(
           HttpClient.make(() => Effect.die("Unexpected provider request")),
         ),

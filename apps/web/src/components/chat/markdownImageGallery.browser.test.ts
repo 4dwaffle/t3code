@@ -38,7 +38,7 @@ it("keeps the selected preview and other images available when a neighboring ass
     {
       cwd: "/repo",
       environmentId,
-      pullRequestMedia: true,
+      sourceControlMedia: true,
       httpBaseUrl: "https://remote.example",
       createAssetUrl,
     },
@@ -91,7 +91,7 @@ it.each([
       source: urls[0]!,
       cwd: "/repo",
       environmentId,
-      pullRequestMedia: true,
+      sourceControlMedia: true,
       httpBaseUrl: "https://remote.example",
       createAssetUrl,
     };

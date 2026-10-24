@@ -45,7 +45,7 @@ export async function resolveMarkdownMediaPreview(input: {
   cwd?: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
   environmentId?: EnvironmentId | undefined;
-  pullRequestMedia?: boolean | undefined;
+  sourceControlMedia?: boolean | undefined;
   httpBaseUrl?: string | undefined;
   onOpenFile?: ((relativePath: string) => void) | undefined;
   createAssetUrl: (input: {
@@ -67,7 +67,7 @@ export async function resolveMarkdownMediaPreview(input: {
   const resource =
     media.access === "environment"
       ? media.resource
-      : media.access === "direct" && input.pullRequestMedia && input.cwd
+      : media.access === "direct" && input.sourceControlMedia && input.cwd
         ? pullRequestMediaResource(resolveProtocolRelativeMediaUrl(media.uri), input.cwd)
         : null;
   const environmentId = input.threadRef?.environmentId ?? input.environmentId;

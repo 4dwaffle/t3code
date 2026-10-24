@@ -25,7 +25,7 @@ describe("resolveMarkdownMediaPreview", () => {
         source,
         cwd: "/repo",
         environmentId,
-        pullRequestMedia: true,
+        sourceControlMedia: true,
         httpBaseUrl: "https://remote.example/",
         createAssetUrl,
       });
@@ -45,7 +45,7 @@ describe("resolveMarkdownMediaPreview", () => {
         source:
           "https://dev.azure.com/org/project/_apis/git/repositories/repo/pullRequests/42/attachments/demo.mp4",
         cwd: "/repo",
-        pullRequestMedia: true,
+        sourceControlMedia: true,
         createAssetUrl: vi.fn(),
       }),
     ).rejects.toThrow("Reconnect to this environment");

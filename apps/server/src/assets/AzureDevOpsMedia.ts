@@ -1,5 +1,5 @@
 import { azureDevOpsMediaLocation } from "@t3tools/shared/azureDevOpsMedia";
-import * as AzureDevOpsCli from "@t3tools/source-control-azure-devops/server/AzureDevOpsCli";
+import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -40,7 +40,7 @@ export class AzureDevOpsMedia extends Context.Service<
 >()("t3/assets/AzureDevOpsMedia") {}
 
 const make = Effect.gen(function* () {
-  const azure = yield* AzureDevOpsCli.AzureDevOpsCli;
+  const host = yield* SourceControlHost.SourceControlHost;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   // Range requests share a download. Each response holds a reference until its stream closes;
@@ -54,7 +54,9 @@ const make = Effect.gen(function* () {
     const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ado-media-" });
     const destination = path.join(directory, `attachment${path.extname(location.fileName)}`);
     // `devops invoke` uses the same PAT/tenant resolution as PR reads. `az rest` does not.
-    yield* azure.execute({
+    yield* host.process.run({
+      operation: "AzureDevOpsMedia.download",
+      command: "az",
       cwd: key.cwd,
       args: [
         "devops",

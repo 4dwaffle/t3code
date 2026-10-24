@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { pullRequestMediaResource, splitPullRequestBody } from "./pullRequestMarkdown.ts";
+import {
+  changeRequestReferenceAutolinker,
+  pullRequestMediaResource,
+  splitPullRequestBody,
+} from "./pullRequestMarkdown.ts";
 
 describe("Azure DevOps PR walkthrough", () => {
   it("preserves the clickable GIF and promotes the separate MP4 link to authenticated video", () => {
@@ -150,5 +154,22 @@ describe("media on custom hosts", () => {
     expect(splitPullRequestBody(body)).toEqual([
       { id: "markdown:0", kind: "markdown", text: body },
     ]);
+  });
+});
+
+describe("change request reference autolinks", () => {
+  const urls = (provider: string, url: string, text: string) =>
+    changeRequestReferenceAutolinker({ provider, url })?.(text).map((link) => link.url) ?? null;
+
+  it("links references against the change request's own repository", () => {
+    expect(urls("github", "https://ghe.example.com/acme/web/pull/7", "Fixes #5")).toEqual([
+      "https://ghe.example.com/acme/web/issues/5",
+    ]);
+  });
+
+  // regression: the mobile review guide linked every host's `#5` with GitHub's grammar
+  it("links nothing on a host whose grammar is not applied", () => {
+    expect(urls("gitlab", "https://gitlab.com/group/project/-/merge_requests/7", "#5")).toBeNull();
+    expect(urls("forgejo", "https://codeberg.org/acme/web/pulls/7", "#5")).toBeNull();
   });
 });

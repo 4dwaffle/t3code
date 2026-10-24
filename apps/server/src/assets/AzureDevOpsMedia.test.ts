@@ -2,7 +2,8 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import { expect, it } from "@effect/vitest";
-import * as AzureDevOpsCli from "@t3tools/source-control-azure-devops/server/AzureDevOpsCli";
+import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import { VcsProcessSpawnError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -20,22 +21,26 @@ it.effect(
       const fs = yield* FileSystem.FileSystem;
       let downloaded = "";
       const calls: ReadonlyArray<string>[] = [];
-      const cli = Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
-        execute: ({ cwd, args }) =>
-          Effect.gen(function* () {
-            expect(cwd).toBe("/repo");
-            calls.push(args);
-            yield* fs
-              .writeFileString(args[args.indexOf("--out-file") + 1]!, "0123456789")
-              .pipe(Effect.orDie);
-            return {
-              exitCode: ChildProcessSpawner.ExitCode(0),
-              stdout: "",
-              stderr: "",
-              stdoutTruncated: false,
-              stderrTruncated: false,
-            };
-          }),
+      const cli = TestSourceControlHost.layer({
+        process: {
+          run: ({ cwd, args, command, timeoutMs }) =>
+            Effect.gen(function* () {
+              expect(cwd).toBe("/repo");
+              expect(command).toBe("az");
+              expect(timeoutMs).toBe(120_000);
+              calls.push(args);
+              yield* fs
+                .writeFileString(args[args.indexOf("--out-file") + 1]!, "0123456789")
+                .pipe(Effect.orDie);
+              return {
+                exitCode: ChildProcessSpawner.ExitCode(0),
+                stdout: "",
+                stderr: "",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              };
+            }),
+        },
       });
       yield* Effect.gen(function* () {
         const media = yield* AzureDevOpsMedia.AzureDevOpsMedia;
@@ -104,10 +109,12 @@ it.effect("rejects unsupported endpoints before invoking Azure CLI", () => {
       AzureDevOpsMedia.layer
         .pipe(
           Layer.provide(
-            Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
-              execute: () => {
-                calls++;
-                return Effect.die("Unexpected download");
+            TestSourceControlHost.layer({
+              process: {
+                run: () => {
+                  calls++;
+                  return Effect.die("Unexpected download");
+                },
               },
             }),
           ),
@@ -122,21 +129,23 @@ it.effect("shares renewed capabilities and reuses range downloads under cache pr
     const fs = yield* FileSystem.FileSystem;
     let calls = 0;
     const paths: string[] = [];
-    const cli = Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
-      execute: ({ args }) =>
-        Effect.gen(function* () {
-          calls++;
-          const destination = args[args.indexOf("--out-file") + 1]!;
-          paths.push(destination);
-          yield* fs.writeFileString(destination, "GIF89a").pipe(Effect.orDie);
-          return {
-            exitCode: ChildProcessSpawner.ExitCode(0),
-            stdout: "",
-            stderr: "",
-            stdoutTruncated: false,
-            stderrTruncated: false,
-          };
-        }),
+    const cli = TestSourceControlHost.layer({
+      process: {
+        run: ({ args }) =>
+          Effect.gen(function* () {
+            calls++;
+            const destination = args[args.indexOf("--out-file") + 1]!;
+            paths.push(destination);
+            yield* fs.writeFileString(destination, "GIF89a").pipe(Effect.orDie);
+            return {
+              exitCode: ChildProcessSpawner.ExitCode(0),
+              stdout: "",
+              stderr: "",
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            };
+          }),
+      },
     });
     yield* Effect.gen(function* () {
       const media = yield* AzureDevOpsMedia.AzureDevOpsMedia;
@@ -215,29 +224,31 @@ it.effect("retries after a failed authenticated download", () => {
       AzureDevOpsMedia.layer
         .pipe(
           Layer.provide(
-            Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({
-              execute: ({ args }) =>
-                Effect.gen(function* () {
-                  if (++calls === 1)
-                    return yield* new AzureDevOpsCli.AzureDevOpsCliAuthenticationError({
-                      operation: "execute",
-                      command: "az",
-                      cwd: "/repo",
-                      argumentCount: args.length,
-                      cause: "signed out",
-                    });
-                  const fs = yield* FileSystem.FileSystem;
-                  yield* fs
-                    .writeFileString(args[args.indexOf("--out-file") + 1]!, "GIF89a")
-                    .pipe(Effect.orDie);
-                  return {
-                    exitCode: ChildProcessSpawner.ExitCode(0),
-                    stdout: "",
-                    stderr: "",
-                    stdoutTruncated: false,
-                    stderrTruncated: false,
-                  };
-                }).pipe(Effect.provide(NodeServices.layer)),
+            TestSourceControlHost.layer({
+              process: {
+                run: ({ args }) =>
+                  Effect.gen(function* () {
+                    if (++calls === 1)
+                      return yield* new VcsProcessSpawnError({
+                        operation: "execute",
+                        command: "az",
+                        cwd: "/repo",
+                        argumentCount: args.length,
+                        cause: "signed out",
+                      });
+                    const fs = yield* FileSystem.FileSystem;
+                    yield* fs
+                      .writeFileString(args[args.indexOf("--out-file") + 1]!, "GIF89a")
+                      .pipe(Effect.orDie);
+                    return {
+                      exitCode: ChildProcessSpawner.ExitCode(0),
+                      stdout: "",
+                      stderr: "",
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    };
+                  }).pipe(Effect.provide(NodeServices.layer)),
+              },
             }),
           ),
         )
