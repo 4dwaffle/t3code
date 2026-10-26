@@ -31,7 +31,9 @@ export function azureDevOpsMediaLocation(source: string) {
     : [legacy![1]!, ...parts];
   if (!organization || !project || !repositoryId || !pullRequestId || !fileName) return null;
   if (!/^[\w-]+$/u.test(organization)) return null;
-  const organizationUrl = `https://dev.azure.com/${organization}`;
+  const organizationUrl = modern
+    ? `https://dev.azure.com/${organization}`
+    : `${url.origin}${/^\/DefaultCollection\//iu.test(url.pathname) ? "/DefaultCollection" : ""}`;
   const fetchUrl = `${organizationUrl}/${encodeURIComponent(project)}/_apis/git/repositories/${encodeURIComponent(repositoryId)}/pullRequests/${pullRequestId}/attachments/${encodeURIComponent(fileName)}`;
   return { organizationUrl, project, repositoryId, pullRequestId, fileName, fetchUrl };
 }

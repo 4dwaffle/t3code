@@ -19,13 +19,9 @@ export async function resolveMarkdownImageGallery(
     gallery.images.map(async (item) => {
       if (item.actionsSource?.asset || !item.originalUrl || !input.sourceControlMedia || !input.cwd)
         return item;
-      // Authenticated attachment hosts require HTTPS even when the client runs on local HTTP.
-      const source = item.originalUrl.startsWith("//")
-        ? `https:${item.originalUrl}`
-        : item.originalUrl;
-      if (!pullRequestMediaResource(source, input.cwd)) return item;
+      if (!pullRequestMediaResource(item.originalUrl, input.cwd)) return item;
       try {
-        const resolved = await resolveMarkdownMediaPreview({ ...input, source });
+        const resolved = await resolveMarkdownMediaPreview({ ...input, source: item.originalUrl });
         return resolved?.images[0] ?? item;
       } catch {
         return item;

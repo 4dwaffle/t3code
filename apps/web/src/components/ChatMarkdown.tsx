@@ -8,11 +8,7 @@ import {
 } from "@t3tools/shared/markdownLinks";
 import { isHostPath, resolveWorkspaceFilePath } from "@t3tools/shared/path";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
-import {
-  AuthFilesystemReadScope,
-  AuthOrchestrationOperateScope,
-  SOURCE_CONTROL_MEDIA_ASSET,
-} from "@t3tools/contracts";
+import { AuthFilesystemReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import {
   CHAT_MARKDOWN_REMARK_PLUGINS,
   CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
@@ -1444,9 +1440,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const kind = mediaKind ?? "image";
     const directUri = imageSource._tag === "Direct" ? imageSource.uri : null;
     const mediaResource =
-      directUri === null || cwd === undefined
-        ? null
-        : pullRequestMediaResource(resolveProtocolRelativeMediaUrl(directUri), cwd);
+      directUri === null || cwd === undefined ? null : pullRequestMediaResource(directUri, cwd);
     if (
       sourceControlMedia &&
       cwd !== undefined &&

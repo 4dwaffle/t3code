@@ -9,12 +9,16 @@ describe("resolveMarkdownMediaPreview", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(["gif", "mp4"])(
+  it.each(["gif", "mp4", "protocol-relative.gif"])(
     "authenticates a PR thumbnail's linked %s preview without a thread",
     async (extension) => {
-      const source = `https://dev.azure.com/org/project/_apis/git/repositories/repo/pullRequests/42/attachments/demo.${extension}#t=2`;
+      const protocolRelative = extension === "protocol-relative.gif";
+      extension = protocolRelative ? "gif" : extension;
+      vi.stubGlobal("window", { location: { protocol: "http:" } });
+      const url = `https://dev.azure.com/org/project/_apis/git/repositories/repo/pullRequests/42/attachments/demo.${extension}#t=2`;
+      const source = protocolRelative ? url.slice(6) : url;
       const environmentId = EnvironmentId.make("azure-environment");
-      const resource = { _tag: "azure-devops-media", cwd: "/repo", url: source.split("#")[0] };
+      const resource = { _tag: "azure-devops-media", cwd: "/repo", url: url.split("#")[0] };
       const createAssetUrl = vi.fn(async () =>
         AsyncResult.success({
           relativeUrl: `/api/assets/signed/demo.${extension}`,

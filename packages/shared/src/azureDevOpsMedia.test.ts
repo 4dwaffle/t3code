@@ -18,8 +18,16 @@ describe("Azure DevOps media endpoints", () => {
     });
     expect(
       azureDevOpsMediaLocation(`https://org.visualstudio.com/DefaultCollection${attachment}`),
-    ).toEqual(modern);
-    expect(azureDevOpsMediaLocation(`https://org.visualstudio.com${attachment}`)).toEqual(modern);
+    ).toEqual({
+      ...modern,
+      organizationUrl: "https://org.visualstudio.com/DefaultCollection",
+      fetchUrl: `https://org.visualstudio.com/DefaultCollection${attachment}`,
+    });
+    expect(azureDevOpsMediaLocation(`https://org.visualstudio.com${attachment}`)).toEqual({
+      ...modern,
+      organizationUrl: "https://org.visualstudio.com",
+      fetchUrl: `https://org.visualstudio.com${attachment}`,
+    });
   });
 
   it("decodes route parameters once and keeps filenames out of filesystem paths", () => {

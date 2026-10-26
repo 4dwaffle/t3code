@@ -3,6 +3,7 @@ import { sourceControlClients, type ReferenceAutolink } from "./sourceControlCli
 import { azureDevOpsMediaLocation } from "@t3tools/shared/azureDevOpsMedia";
 
 export function pullRequestMediaResource(url: string, cwd: string) {
+  if (url.startsWith("//")) url = `https:${url}`;
   const azure = azureDevOpsMediaLocation(url);
   if (azure)
     return { _tag: "azure-devops-media", cwd, url: azure.fetchUrl } satisfies AssetResource;

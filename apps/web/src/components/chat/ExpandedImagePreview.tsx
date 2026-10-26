@@ -68,7 +68,7 @@ export async function resolveMarkdownMediaPreview(input: {
     media.access === "environment"
       ? media.resource
       : media.access === "direct" && input.sourceControlMedia && input.cwd
-        ? pullRequestMediaResource(resolveProtocolRelativeMediaUrl(media.uri), input.cwd)
+        ? pullRequestMediaResource(media.uri, input.cwd)
         : null;
   const environmentId = input.threadRef?.environmentId ?? input.environmentId;
   if (media.access === "direct" && resource === null) {

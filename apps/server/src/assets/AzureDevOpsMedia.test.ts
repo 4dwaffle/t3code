@@ -106,20 +106,19 @@ it.effect("rejects unsupported endpoints before invoking Azure CLI", () => {
     expect(calls).toBe(0);
   }).pipe(
     Effect.provide(
-      AzureDevOpsMedia.layer
-        .pipe(
-          Layer.provide(
-            TestSourceControlHost.layer({
-              process: {
-                run: () => {
-                  calls++;
-                  return Effect.die("Unexpected download");
-                },
+      AzureDevOpsMedia.layer.pipe(
+        Layer.provide(
+          TestSourceControlHost.layer({
+            process: {
+              run: () => {
+                calls++;
+                return Effect.die("Unexpected download");
               },
-            }),
-          ),
-        )
-        .pipe(Layer.provideMerge(NodeServices.layer)),
+            },
+          }),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      ),
     ),
   );
 });
@@ -221,38 +220,37 @@ it.effect("retries after a failed authenticated download", () => {
     expect(calls).toBe(2);
   }).pipe(
     Effect.provide(
-      AzureDevOpsMedia.layer
-        .pipe(
-          Layer.provide(
-            TestSourceControlHost.layer({
-              process: {
-                run: ({ args }) =>
-                  Effect.gen(function* () {
-                    if (++calls === 1)
-                      return yield* new VcsProcessSpawnError({
-                        operation: "execute",
-                        command: "az",
-                        cwd: "/repo",
-                        argumentCount: args.length,
-                        cause: "signed out",
-                      });
-                    const fs = yield* FileSystem.FileSystem;
-                    yield* fs
-                      .writeFileString(args[args.indexOf("--out-file") + 1]!, "GIF89a")
-                      .pipe(Effect.orDie);
-                    return {
-                      exitCode: ChildProcessSpawner.ExitCode(0),
-                      stdout: "",
-                      stderr: "",
-                      stdoutTruncated: false,
-                      stderrTruncated: false,
-                    };
-                  }).pipe(Effect.provide(NodeServices.layer)),
-              },
-            }),
-          ),
-        )
-        .pipe(Layer.provideMerge(NodeServices.layer)),
+      AzureDevOpsMedia.layer.pipe(
+        Layer.provide(
+          TestSourceControlHost.layer({
+            process: {
+              run: ({ args }) =>
+                Effect.gen(function* () {
+                  if (++calls === 1)
+                    return yield* new VcsProcessSpawnError({
+                      operation: "execute",
+                      command: "az",
+                      cwd: "/repo",
+                      argumentCount: args.length,
+                      cause: "signed out",
+                    });
+                  const fs = yield* FileSystem.FileSystem;
+                  yield* fs
+                    .writeFileString(args[args.indexOf("--out-file") + 1]!, "GIF89a")
+                    .pipe(Effect.orDie);
+                  return {
+                    exitCode: ChildProcessSpawner.ExitCode(0),
+                    stdout: "",
+                    stderr: "",
+                    stdoutTruncated: false,
+                    stderrTruncated: false,
+                  };
+                }).pipe(Effect.provide(NodeServices.layer)),
+            },
+          }),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      ),
     ),
   );
 });

@@ -96,21 +96,20 @@ const make = Effect.gen(function* () {
       const key = new MediaKey({ cwd: input.cwd, url: input.url });
       return yield* RcMap.get(downloads, key).pipe(
         Effect.catchTags({
-          ExceededCapacityError: () =>
-            Effect.gen(function* () {
-              // Reclaim an idle slot; never displace a file held by a response stream.
-              const idle =
-                downloads.state._tag === "Open"
-                  ? Array.from(downloads.state.map).find(([, entry]) => entry.refCount === 0)
-                  : undefined;
-              if (idle) {
-                yield* RcMap.invalidate(downloads, idle[0]);
-                return yield* RcMap.get(downloads, key).pipe(
-                  Effect.catchTags({ ExceededCapacityError: () => download(key) }),
-                );
-              }
-              return yield* download(key);
-            }),
+          ExceededCapacityError: Effect.fn("AzureDevOpsMedia.overflow")(function* () {
+            // Reclaim an idle slot; never displace a file held by a response stream.
+            const idle =
+              downloads.state._tag === "Open"
+                ? Array.from(downloads.state.map).find(([, entry]) => entry.refCount === 0)
+                : undefined;
+            if (idle) {
+              yield* RcMap.invalidate(downloads, idle[0]);
+              return yield* RcMap.get(downloads, key).pipe(
+                Effect.catchTags({ ExceededCapacityError: () => download(key) }),
+              );
+            }
+            return yield* download(key);
+          }),
         }),
         Effect.tapError(() => RcMap.invalidate(downloads, key)),
         Effect.mapError((cause) =>
