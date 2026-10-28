@@ -19,7 +19,7 @@ import { useNowMinute } from "../../hooks/useNowMinute";
 import { reconcileSnoozeDraft, sortSnoozeRows } from "./SnoozePresetsSettings.logic";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
+import { TimePicker } from "../ui/time-picker";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -375,19 +375,13 @@ function SnoozePresetFields(props: {
       ) : (
         <>
           <span className="text-xs text-muted-foreground">at</span>
-          <Input
-            nativeInput
-            size="sm"
-            type="time"
-            className="w-32"
-            aria-label="Time"
-            value={preset.time}
-            onChange={(event) => {
-              if (/^\d{2}:\d{2}$/.test(event.target.value)) {
-                onChange({ ...preset, time: event.target.value });
-              }
-            }}
-          />
+          <div className="w-32">
+            <TimePicker
+              size="sm"
+              value={preset.time}
+              onValueChange={(time) => onChange({ ...preset, time })}
+            />
+          </div>
         </>
       )}
     </div>

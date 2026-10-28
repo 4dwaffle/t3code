@@ -13,7 +13,7 @@ import { Calendar } from "./ui/calendar";
 import { weekStartsOn } from "../timestampFormat";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { Popover, PopoverTrigger, PopoverPopup } from "./ui/popover";
-import { Input } from "./ui/input";
+import { TimePicker } from "./ui/time-picker";
 import { Label } from "./ui/label";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from "./ui/select";
@@ -160,21 +160,17 @@ function CustomSnoozeDialog() {
                         </PopoverPopup>
                       </Popover>
                     </div>
-                    <Label className="flex min-w-0 flex-col items-stretch" htmlFor={`${id}-time`}>
-                      Time
-                      <Input
-                        nativeInput
+                    <div className="flex min-w-0 flex-col gap-1.5">
+                      <Label htmlFor={`${id}-time`}>Time</Label>
+                      <TimePicker
                         id={`${id}-time`}
-                        className="h-9 sm:h-8"
-                        type="time"
-                        required
                         value={time}
-                        onChange={(event) => {
-                          setTime(event.target.value);
+                        onValueChange={(value) => {
+                          setTime(value);
                           setError(null);
                         }}
                       />
-                    </Label>
+                    </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
