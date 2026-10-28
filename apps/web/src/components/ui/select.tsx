@@ -98,6 +98,7 @@ function SelectValue({ className, ...props }: SelectPrimitive.Value.Props) {
 function SelectPopup({
   className,
   children,
+  variant = "default",
   side = "bottom",
   sideOffset = 4,
   align = "start",
@@ -107,6 +108,7 @@ function SelectPopup({
   anchor,
   ...props
 }: SelectPrimitive.Popup.Props & {
+  variant?: "default" | "compact";
   side?: SelectPrimitive.Positioner.Props["side"];
   sideOffset?: SelectPrimitive.Positioner.Props["sideOffset"];
   align?: SelectPrimitive.Positioner.Props["align"];
@@ -145,7 +147,13 @@ function SelectPopup({
             )}
           >
             <SelectPrimitive.List
-              className={cn("max-h-(--available-height) overflow-y-auto p-1", className)}
+              className={cn(
+                "overflow-y-auto p-1",
+                variant === "compact"
+                  ? "max-h-[min(15rem,var(--available-height))] scroll-py-12"
+                  : "max-h-(--available-height)",
+                className,
+              )}
               data-slot="select-list"
             >
               {children}
