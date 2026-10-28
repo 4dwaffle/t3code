@@ -33,7 +33,7 @@ export function TimePicker({
         <SelectTrigger id={id} size={size} className="min-w-0 flex-1" aria-label="Hours">
           <SelectValue />
         </SelectTrigger>
-        <SelectPopup alignItemWithTrigger={false} className="max-h-60">
+        <SelectPopup alignItemWithTrigger={false} className="max-h-60 scroll-py-12">
           {HOURS.map(({ value, label }) => (
             <SelectItem key={value} value={value}>
               {label}
@@ -54,7 +54,7 @@ export function TimePicker({
         <SelectTrigger size={size} className="min-w-0 flex-1" aria-label="Minutes">
           <SelectValue />
         </SelectTrigger>
-        <SelectPopup alignItemWithTrigger={false} className="max-h-60">
+        <SelectPopup alignItemWithTrigger={false} className="max-h-60 scroll-py-12">
           {MINUTES.map(({ value, label }) => (
             <SelectItem key={value} value={value}>
               {label}
