@@ -91,27 +91,44 @@ const make = Effect.gen(function* () {
     idleTimeToLive: "1 minute",
     lookup: download,
   });
+  const overflowDownloads = yield* RcMap.make({
+    capacity: 16,
+    idleTimeToLive: "1 minute",
+    lookup: download,
+  });
+  const getCached = Effect.fn("AzureDevOpsMedia.getCached")(function* (
+    cache: typeof downloads,
+    key: MediaKey,
+  ) {
+    return yield* RcMap.get(cache, key).pipe(
+      Effect.catchTags({
+        ExceededCapacityError: Effect.fn("AzureDevOpsMedia.overflow")(function* (error) {
+          // Reclaim an idle slot; never displace a file held by a response stream.
+          const idle =
+            cache.state._tag === "Open"
+              ? Array.from(cache.state.map).find(([, entry]) => entry.refCount === 0)
+              : undefined;
+          if (!idle) return yield* error;
+          yield* RcMap.invalidate(cache, idle[0]);
+          return yield* RcMap.get(cache, key);
+        }),
+      }),
+      Effect.tapError(() => RcMap.invalidate(cache, key)),
+    );
+  });
   return AzureDevOpsMedia.of({
     get: Effect.fn("AzureDevOpsMedia.get")(function* (input) {
       const key = new MediaKey({ cwd: input.cwd, url: input.url });
-      return yield* RcMap.get(downloads, key).pipe(
+      // Keep using overflow entries after primary slots reopen, so range requests share their bytes.
+      const cached = (yield* RcMap.has(overflowDownloads, key))
+        ? getCached(overflowDownloads, key)
+        : getCached(downloads, key).pipe(
+            Effect.catchTags({ ExceededCapacityError: () => getCached(overflowDownloads, key) }),
+          );
+      return yield* cached.pipe(
         Effect.catchTags({
-          ExceededCapacityError: Effect.fn("AzureDevOpsMedia.overflow")(function* () {
-            // Reclaim an idle slot; never displace a file held by a response stream.
-            const idle =
-              downloads.state._tag === "Open"
-                ? Array.from(downloads.state.map).find(([, entry]) => entry.refCount === 0)
-                : undefined;
-            if (idle) {
-              yield* RcMap.invalidate(downloads, idle[0]);
-              return yield* RcMap.get(downloads, key).pipe(
-                Effect.catchTags({ ExceededCapacityError: () => download(key) }),
-              );
-            }
-            return yield* download(key);
-          }),
+          ExceededCapacityError: () => download(key),
         }),
-        Effect.tapError(() => RcMap.invalidate(downloads, key)),
         Effect.mapError((cause) =>
           isAzureDevOpsMediaFetchError(cause) ? cause : new AzureDevOpsMediaFetchError({ cause }),
         ),

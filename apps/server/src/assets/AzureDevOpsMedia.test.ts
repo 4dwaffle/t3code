@@ -7,6 +7,7 @@ import { VcsProcessSpawnError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpServerResponse } from "effect/http";
 import * as AzureDevOpsMedia from "./AzureDevOpsMedia.ts";
 import { assetFileResponse } from "../http.ts";
@@ -186,22 +187,54 @@ it.effect("shares renewed capabilities and reuses range downloads under cache pr
         expect(yield* fs.readFileString(first.path)).toBe("GIF89a");
       }
       expect(calls).toBe(20);
+      let overflowPath = "";
       yield* Effect.scoped(
         Effect.gen(function* () {
           for (let index = 0; index < 15; index++) {
             yield* media.get({ cwd: "/repo", url: `${base}-active-${index}.mp4` });
           }
-          const transient = yield* Effect.scoped(
+          const beforeOverflow = calls;
+          const overflow = yield* Effect.scoped(
             Effect.gen(function* () {
               const file = yield* media.get({ cwd: "/repo", url: `${base}-overflow.mp4` });
               expect(yield* fs.readFileString(file.path)).toBe("GIF89a");
               return file;
             }),
           );
-          expect(yield* fs.exists(transient.path)).toBe(false);
+          overflowPath = overflow.path;
+          expect(yield* fs.exists(overflow.path)).toBe(true);
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const repeated = yield* media.get({ cwd: "/repo", url: `${base}-overflow.mp4` });
+              expect(repeated.path).toBe(overflow.path);
+              const ranged = HttpServerResponse.toWeb(
+                yield* assetFileResponse(repeated, "bytes=1-3"),
+              );
+              expect(ranged.status).toBe(206);
+              expect(yield* Effect.promise(() => ranged.text())).toBe("IF8");
+              expect(calls).toBe(beforeOverflow + 1);
+              for (let index = 0; index < 15; index++) {
+                yield* media.get({ cwd: "/repo", url: `${base}-overflow-active-${index}.mp4` });
+              }
+              const transient = yield* Effect.scoped(
+                media.get({ cwd: "/repo", url: `${base}-uncached.mp4` }),
+              );
+              expect(yield* fs.exists(transient.path)).toBe(false);
+              expect(yield* fs.readFileString(overflow.path)).toBe("GIF89a");
+              const retained = yield* Effect.forEach(paths, (path) => fs.exists(path));
+              expect(retained.filter(Boolean)).toHaveLength(32);
+            }),
+          );
           expect(yield* fs.readFileString(first.path)).toBe("GIF89a");
         }),
       );
+      const beforeReuse = calls;
+      const reused = yield* Effect.scoped(media.get({ cwd: "/repo", url: `${base}-overflow.mp4` }));
+      expect(reused.path).toBe(overflowPath);
+      expect(calls).toBe(beforeReuse);
+      yield* TestClock.adjust("1 minute");
+      expect(yield* fs.exists(overflowPath)).toBe(false);
+      expect(yield* fs.readFileString(first.path)).toBe("GIF89a");
     }).pipe(Effect.scoped, Effect.provide(AzureDevOpsMedia.layer.pipe(Layer.provide(cli))));
     for (const path of paths) expect(yield* fs.exists(path)).toBe(false);
   }).pipe(Effect.provide(Layer.merge(NodeServices.layer, NodeHttpPlatform.layer))),
