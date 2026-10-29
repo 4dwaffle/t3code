@@ -13,6 +13,12 @@ import type {
 
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
 import {
+  decodePolicyEvaluationsJson,
+  decodeStatusesJson,
+  type AzureDevOpsPolicyEvaluation,
+  type AzureDevOpsStatus,
+} from "./azureDevOpsChecks.ts";
+import {
   decodeItemContentJson,
   decodeIterationChangesJson,
   decodeIterationsJson,
@@ -157,6 +163,18 @@ export class AzureDevOpsPullRequestCli extends Context.Service<
       readonly number: number;
     }) => Effect.Effect<AzureDevOpsPullRequest, AzureDevOpsPullRequestCliError>;
 
+    readonly listPolicyEvaluations: (input: {
+      readonly cwd: string;
+      readonly location: AzureDevOpsRepositoryLocation;
+      readonly number: number;
+    }) => Effect.Effect<ReadonlyArray<AzureDevOpsPolicyEvaluation>, AzureDevOpsPullRequestCliError>;
+
+    readonly listStatuses: (input: {
+      readonly cwd: string;
+      readonly location: AzureDevOpsRepositoryLocation;
+      readonly number: number;
+    }) => Effect.Effect<ReadonlyArray<AzureDevOpsStatus>, AzureDevOpsPullRequestCliError>;
+
     readonly listThreads: (input: {
       readonly cwd: string;
       readonly location: AzureDevOpsRepositoryLocation;
@@ -296,6 +314,8 @@ export const make = Effect.gen(function* () {
     readonly cwd: string;
     readonly operation: string;
     readonly resource: string;
+    readonly area?: string;
+    readonly apiVersion?: string;
     readonly routeParameters: ReadonlyArray<string>;
     readonly queryParameters?: ReadonlyArray<string>;
     readonly maxOutputBytes?: number;
@@ -309,11 +329,11 @@ export const make = Effect.gen(function* () {
         "invoke",
         ...detectArgs,
         "--area",
-        "git",
+        input.area ?? "git",
         "--resource",
         input.resource,
         "--api-version",
-        REST_API_VERSION,
+        input.apiVersion ?? REST_API_VERSION,
         "--route-parameters",
         ...input.routeParameters,
         ...(input.queryParameters === undefined
@@ -543,6 +563,71 @@ export const make = Effect.gen(function* () {
           },
         ),
       );
+    }),
+
+    listPolicyEvaluations: Effect.fn("AzureDevOpsPullRequestCli.listPolicyEvaluations")(
+      function* (input) {
+        if (!input.location.projectId)
+          return yield* new AzureDevOpsPullRequestIncompleteError({
+            command: "az",
+            cwd: input.cwd,
+            number: input.number,
+          });
+        const policies: AzureDevOpsPolicyEvaluation[] = [];
+        for (let skip = 0; skip < 10_000; skip += 100) {
+          const page = yield* invoke({
+            cwd: input.cwd,
+            operation: "listPolicyEvaluations",
+            area: "policy",
+            resource: "evaluations",
+            apiVersion: "7.1-preview",
+            routeParameters: [`project=${input.location.project}`],
+            queryParameters: [
+              `artifactId=vstfs:///CodeReview/CodeReviewId/${input.location.projectId}/${input.number}`,
+              "$top=100",
+              `$skip=${skip}`,
+            ],
+            maxOutputBytes: REVIEW_HISTORY_MAX_OUTPUT_BYTES,
+            decode: decodePolicyEvaluationsJson,
+          });
+          policies.push(...page.value);
+          if (page.value.length < 100) return policies;
+        }
+        return yield* new AzureDevOpsPullRequestReadError({
+          command: "az",
+          cwd: input.cwd,
+          operation: "listPolicyEvaluations",
+          cause: "Policy pagination exceeded the read limit",
+        });
+      },
+    ),
+
+    listStatuses: Effect.fn("AzureDevOpsPullRequestCli.listStatuses")(function* (input) {
+      const statuses: AzureDevOpsStatus[] = [];
+      let token: string | undefined;
+      const seen = new Set<string>();
+      for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+        const page = yield* invoke({
+          cwd: input.cwd,
+          operation: "listStatuses",
+          resource: "pullRequestStatuses",
+          routeParameters: pullRequestRoute(input),
+          ...(token === undefined ? {} : { queryParameters: [`continuationToken=${token}`] }),
+          maxOutputBytes: REVIEW_HISTORY_MAX_OUTPUT_BYTES,
+          decode: decodeStatusesJson,
+        });
+        statuses.push(...page.value);
+        if (!page.continuation_token) return statuses;
+        if (seen.has(page.continuation_token)) break;
+        token = page.continuation_token;
+        seen.add(token);
+      }
+      return yield* new AzureDevOpsPullRequestReadError({
+        command: "az",
+        cwd: input.cwd,
+        operation: "listStatuses",
+        cause: "Status pagination did not complete",
+      });
     }),
 
     listThreads: Effect.fn("AzureDevOpsPullRequestCli.listThreads")(function (input) {

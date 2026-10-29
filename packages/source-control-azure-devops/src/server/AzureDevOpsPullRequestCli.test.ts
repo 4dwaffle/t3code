@@ -48,7 +48,7 @@ const pullRequestRow = {
   targetRefName: "refs/heads/main",
   creationDate: "2026-07-01T00:00:00Z",
   url: "https://dev.azure.com/acme/_apis/git/repositories/web/pullRequests/42",
-  repository: { name: "web", project: { name: "platform" } },
+  repository: { name: "web", project: { name: "platform", id: "project-id" } },
 };
 
 const oneIteration = {
@@ -110,6 +110,160 @@ afterEach(() => {
 });
 
 layer("AzureDevOpsPullRequestCli.layer", (it) => {
+  it.effect.each(["queued", "running", "approved", "rejected"])(
+    "exposes current-revision Azure CI checks: %s",
+    (status) =>
+      Effect.gen(function* () {
+        mockedExecute.mockImplementation(({ args }) => {
+          const resource = args[args.indexOf("--resource") + 1];
+          const value = args.includes("show")
+            ? pullRequestRow
+            : resource === "pullRequestIterations"
+              ? oneIteration
+              : resource === "evaluations"
+                ? {
+                    value: [
+                      {
+                        status,
+                        configuration: {
+                          id: 14,
+                          isEnabled: true,
+                          isBlocking: true,
+                          type: { id: "0609b952-1397-4640-95ec-e00a01b2c241" },
+                          settings: {},
+                        },
+                        context: {
+                          buildId: 123,
+                          buildDefinitionName: "CI",
+                          lastMergeSourceCommitId: "a".repeat(40),
+                          lastMergeCommitId: "merge",
+                          buildIsNotCurrent: false,
+                          isExpired: false,
+                        },
+                      },
+                    ],
+                  }
+                : resource === "pullRequestStatuses"
+                  ? {
+                      value: [
+                        {
+                          id: 1,
+                          iterationId: 1,
+                          context: { genre: "lint", name: "lint" },
+                          state: "pending",
+                        },
+                        {
+                          id: 2,
+                          iterationId: 1,
+                          context: { genre: "lint", name: "lint" },
+                          state: "succeeded",
+                        },
+                        { id: 3, iterationId: 0, context: { name: "stale" }, state: "succeeded" },
+                      ],
+                    }
+                  : { changeEntries: [] };
+          return Effect.succeed(output(json(value)));
+        });
+        const provider = yield* AzureDevOpsPullRequestProvider.make;
+        const input = { cwd: "/w", repository: "platform/web", host: "dev.azure.com", number: 42 };
+        const detail = yield* provider.getChangeRequest(input);
+        expect(detail.checks.map(({ status }) => status)).toEqual([
+          status === "approved" ? "success" : status === "rejected" ? "failure" : "pending",
+          "success",
+        ]);
+        expect(detail.checks[0]).toMatchObject({ required: true, name: "CI (policy 14)" });
+        expect(detail.checks[0]?.url).toContain("buildId=123");
+        expect(provider.getChangeRequestChecks).toBeDefined();
+        expect((yield* provider.getChangeRequestChecks!(input)).checks).toEqual(detail.checks);
+      }),
+  );
+
+  it.effect.each([
+    "empty",
+    "pagination",
+    "authentication",
+    "malformed",
+    "push during read",
+    "repeated cursor",
+  ])("preserves Azure check read outcomes: %s", (mode) =>
+    Effect.gen(function* () {
+      let iterationReads = 0;
+      mockedExecute.mockImplementation(({ args }) => {
+        const resource = args[args.indexOf("--resource") + 1];
+        if (resource === "evaluations" && mode === "authentication")
+          return Effect.fail(
+            new AzureDevOpsCli.AzureDevOpsCliAuthenticationError({
+              operation: "execute",
+              command: "az",
+              cwd: "/w",
+              argumentCount: args.length,
+              cause: "401",
+            }),
+          );
+        const empty = { value: [] };
+        const status = { id: 1, iterationId: 1, context: { name: "CI" }, state: "succeeded" };
+        const pagePolicy = {
+          status: "queued",
+          configuration: {
+            id: 1,
+            isEnabled: true,
+            isBlocking: true,
+            type: { id: "reviewer" },
+            settings: {},
+          },
+        };
+        const value = args.includes("show")
+          ? pullRequestRow
+          : resource === "pullRequestIterations"
+            ? ++iterationReads === 2 && mode === "push during read"
+              ? { value: [{ ...oneIteration.value[0], id: 2 }] }
+              : oneIteration
+            : resource === "evaluations"
+              ? mode === "malformed"
+                ? { value: [{}] }
+                : mode === "pagination" && args.includes("$skip=0")
+                  ? { value: Array.from({ length: 100 }, () => pagePolicy) }
+                  : empty
+              : resource === "pullRequestStatuses"
+                ? mode === "repeated cursor"
+                  ? { ...empty, continuation_token: "same" }
+                  : mode === "pagination"
+                    ? args.includes("continuationToken=next")
+                      ? { value: [status] }
+                      : { ...empty, continuation_token: "next" }
+                    : empty
+                : { changeEntries: [] };
+        return Effect.succeed(output(json(value)));
+      });
+      const provider = yield* AzureDevOpsPullRequestProvider.make;
+      const result = yield* provider.getChangeRequestChecks!({
+        cwd: "/w",
+        repository: "platform/web",
+        host: "dev.azure.com",
+        number: 42,
+      }).pipe(Effect.result);
+      if (mode === "empty" || mode === "pagination") {
+        assert.isTrue(result._tag === "Success");
+        if (result._tag !== "Success") return;
+        expect(result.success.checks).toHaveLength(mode === "empty" ? 0 : 1);
+        if (mode === "pagination") {
+          expect(mockedExecute.mock.calls.some(([call]) => call.args.includes("$skip=100"))).toBe(
+            true,
+          );
+          expect(
+            mockedExecute.mock.calls.some(([call]) => call.args.includes("continuationToken=next")),
+          ).toBe(true);
+        }
+      } else {
+        assert.isTrue(result._tag === "Failure");
+        if (result._tag !== "Failure") return;
+        expect(result.failure.reason).toBe(
+          mode === "authentication" ? "unauthenticated" : "failed",
+        );
+      }
+    }),
+  );
+
   it.effect("reports the latest pushed source commit even while the trial merge is stale", () =>
     Effect.gen(function* () {
       const previousHead = "a".repeat(40);
@@ -136,7 +290,20 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
             ),
           ),
         )
-        .mockReturnValueOnce(Effect.succeed(output(json({ changeEntries: [] }))));
+        .mockReturnValueOnce(Effect.succeed(output(json({ changeEntries: [] }))))
+        .mockReturnValueOnce(Effect.succeed(output(json({ value: [] }))))
+        .mockReturnValueOnce(Effect.succeed(output(json({ value: [] }))))
+        .mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              json({
+                value: [
+                  { ...oneIteration.value[0], id: 2, sourceRefCommit: { commitId: latestHead } },
+                ],
+              }),
+            ),
+          ),
+        );
       const provider = yield* AzureDevOpsPullRequestProvider.make;
       const detail = yield* provider.getChangeRequest({
         cwd: "/w",
@@ -147,7 +314,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
 
       expect(detail.headSha).toBe(latestHead);
       expect(argsOfCall(2)).toContain("iterationId=2");
-      expect(mockedExecute).toHaveBeenCalledTimes(3);
+      expect(mockedExecute).toHaveBeenCalledTimes(6);
     }),
   );
 

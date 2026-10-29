@@ -129,6 +129,8 @@ describe("getChangeRequest", () => {
         Effect.provide(
           Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
             getPullRequest: () => Effect.succeed(PULL_REQUEST),
+            listPolicyEvaluations: () => Effect.succeed([]),
+            listStatuses: () => Effect.succeed([]),
             listIterations: () =>
               Effect.succeed([ITERATION, { ...ITERATION, id: 4, headCommit: "new-head" }]),
             listIterationChanges: () =>
@@ -156,7 +158,7 @@ describe("getChangeRequest", () => {
   );
 
   it.effect.each(["missing", "failed"] as const)(
-    "leaves the head unavailable when the iteration read is %s",
+    "fails checks rather than returning an empty success when the iteration read is %s",
     (state) =>
       Effect.gen(function* () {
         const provider = yield* make.pipe(
@@ -177,14 +179,15 @@ describe("getChangeRequest", () => {
             }),
           ),
         );
-        const detail = yield* provider.getChangeRequest({
-          cwd: "/w",
-          repository: "acme/web",
-          host: "dev.azure.com",
-          number: 7,
-        });
-        expect(detail.headSha).toBeUndefined();
-        expect(detail.changedFiles).toBe(0);
+        const error = yield* Effect.flip(
+          provider.getChangeRequest({
+            cwd: "/w",
+            repository: "acme/web",
+            host: "dev.azure.com",
+            number: 7,
+          }),
+        );
+        expect(error.reason).toBe("failed");
       }),
   );
 });

@@ -4,6 +4,8 @@ import * as Semaphore from "effect/Semaphore";
 import type { PullRequestCapabilities, PullRequestViewerPermissions } from "@t3tools/contracts";
 
 import * as AzureDevOpsPullRequestCli from "./AzureDevOpsPullRequestCli.ts";
+import { azureDevOpsChecks } from "./azureDevOpsChecks.ts";
+import type { PullRequestChecksState } from "@t3tools/contracts";
 import {
   azureDevOpsFilePatch,
   azureDevOpsUnreadableFilePatch,
@@ -138,6 +140,48 @@ export const make = Effect.gen(function* () {
         detail: "Azure DevOps reviews cannot be written from here yet.",
       }),
     );
+
+  const readChecks = Effect.fn("AzureDevOpsPullRequestProvider.readChecks")(function* (
+    input: { readonly cwd: string; readonly number: number },
+    pullRequest: AzureDevOpsPullRequest,
+    iterations: ReadonlyArray<AzureDevOpsIteration>,
+  ) {
+    const location = pullRequest.location;
+    const latest = iterations.at(-1);
+    if (location === null || latest === undefined)
+      return yield* new AzureDevOpsPullRequestCli.AzureDevOpsPullRequestIncompleteError({
+        command: "az",
+        cwd: input.cwd,
+        number: input.number,
+      });
+    const policies = yield* cli.listPolicyEvaluations({ ...input, location });
+    const statuses = yield* cli.listStatuses({ ...input, location });
+    const after = yield* cli.listIterations({ ...input, location });
+    if (after.at(-1)?.id !== latest.id || after.at(-1)?.headCommit !== latest.headCommit) {
+      return yield* new AzureDevOpsPullRequestCli.AzureDevOpsPullRequestReadError({
+        command: "az",
+        cwd: input.cwd,
+        operation: "readChecks",
+        cause: "PR revision changed while reading checks",
+      });
+    }
+    const checks = azureDevOpsChecks({
+      policies,
+      statuses,
+      headSha: latest.headCommit,
+      iterationId: latest.id,
+      url: pullRequest.url,
+    });
+    const state: PullRequestChecksState | null =
+      checks.length === 0
+        ? null
+        : checks.some((check) => ["failure", "cancelled", "action-required"].includes(check.status))
+          ? "failing"
+          : checks.some((check) => check.status === "pending")
+            ? "pending"
+            : "passing";
+    return { checks, state: pullRequest.state, checksState: state };
+  });
 
   const EMPTY_DIFF_SLICE: ProviderDiffSlice = { patch: "", truncated: false, nextCursor: null };
 
@@ -307,6 +351,21 @@ export const make = Effect.gen(function* () {
         })),
       ),
 
+    getChangeRequestChecks: Effect.fn("AzureDevOpsPullRequestProvider.getChangeRequestChecks")(
+      function* (input) {
+        const pullRequest = yield* cli.getPullRequest(input);
+        if (pullRequest.location === null)
+          return yield* new AzureDevOpsPullRequestCli.AzureDevOpsPullRequestIncompleteError({
+            command: "az",
+            cwd: input.cwd,
+            number: input.number,
+          });
+        const iterations = yield* cli.listIterations({ ...input, location: pullRequest.location });
+        return yield* readChecks(input, pullRequest, iterations);
+      },
+      Effect.mapError(fail("getChangeRequestChecks")),
+    ),
+
     getChangeRequest: Effect.fn("AzureDevOpsPullRequestProvider.getChangeRequest")(
       function* (input) {
         const pullRequest = yield* cli.getPullRequest({ cwd: input.cwd, number: input.number });
@@ -314,9 +373,7 @@ export const make = Effect.gen(function* () {
         const iterations =
           location === null
             ? []
-            : yield* cli
-                .listIterations({ cwd: input.cwd, location, number: input.number })
-                .pipe(Effect.orElseSucceed(() => []));
+            : yield* cli.listIterations({ cwd: input.cwd, location, number: input.number });
         // The trial merge's lastMergeSourceCommit can lag behind a new source push.
         const headSha = iterations.at(-1)?.headCommit;
         const changedFiles =
@@ -331,6 +388,7 @@ export const make = Effect.gen(function* () {
                 Effect.map((listed) => listed.changes.length),
                 Effect.orElseSucceed(() => 0),
               );
+        const { checks, checksState } = yield* readChecks(input, pullRequest, iterations);
         const detail: ProviderChangeRequestDetail = {
           ...toChangeRequest(pullRequest),
           body: pullRequest.body,
@@ -339,7 +397,8 @@ export const make = Effect.gen(function* () {
           mergedAt: pullRequest.state === "merged" ? pullRequest.closedAt : null,
           closedAt: pullRequest.state === "closed" ? pullRequest.closedAt : null,
           reviewers: pullRequest.reviewers,
-          checks: [],
+          checks,
+          checksState,
           mergeCapabilities: { merge: true, squash: true, rebase: false },
           viewerPermissions: AZURE_DEVOPS_VIEWER_PERMISSIONS,
           autoMergeEnabled: pullRequest.autoMergeEnabled,

@@ -69,6 +69,15 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as PullRequestWatchReactor from "./PullRequestWatchReactor.ts";
 import { PULL_REQUEST_WATCH_WAKE_LIMIT } from "./pullRequestWatch.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import { driver as azureDriver } from "@t3tools/source-control-azure-devops/server/driver";
+import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
+import * as PullRequestProviderRegistry from "../pullRequest/PullRequestProviderRegistry.ts";
+import * as PullRequestReadCache from "../pullRequest/PullRequestReadCache.ts";
+import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import * as KeyValueStore from "effect/persistence/KeyValueStore";
+import { HttpClient } from "effect/http";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -2891,6 +2900,221 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         ["#8: stopped watching, could not read it"],
       );
     }),
+  );
+
+  it.effect.each(["approved", "rejected", "status approved", "status rejected", "expired"])(
+    "wakes once through the Azure provider and service when CI becomes %s",
+    (scenario) =>
+      Effect.gen(function* () {
+        const terminal = scenario.endsWith("approved") ? "approved" : "rejected";
+        const statusPolicy = scenario.startsWith("status");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const projectId = ProjectId.make(`azure-ci-${scenario}`);
+        const threadId = ThreadId.make(`azure-ci-${scenario}`);
+        const at = "2026-10-01T00:00:00.000Z";
+        const workspaceRoot = "/workspace/azure-ci";
+        yield* seedProject({
+          projectId,
+          title: "Azure CI",
+          workspaceRoot,
+          defaultModelSelection: null,
+          createdAt: at,
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`azure-create-${scenario}`),
+          threadId,
+          projectId,
+          createdBy: "user",
+          creationSource: "web",
+          title: "Azure CI",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        const repository = "acme/platform/web";
+        const url = "https://dev.azure.com/acme/platform/_git/web/pullrequest/42";
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`azure-watch-${scenario}`),
+          threadId,
+          host: "dev.azure.com",
+          repository,
+          number: 42,
+          watching: true,
+          link: { url, source: "agent" },
+        });
+        let status = "queued";
+        const instance = yield* azureDriver.make.pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              SourceControlRateLimit.layer,
+              Layer.succeed(
+                HttpClient.HttpClient,
+                HttpClient.make(() => Effect.die("Unexpected HTTP request")),
+              ),
+              TestSourceControlHost.layer({
+                process: {
+                  run: ({ args }) => {
+                    const resource = args[args.indexOf("--resource") + 1];
+                    const value = args.includes("account")
+                      ? { user: { name: "agent-user" } }
+                      : args.includes("show")
+                        ? {
+                            pullRequestId: 42,
+                            title: "Azure CI",
+                            status: "active",
+                            sourceRefName: "refs/heads/feature",
+                            targetRefName: "refs/heads/main",
+                            creationDate: at,
+                            repository: {
+                              name: "web",
+                              project: { id: "project-guid", name: "platform" },
+                              webUrl: "https://dev.azure.com/acme/platform/_git/web",
+                            },
+                          }
+                        : resource === "pullRequestIterations"
+                          ? {
+                              value: [
+                                {
+                                  id: 1,
+                                  sourceRefCommit: { commitId: "head" },
+                                  commonRefCommit: { commitId: "base" },
+                                },
+                              ],
+                            }
+                          : resource === "evaluations"
+                            ? {
+                                value: [
+                                  {
+                                    status,
+                                    configuration: {
+                                      id: 14,
+                                      isEnabled: true,
+                                      isBlocking: true,
+                                      type: {
+                                        id: statusPolicy
+                                          ? "status-policy"
+                                          : "0609b952-1397-4640-95ec-e00a01b2c241",
+                                      },
+                                      settings: statusPolicy ? { statusName: "external CI" } : {},
+                                    },
+                                    context: {
+                                      lastMergeSourceCommitId: "head",
+                                      buildDefinitionName: "CI",
+                                      buildId: 123,
+                                      isExpired: scenario === "expired" && status === "rejected",
+                                    },
+                                  },
+                                ],
+                              }
+                            : resource === "pullRequestStatuses" && statusPolicy
+                              ? {
+                                  value: [
+                                    { id: 1, context: { name: "external CI" }, state: "succeeded" },
+                                  ],
+                                }
+                              : resource === "pullRequestIterationChanges"
+                                ? { changeEntries: [] }
+                                : { value: [] };
+                    return Effect.succeed(
+                      TestSourceControlHost.processOutput(JSON.stringify(value)),
+                    );
+                  },
+                },
+              }),
+            ),
+          ),
+        );
+        assert.isNotNull(instance.pullRequests);
+        if (instance.pullRequests === null) return;
+        const project = {
+          id: projectId,
+          title: "Azure CI",
+          workspaceRoot,
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at,
+          updatedAt: at,
+          repositoryIdentity: {
+            canonicalKey: `dev.azure.com/${repository}`,
+            provider: SourceControlProviderKind.make("azure-devops"),
+            displayName: repository,
+            locator: {
+              source: "git-remote" as const,
+              remoteName: "origin",
+              remoteUrl: "https://dev.azure.com/acme/platform/_git/web",
+            },
+          },
+        };
+        const serviceContext = yield* Layer.build(
+          Layer.mergeAll(
+            ServerSettings.layerTest(),
+            Layer.succeed(
+              PullRequestProviderRegistry.PullRequestProviderRegistry,
+              PullRequestProviderRegistry.fromProviders([instance.pullRequests]),
+            ),
+            Layer.mock(ProjectService.ProjectService)({
+              listShells: () => Effect.succeed([project]),
+              getShell: () => Effect.succeedSome(project),
+            }),
+            Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+              resolve: () => Effect.succeed(null),
+            }),
+            Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+              resolveLink: () => undefined,
+              get: () => Effect.succeed(instance.sourceControl),
+            }),
+            SourceControlRateLimit.layer,
+            PullRequestFilesViewed.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+            Layer.effect(PullRequestReadCache.PullRequestReadCache, PullRequestReadCache.make).pipe(
+              Layer.provide(KeyValueStore.layerMemory),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        const service = yield* PullRequestService.make.pipe(Effect.provideContext(serviceContext));
+        const reactor = yield* PullRequestWatchReactor.make.pipe(
+          Effect.provide(NodeServices.layer),
+          Effect.provideService(PullRequestService.PullRequestService, service),
+        );
+        const records = orchestrator.getThreadRecords(threadId, ["messages", "runs"]);
+        yield* reactor.sweep;
+        assert.deepEqual((yield* records).messages, []);
+        status = "running";
+        yield* TestClock.adjust("10 minutes");
+        yield* reactor.sweep;
+        assert.deepEqual((yield* records).messages, []);
+        status = terminal;
+        yield* TestClock.adjust("10 minutes");
+        yield* reactor.sweep;
+        const delivered = yield* records;
+        assert.equal(delivered.messages.length, 1);
+        assert.equal(
+          delivered.messages[0]?.notification?.summary,
+          terminal === "approved" ? "#42: checks passed" : "#42: checks failed",
+        );
+        assert.equal(delivered.runs.length, 1);
+        assert.equal(delivered.runs[0]?.status, "starting");
+        yield* worker.drain();
+        yield* TestClock.adjust("10 minutes");
+        yield* reactor.sweep;
+        assert.equal((yield* records).messages.length, 1);
+        assert.equal((yield* records).runs.length, 1);
+        yield* orchestrator.dispatch({
+          type: "thread.pull-request.watch",
+          commandId: CommandId.make(`azure-stop-${scenario}`),
+          threadId,
+          host: "dev.azure.com",
+          repository,
+          number: 42,
+          watching: false,
+        });
+      }),
   );
 
   it.effect("wakes once for a state it reported, across a restart and a new watch", () =>

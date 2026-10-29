@@ -55,7 +55,12 @@ const RawPullRequestSchema = Schema.Struct({
         name: Schema.optional(Schema.NullOr(Schema.String)),
         webUrl: Schema.optional(Schema.NullOr(Schema.String)),
         project: Schema.optional(
-          Schema.NullOr(Schema.Struct({ name: Schema.optional(Schema.NullOr(Schema.String)) })),
+          Schema.NullOr(
+            Schema.Struct({
+              name: Schema.optional(Schema.NullOr(Schema.String)),
+              id: Schema.optional(Schema.NullOr(Schema.String)),
+            }),
+          ),
         ),
       }),
     ),
@@ -105,6 +110,7 @@ const RawViewerSchema = Schema.Struct({
 
 export interface AzureDevOpsRepositoryLocation {
   readonly project: string;
+  readonly projectId?: string;
   readonly repository: string;
 }
 
@@ -167,7 +173,8 @@ function toLocation(
   const project = trimmed(raw.repository?.project?.name);
   const repository = trimmed(raw.repository?.name);
   if (project === null || repository === null) return null;
-  return { project, repository };
+  const projectId = trimmed(raw.repository?.project?.id);
+  return { project, repository, ...(projectId === null ? {} : { projectId }) };
 }
 
 function toAutoMergeMethod(
