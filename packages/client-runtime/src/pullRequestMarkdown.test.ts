@@ -15,7 +15,7 @@ describe("Azure DevOps PR walkthrough", () => {
       `${thumbnail}\n\n[Watch or download the walkthrough (MP4)](${base}.mp4)`,
     );
     expect(segments).toEqual([
-      { id: "markdown:0", kind: "markdown", text: thumbnail },
+      { id: "markdown:0", kind: "markdown", sourceOffset: 0, text: thumbnail },
       { id: "attachment:1", kind: "attachment", media: "video", url: `${base}.mp4` },
     ]);
     for (const ext of ["gif", "mp4"]) {
