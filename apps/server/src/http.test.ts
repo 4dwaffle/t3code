@@ -29,6 +29,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as AssetSigner from "./assets/AssetSigner.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 
 import {
   injectMcpAppCsp,
@@ -96,6 +97,7 @@ describe("Azure DevOps media failures", () => {
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-azure-http-test-" }),
         Layer.mock(AssetSigner.AssetSigner)({}),
         Layer.mock(WorkspacePaths.WorkspacePaths)({}),
+        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
       ).pipe(Layer.provideMerge(NodeServices.layer));
       const { handler, dispose } = HttpRouter.toWebHandler(layerApp, { disableLogger: true });
       try {
