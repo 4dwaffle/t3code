@@ -65,7 +65,7 @@ export function mediaVideoThumbnailKey(source: MediaVideoPreviewSource): string 
                 source.environmentId,
                 source.resource.cwd,
                 source.resource.url,
-                source.resource.repository ?? "",
+                ("repository" in source.resource ? source.resource.repository : undefined) ?? "",
               ]
             : [
                 "media-video",
