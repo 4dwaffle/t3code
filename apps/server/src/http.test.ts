@@ -27,7 +27,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
-import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import * as AssetSigner from "./assets/AssetSigner.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 
 import {
@@ -94,7 +94,7 @@ describe("Azure DevOps media failures", () => {
         Layer.mock(NativeAppIconResolver.NativeAppIconResolver)({}),
         Layer.mock(Orchestrator.OrchestratorV2)({}),
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-azure-http-test-" }),
-        Layer.mock(ServerSecretStore.ServerSecretStore)({}),
+        Layer.mock(AssetSigner.AssetSigner)({}),
         Layer.mock(WorkspacePaths.WorkspacePaths)({}),
       ).pipe(Layer.provideMerge(NodeServices.layer));
       const { handler, dispose } = HttpRouter.toWebHandler(layerApp, { disableLogger: true });
