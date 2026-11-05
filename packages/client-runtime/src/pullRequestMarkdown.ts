@@ -2,14 +2,19 @@ import { SOURCE_CONTROL_MEDIA_ASSET, type AssetResource } from "@t3tools/contrac
 import { sourceControlClients, type ReferenceAutolink } from "./sourceControlClients.ts";
 import { azureDevOpsMediaLocation } from "@t3tools/shared/azureDevOpsMedia";
 
-export function pullRequestMediaResource(url: string, cwd: string) {
+export function pullRequestMediaResource(url: string, cwd: string, repository?: string) {
   if (url.startsWith("//")) url = `https:${url}`;
   const azure = azureDevOpsMediaLocation(url);
   if (azure)
     return { _tag: "azure-devops-media", cwd, url: azure.fetchUrl } satisfies AssetResource;
   const media = sourceControlClients.mediaUrl(url);
   return media
-    ? ({ _tag: SOURCE_CONTROL_MEDIA_ASSET, cwd, url: media.fetchUrl } satisfies AssetResource)
+    ? ({
+        _tag: SOURCE_CONTROL_MEDIA_ASSET,
+        cwd,
+        url: media.fetchUrl,
+        ...(repository ? { repository } : {}),
+      } satisfies AssetResource)
     : null;
 }
 

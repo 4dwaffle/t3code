@@ -245,6 +245,8 @@ interface ChatMarkdownProps {
   /** Loads media a source control host keeps behind a credential through the server, which holds
       `cwd`'s; without it a private repository's uploads load unauthenticated and 404. */
   sourceControlMedia?: boolean | undefined;
+  /** The change request's repository, when it can differ from the checkout at `cwd`. */
+  sourceControlMediaRepository?: string | undefined;
   headingLevelOffset?: number | undefined;
 }
 
@@ -491,6 +493,7 @@ function useChatMarkdownState({
   renderContextReference,
   headingLevelOffset = 0,
   sourceControlMedia = false,
+  sourceControlMediaRepository,
 }: ChatMarkdownProps) {
   const resolvedTheme = useRenderedAppearance();
   const markdownRef = useRef<HTMLElement>(null);
@@ -553,6 +556,7 @@ function useChatMarkdownState({
       threadRef,
       environmentId: environmentId ?? undefined,
       sourceControlMedia,
+      sourceControlMediaRepository,
       httpBaseUrl:
         environmentId === null ? undefined : readPreparedConnection(environmentId)?.httpBaseUrl,
       createAssetUrl,
@@ -591,6 +595,7 @@ function useChatMarkdownState({
       threadRef,
       environmentId: environmentId ?? undefined,
       sourceControlMedia,
+      sourceControlMediaRepository,
       // Read the connection on click; reconnect replaces it, and subscriptions would refresh every markdown
       // context.
       httpBaseUrl:
@@ -920,6 +925,7 @@ function useChatMarkdownState({
     expandMedia,
     fileLinkChip,
     sourceControlMedia,
+    sourceControlMediaRepository,
     renderContextReference,
     headingLevelOffset,
     imageBaseDir,
@@ -1394,6 +1400,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       cwd,
       environmentId,
       sourceControlMedia,
+      sourceControlMediaRepository,
       imageBaseDir,
       threadRef,
       workspaceMutationId,
@@ -1466,7 +1473,9 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const kind = mediaKind ?? "image";
     const directUri = imageSource._tag === "Direct" ? imageSource.uri : null;
     const mediaResource =
-      directUri === null || cwd === undefined ? null : pullRequestMediaResource(directUri, cwd);
+      directUri === null || cwd === undefined
+        ? null
+        : pullRequestMediaResource(directUri, cwd, sourceControlMediaRepository);
     if (
       sourceControlMedia &&
       cwd !== undefined &&

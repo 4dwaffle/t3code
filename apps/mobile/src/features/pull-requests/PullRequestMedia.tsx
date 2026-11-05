@@ -1,8 +1,10 @@
 import { createContext, useContext, useState } from "react";
-import { pullRequestMediaSource, pullRequestImageSource } from "./pullRequestMediaSource";
+import {
+  pullRequestMediaSource,
+  pullRequestImageSource,
+  type PullRequestMediaLocation,
+} from "./pullRequestMediaSource";
 import { useFilePreviewGallery } from "../../components/FilePreviewGallery";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { pullRequestMediaResource } from "@t3tools/client-runtime/pull-request-markdown";
 import { videoMimeType } from "@t3tools/shared/video";
 import { Pressable, View } from "react-native";
 import { Image } from "expo-image";
@@ -21,21 +23,19 @@ import {
 
 export const PullRequestMediaVisibleContext = createContext(true);
 
-export const PullRequestMediaContext = createContext<{
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-} | null>(null);
+export const PullRequestMediaContext = createContext<PullRequestMediaLocation | null>(null);
 
 export function usePullRequestMediaUrl(url: string) {
   const context = useContext(PullRequestMediaContext);
-  const resource = context ? pullRequestMediaResource(url, context.cwd) : null;
+  const source = pullRequestMediaSource(url, context);
+  const resource = "resource" in source ? (source.resource ?? null) : null;
   const asset = useAssetUrlState(context?.environmentId ?? null, resource);
   const refresh = useRefreshAssetUrl(context?.environmentId ?? null, resource);
   return {
     uri: asset._tag === "Success" ? asset.url : resource ? null : url,
     cacheKey: context && resource ? assetImageCacheKey(context.environmentId, resource) : undefined,
     unavailable: resource !== null && asset._tag === "Failure",
-    source: pullRequestMediaSource(url, context),
+    source,
     resolvePlaybackUri: resource ? async () => (await refresh()) ?? null : undefined,
   };
 }

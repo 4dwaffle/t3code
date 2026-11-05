@@ -19,6 +19,8 @@ export const PullRequestMarkdownContext = createContext<{
   remarkPlugins: PluggableList;
   lineBreaks: boolean;
   threadRef: ScopedThreadRef | null;
+  /** The change request's `owner/name`, which can differ from the checkout the body renders in. */
+  repository: string | null;
 } | null>(null);
 
 function PullRequestAssetVideo({
@@ -66,6 +68,7 @@ export function PullRequestMarkdown({
 }) {
   const segments = splitPullRequestBody(text);
   const context = useContext(PullRequestMarkdownContext);
+  const repository = context?.repository ?? undefined;
   const resolvedThreadRef = threadRef ?? context?.threadRef ?? undefined;
   return (
     <div
@@ -88,6 +91,7 @@ export function PullRequestMarkdown({
               {...(context ? { extraRemarkPlugins: context.remarkPlugins } : {})}
               lineBreaks={lineBreaks ?? context?.lineBreaks ?? false}
               sourceControlMedia
+              sourceControlMediaRepository={repository}
               onTaskListChange={
                 onTaskListChange && segment.kind === "markdown"
                   ? ({ markerOffset, checked }) =>
@@ -102,7 +106,7 @@ export function PullRequestMarkdown({
         }
         const hostMedia = sourceControlClients.mediaUrl(segment.url);
         const resource =
-          segment.media === "video" ? pullRequestMediaResource(segment.url, cwd) : null;
+          segment.media === "video" ? pullRequestMediaResource(segment.url, cwd, repository) : null;
         if (resource !== null) {
           return (
             <PullRequestAssetVideo

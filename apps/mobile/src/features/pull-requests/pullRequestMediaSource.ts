@@ -5,11 +5,14 @@ import type { FilePreviewItem } from "../../components/FilePreviewModal.types";
 export interface PullRequestMediaLocation {
   readonly environmentId: EnvironmentId;
   readonly cwd: string;
+  readonly repository?: string;
 }
 
 /** Keep the original resource identity so previewers can resolve and renew its capability. */
 export function pullRequestMediaSource(url: string, location: PullRequestMediaLocation | null) {
-  const resource = location ? pullRequestMediaResource(url, location.cwd) : null;
+  const resource = location
+    ? pullRequestMediaResource(url, location.cwd, location.repository)
+    : null;
   return location && resource
     ? {
         environmentId: location.environmentId,
