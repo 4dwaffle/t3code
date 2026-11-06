@@ -442,6 +442,16 @@ export const layerAssetRoute = HttpRouter.add(
             request.method === "GET" ? request.headers.range : undefined,
             request.headers["if-range"],
             request.method === "HEAD" ? "HEAD" : "GET",
+          ).pipe(
+            Effect.map((response) =>
+              file.mimeType === "image/svg+xml"
+                ? HttpServerResponse.setHeader(
+                    response,
+                    "content-security-policy",
+                    SVG_CONTENT_SECURITY_POLICY,
+                  )
+                : response,
+            ),
           ),
         ),
         Effect.tapError((cause) =>
